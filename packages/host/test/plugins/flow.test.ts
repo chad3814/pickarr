@@ -27,9 +27,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { DownloadClients, MediaPlugin, PluginContext } from '@pickarr/contract';
 import { createFakeLookupService, resolvedEnvelope } from '@pickarr/openmetadata/testing';
 import type { LookupEnvelope, Media } from '@pickarr/openmetadata';
@@ -73,6 +73,21 @@ const SCRIPT = new Map<string, LookupEnvelope>([
         { id: 'e', kind: 'series', title: 'The Bear', releaseDate: null, year: 2022, provider: 'tmdb', providerRef: 'tmdb:series:100' },
       ],
       people: [{ providerRef: 'tmdb:person:1', name: 'A Actor', role: 'performer', characterName: 'Carmy', billingOrder: 0 }],
+    }),
+  })],
+  // A season pack, not an episode: `kind: 'season'` with its season number in
+  // `details` and the series as its one parent, which is what `applyTv`
+  // records as a `tv_release` with a season and no episode number.
+  ['season.pack', resolvedEnvelope({
+    lookupId: 'lookup-tv-season',
+    media: media({
+      kind: 'season',
+      providerRef: 'tmdb:season:10',
+      title: 'Season 3',
+      details: { seasonNumber: 3 },
+      parents: [
+        { id: 'e', kind: 'series', title: 'The Bear', releaseDate: null, year: 2022, provider: 'tmdb', providerRef: 'tmdb:series:100' },
+      ],
     }),
   })],
   ['film.mkv', resolvedEnvelope({
@@ -330,30 +345,68 @@ test('each plugin identifies its own feed item end to end, through the job the h
 
 /**
  * Identifies one item through the real flow, then answers the media item id
- * the television plugin ended up with.
+ * the plugin ended up with, read from the plugin's own release table.
  *
  * Shared by the import tests below so that none of them hand-writes a
  * `tv_release`, a `tv_season` or a `media_item`: what the shape resolves
  * against is what the lookup actually wrote, which is the only way an
  * end-to-end path assertion says anything about the plugin.
  */
+async function identified(
+  fixtureResult: ReturnType<typeof fixture>,
+  pluginId: string,
+  filename: string,
+  releaseTable: string,
+): Promise<{ rssItemId: number; mediaItemId: number }> {
+  const { raw, host, wrapped } = fixtureResult;
+  const owner = wrapped.find((entry) => entry.plugin.id === pluginId);
+  assert.ok(owner !== undefined, `the ${pluginId} plugin is registered`);
+  const { rssItemId } = seedFeed(raw, pluginId, filename);
+
+  await host.notifyNewRssItems([rssItemId]);
+  const job = enqueuedLookup(raw, pluginId);
+  const handler = owner.plugin.jobs[job.kind];
+  assert.ok(handler !== undefined);
+  await handler(job, owner.context());
+
+  const mediaItemId = raw.prepare(`SELECT media_item_id AS id FROM ${releaseTable}`).get()?.['id'];
+  assert.equal(typeof mediaItemId, 'number', `the lookup wrote no ${releaseTable} row to import against`);
+  return { rssItemId, mediaItemId: Number(mediaItemId) };
+}
+
+/** An episode of The Bear, season 3 episode 1. */
 async function identifiedEpisode(
   fixtureResult: ReturnType<typeof fixture>,
 ): Promise<{ rssItemId: number; mediaItemId: number }> {
-  const { raw, host, wrapped } = fixtureResult;
-  const tv = wrapped.find((entry) => entry.plugin.id === 'tv');
-  assert.ok(tv !== undefined, 'the television plugin is registered');
-  const { rssItemId } = seedFeed(raw, 'tv', 'episode.mkv');
+  return identified(fixtureResult, 'tv', 'episode.mkv', 'tv_release');
+}
 
-  await host.notifyNewRssItems([rssItemId]);
-  const job = enqueuedLookup(raw, 'tv');
-  const handler = tv.plugin.jobs[job.kind];
-  assert.ok(handler !== undefined);
-  await handler(job, tv.context());
+/** Season 3 of The Bear as one pack: a `tv_release` with a season and no episode number. */
+async function identifiedSeason(
+  fixtureResult: ReturnType<typeof fixture>,
+): Promise<{ rssItemId: number; mediaItemId: number }> {
+  return identified(fixtureResult, 'tv', 'season.pack', 'tv_release');
+}
 
-  const mediaItemId = raw.prepare('SELECT media_item_id AS id FROM tv_release').get()?.['id'];
-  assert.equal(typeof mediaItemId, 'number', 'the lookup wrote no tv_release row to import against');
-  return { rssItemId, mediaItemId: Number(mediaItemId) };
+/** A film, `A Film` of 2026. */
+async function identifiedMovie(
+  fixtureResult: ReturnType<typeof fixture>,
+): Promise<{ rssItemId: number; mediaItemId: number }> {
+  return identified(fixtureResult, 'movie', 'film.mkv', 'movie_detail');
+}
+
+/** Every regular file below `dir`, relative to it and sorted, so a tree compares whole. */
+async function tree(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => relative(dir, join(entry.parentPath, entry.name)))
+    .toSorted();
+}
+
+/** The `tv_placement` rows, as relative paths in order. */
+function tvPlacements(raw: DatabaseSync): unknown[] {
+  return raw.prepare('SELECT relative_path AS p FROM tv_placement ORDER BY relative_path').all().map((row) => row['p']);
 }
 
 /** Writes one plugin's destination directly -- `saveDestination` has its own tests. */
@@ -424,6 +477,135 @@ test('spec 2026-09-22 §4.1: an episode delivered as a directory places its one 
     );
     const placed = raw.prepare('SELECT relative_path AS p FROM tv_placement').all().map((row) => row['p']);
     assert.deepEqual(placed, ['The.Bear.S03E01.1080p-GRP.mkv']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const TV_SHAPE = '{series}/Season {season}/{series} - S{season}E{episode}.{ext}';
+
+/**
+ * A season pack of The Bear as a client leaves it: three episodes, an
+ * `.nfo`, and a sample in its own directory.
+ */
+async function seasonPack(downloads: string): Promise<string> {
+  const download = join(downloads, 'The.Bear.S03.1080p-GRP');
+  await mkdir(join(download, 'Sample'), { recursive: true });
+  await writeFile(join(download, 'The.Bear.S03E01.1080p-GRP.mkv'), 'episode one');
+  await writeFile(join(download, 'The.Bear.S03E02.1080p-GRP.mkv'), 'episode two');
+  await writeFile(join(download, 'The.Bear.S03E05.1080p-GRP.mkv'), 'episode five');
+  await writeFile(join(download, 'The.Bear.S03.1080p-GRP.nfo'), 'info');
+  await writeFile(join(download, 'Sample', 'The.Bear.S03E01.sample.mkv'), 'sample');
+  return download;
+}
+
+test('spec 2026-09-22 §4.2: a season pack places each episode at its own path, and nothing else', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedSeason(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    await mkdir(root);
+    const download = await seasonPack(join(dir, 'downloads'));
+    destinationFor(raw, 'tv', root, TV_SHAPE);
+
+    await host.deliverToPlugin('tv', { path: download, sizeBytes: 4096, downloadClientId: 1, rssItemId, mediaItemId });
+
+    // `Season 03` from the season the lookup wrote; `E01`, `E02`, `E05`
+    // from each entry's own filename, because the pack's one media item has
+    // no episode number. Before that fallback every entry resolved to
+    // `The Bear - S03E.mkv`: one placed, the next refused.
+    assert.deepEqual(await tree(root), [
+      join('The Bear', 'Season 03', 'The Bear - S03E01.mkv'),
+      join('The Bear', 'Season 03', 'The Bear - S03E02.mkv'),
+      join('The Bear', 'Season 03', 'The Bear - S03E05.mkv'),
+    ]);
+    assert.equal(await readFile(join(root, 'The Bear', 'Season 03', 'The Bear - S03E05.mkv'), 'utf8'), 'episode five');
+    assert.deepEqual(tvPlacements(raw), [
+      'The.Bear.S03E01.1080p-GRP.mkv',
+      'The.Bear.S03E02.1080p-GRP.mkv',
+      'The.Bear.S03E05.1080p-GRP.mkv',
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('spec 2026-09-22 §7: a pack refused part way resumes on the next delivery, without refusing what it already placed', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedSeason(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'tv');
+    const season = join(root, 'The Bear', 'Season 03');
+    await mkdir(season, { recursive: true });
+    // The second copy's destination, occupied before the first delivery.
+    // Entries are placed in relative-path order, so E01 is copied, E02 is
+    // refused, and E05 is never reached.
+    await writeFile(join(season, 'The Bear - S03E02.mkv'), 'in the way');
+    const download = await seasonPack(join(dir, 'downloads'));
+    destinationFor(raw, 'tv', root, TV_SHAPE);
+    const file = { path: download, sizeBytes: 4096, downloadClientId: 1, rssItemId, mediaItemId };
+
+    await assert.rejects(() => host.deliverToPlugin('tv', file), /destination-exists/);
+    assert.deepEqual(await tree(root), [
+      join('The Bear', 'Season 03', 'The Bear - S03E01.mkv'),
+      join('The Bear', 'Season 03', 'The Bear - S03E02.mkv'),
+    ]);
+    assert.equal(await readFile(join(season, 'The Bear - S03E02.mkv'), 'utf8'), 'in the way');
+    assert.deepEqual(tvPlacements(raw), ['The.Bear.S03E01.1080p-GRP.mkv']);
+
+    // The obstacle cleared, the next tick delivers the same row again. E01
+    // is already in the library: without the placement record it would be
+    // refused `destination-exists` by its own earlier copy.
+    await rm(join(season, 'The Bear - S03E02.mkv'));
+    await host.deliverToPlugin('tv', file);
+
+    assert.deepEqual(await tree(root), [
+      join('The Bear', 'Season 03', 'The Bear - S03E01.mkv'),
+      join('The Bear', 'Season 03', 'The Bear - S03E02.mkv'),
+      join('The Bear', 'Season 03', 'The Bear - S03E05.mkv'),
+    ]);
+    assert.equal(await readFile(join(season, 'The Bear - S03E02.mkv'), 'utf8'), 'episode two');
+    assert.deepEqual(tvPlacements(raw), [
+      'The.Bear.S03E01.1080p-GRP.mkv',
+      'The.Bear.S03E02.1080p-GRP.mkv',
+      'The.Bear.S03E05.1080p-GRP.mkv',
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('spec 2026-09-22 §9: the Swiss Family Robinson directory places its iso, and not the mds beside it', async () => {
+  const result = fixture();
+  const { raw, host } = result;
+  const { rssItemId, mediaItemId } = await identifiedMovie(result);
+
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-flow-import-'));
+  try {
+    const root = join(dir, 'movies');
+    await mkdir(root);
+    const download = join(dir, 'downloads', 'Swiss.Family.Robinson.1960.WIDESCREEN.NTSC.USA.DVD9-AndreMor');
+    await mkdir(download, { recursive: true });
+    await writeFile(join(download, 'Swiss Family Robinson (1960) (USA).iso'), 'iso bytes');
+    await writeFile(join(download, 'Swiss Family Robinson (1960) (USA).mds.mds'), 'mds');
+    destinationFor(raw, 'movie', root, '{title} ({year})/{title} ({year}).{ext}');
+
+    await host.deliverToPlugin('movie', { path: download, sizeBytes: 4096, downloadClientId: 1, rssItemId, mediaItemId });
+
+    // The title and year are the lookup's (`A Film`, 2026), not the
+    // download's; the extension is the entry's own.
+    assert.deepEqual(await tree(root), [join('A Film (2026)', 'A Film (2026).iso')]);
+    assert.equal(await readFile(join(root, 'A Film (2026)', 'A Film (2026).iso'), 'utf8'), 'iso bytes');
+    assert.deepEqual(
+      raw.prepare('SELECT relative_path AS p FROM movie_placement').all().map((row) => row['p']),
+      ['Swiss Family Robinson (1960) (USA).iso'],
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

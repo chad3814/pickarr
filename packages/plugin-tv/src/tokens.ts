@@ -17,8 +17,9 @@
  * would put part of the answer somewhere a reader has to go and find. The
  * *functions* are shared; the list is not.
  */
-import type { TokenResolver, TokensFor, TvTokenName } from '@pickarr/contract';
+import type { DownloadedFile, TokenResolver, TokensFor, TvTokenName } from '@pickarr/contract';
 import {
+  episodeMarker,
   mediaItemInteger,
   mediaItemText,
   paddedNumber,
@@ -44,28 +45,58 @@ const resolveSeries: TokenResolver = async (file, ctx) => mediaItemText(
 );
 
 /**
+ * The `S..E..` marker in the last segment of `file.path`, or `null`.
+ *
+ * During an import the engine calls every resolver once per placed entry,
+ * with `file.path` set to *that entry's* path rather than the download's --
+ * so for a pack this is the one file being copied, and its marker is the
+ * only place that file's own episode is written down. Both separators, as
+ * `resolveFilename` splits, because the path is the host's.
+ */
+function markerOf(file: DownloadedFile): ReturnType<typeof episodeMarker> {
+  const segments = file.path.split(/[/\\]/);
+  return episodeMarker(segments[segments.length - 1] ?? '');
+}
+
+/**
  * The season number, zero-padded to two digits -- design spec §8.2, applied
  * here because this is the only place in the chain that knows the value is
  * a number. See `paddedNumber`.
  *
- * `null` for a series pack, and for an episode whose service gave no season
- * parent: `tv_release.season_id` is nullable and `tv_season.season_number`
- * is too, so both are real. `resolveShape` drops the segment rather than
- * writing a hole (§8.8).
+ * The database first: an episode's own season, or a season pack's. When it
+ * has none -- a series pack, whose release has no season parent, or an
+ * episode whose service gave none (`tv_release.season_id` and
+ * `tv_season.season_number` are both nullable) -- the season comes from the
+ * marker in the entry's filename (see `markerOf`), so each file of a series
+ * pack lands in its own season. `null` when neither says, and
+ * `resolveShape` drops the segment rather than writing a hole (§8.8).
  */
 const resolveSeason: TokenResolver = async (file, ctx) => paddedNumber(mediaItemInteger(
   ctx,
   file,
   `SELECT n.season_number FROM tv_release r JOIN tv_season n ON n.id = r.season_id
     WHERE r.media_item_id = ?`,
-));
+) ?? markerOf(file)?.season ?? null);
 
-/** The episode number, padded the same way. `null` for a season or series pack. */
-const resolveEpisode: TokenResolver = async (file, ctx) => paddedNumber(mediaItemInteger(
-  ctx,
-  file,
-  'SELECT episode_number FROM tv_release WHERE media_item_id = ?',
-));
+/**
+ * The episode number, padded the same way.
+ *
+ * The database first: an episode's own `episode_number`. A season or series
+ * pack has none -- one media item stands for every file in it -- so the
+ * episode comes from the marker in the entry's filename (see `markerOf`);
+ * without that fallback every entry of a pack resolved to one destination,
+ * the first was placed misnamed and the rest refused `destination-exists`.
+ * A multi-episode file names its first episode, then `-E` and each further
+ * one, so `S01E01E02.mkv` gives `01-E02` and the canonical
+ * `S{season}E{episode}` shape reads `S01E01-E02`. `null` when neither says.
+ */
+const resolveEpisode: TokenResolver = async (file, ctx) => {
+  const stored = mediaItemInteger(ctx, file, 'SELECT episode_number FROM tv_release WHERE media_item_id = ?');
+  if (stored !== null) return paddedNumber(stored);
+  const marker = markerOf(file);
+  if (marker === null) return null;
+  return marker.episodes.map((episode) => paddedNumber(episode)).join('-E');
+};
 
 export const TV_TOKENS: TokensFor<TvTokenName> = {
   series: resolveSeries,
