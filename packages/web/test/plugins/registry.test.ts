@@ -14,14 +14,30 @@ import { BROWSER_PLUGINS, pluginFor } from '../../src/plugins/registry.ts';
 
 const SRC = join(import.meta.dirname, '../../src');
 
-/** Every `.ts`/`.tsx` file under `dir`, recursively. Absolute paths. */
+/**
+ * Every `.ts`, `.tsx` and `.css` file under `dir`, recursively. Absolute
+ * paths.
+ *
+ * **`.css` is here because the scan could not see a stylesheet, and the
+ * Global Constraint is stated over `packages/web/src`, which includes
+ * `src/styles/`.** The whole-branch review injected
+ * `.category-tv { color: red; }` into `styles/library.css` and the id scan
+ * below stayed green, while a plain `'tv'` in `library/postPick.ts` redded
+ * it -- so the file set was the hole, not the pattern. A per-plugin style
+ * rule is exactly the second place naming a plugin that acceptance 7
+ * exists to forbid, and since web owns every card's styling (design spec
+ * §2, as amended) web's stylesheet is the *likely* shape of the next
+ * plugin's arrival. Six `.css` files live under `src` and none named an id
+ * when this was widened.
+ */
 async function sourceFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const nested = await Promise.all(
     entries.map(async (entry) => {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) return sourceFiles(path);
-      return entry.name.endsWith('.ts') || entry.name.endsWith('.tsx') ? [path] : [];
+      const scanned = ['.ts', '.tsx', '.css'].some((extension) => entry.name.endsWith(extension));
+      return scanned ? [path] : [];
     }),
   );
   return nested.flat();
@@ -125,15 +141,38 @@ test("web's src imports each plugin's /browser subpath, never its package root",
   //
   // `bundle.test.ts` is the other half and asserts over the built artifact,
   // which is stronger -- it catches a root import arriving through any
-  // path, not only a literal specifier. It also skips when nothing has been
-  // built, and `npm run check` never builds. This half needs no build.
+  // path, not only a literal specifier. It skips when there is no current
+  // bundle to read and `npm run check` still never builds, so the two are
+  // not interchangeable: that half is real in CI only because the `check`
+  // job now runs `npm run build` first, and real locally only when someone
+  // keeps the same order. This half needs no build and is what fails fast.
+  //
+  // **Matched on the quoted specifier, not on an import form.** The first
+  // version was `/from\s+'(@pickarr\/plugin-[a-z0-9-]+)'/`, and the
+  // whole-branch review injected four forms into `src/main.tsx` and ran all
+  // seven of these tests against each: the `from '...'` form was caught and
+  // the bare side-effect form, the dynamic `await import('...')` form and
+  // the double-quoted form were all missed. In `main.tsx` all four redded
+  // the id scan above incidentally, because `\btv\b` matches `plugin-tv` --
+  // but `plugins/registry.ts` is the one file that scan skips and the one
+  // file that legitimately imports plugins, and there the three evading
+  // forms cleared every test in this file. The build caught them; nothing
+  // in `npm run check` did. A quoted string that *is* the package root
+  // cannot be written in any import form without matching this, and a
+  // subpath cannot match it at all -- `/` is outside the character class,
+  // so `'@pickarr/plugin-tv/browser'` is not a hit.
+  //
+  // The cost is that prose quoting a root specifier is a hit too. Nothing
+  // under `src` does, and a comment that spells the forbidden import
+  // exactly is better reworded than exempted -- the same call the id scan's
+  // seven rewordings made.
   //
   // **`@pickarr/plugin-ui` is exempt, by name and deliberately.** It is the
   // seam package itself: it has no `index.ts` reaching a lookup service, no
   // `node:` import anywhere in its graph, and no `/browser` subpath to
   // prefer -- `packages/plugin-ui/package.json` exports its root and
   // nothing else. Task 1 pinned that its root import bundles clean.
-  const ROOT_IMPORT = /from\s+'(@pickarr\/plugin-[a-z0-9-]+)'/g;
+  const ROOT_IMPORT = /['"](@pickarr\/plugin-[a-z0-9-]+)['"]/g;
   const offenders: string[] = [];
   for (const [file, text] of await sources()) {
     for (const [, specifier] of text.matchAll(ROOT_IMPORT)) {
