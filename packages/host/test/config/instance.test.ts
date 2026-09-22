@@ -11,12 +11,12 @@ const withPath = async (body: (path: string) => Promise<void>) => {
   try { await body(join(dir, 'pickarr.config.json')); } finally { await rm(dir, { recursive: true, force: true }); }
 };
 
-const portSchema = z.object({ port: z.number().int().default(8787) }).prefault({});
+const portSchema = z.object({ port: z.number().int().default(7676) }).prefault({});
 
 test('an absent section gets the schema defaults', async () => {
   await withPath(async (path) => {
     const config = await openConfig({ path });
-    assert.deepEqual(config.register('server', portSchema).current, { port: 8787 });
+    assert.deepEqual(config.register('server', portSchema).current, { port: 7676 });
   });
 });
 

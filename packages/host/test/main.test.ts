@@ -1219,7 +1219,7 @@ test('an empty PICKARR_READ_API_HOST, PICKARR_READ_API_PORT or PICKARR_DATABASE 
 
   await withConfigFile({}, async (settings) => {
     assert.equal(settings.readHost, '0.0.0.0', 'empty is unset, so the schema default applies with no file either');
-    assert.equal(settings.port, 8787, 'empty is unset, so the schema default applies with no file either');
+    assert.equal(settings.port, 7676, 'empty is unset, so the schema default applies with no file either');
     assert.equal(settings.databasePath, '/config/pickarr.db', 'empty is unset, so the schema default applies with no file either');
   });
 });
@@ -1258,7 +1258,7 @@ test('an empty PICKARR_CONFIG resolves to exactly the same file as an absent one
 test('with neither a variable nor a file, the schema defaults apply', async () => {
   await withConfigFile({}, async (settings) => {
     assert.equal(settings.readHost, '0.0.0.0');
-    assert.equal(settings.port, 8787);
+    assert.equal(settings.port, 7676);
     assert.equal(settings.databasePath, '/config/pickarr.db');
   });
 });
@@ -1288,8 +1288,8 @@ test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is no
   assert.equal(resolvePublicUrl(''), undefined, 'and an empty variable is an unset one');
   assert.equal(resolvePublicUrl('https://pickarr.example'), 'https://pickarr.example');
   assert.equal(
-    resolvePublicUrl('http://pickarr.example:8787/'),
-    'http://pickarr.example:8787/',
+    resolvePublicUrl('http://pickarr.example:7676/'),
+    'http://pickarr.example:7676/',
     'a trailing slash is left alone here and normalized where it matters, by createAuth',
   );
 
@@ -1312,12 +1312,12 @@ test('resolvePublicUrl reads PICKARR_PUBLIC_URL, and refuses anything that is no
   // which is why an origin rather than a pathname is what this enforces.
   const refused = [
     'pickarr.example',
-    'pickarr.example:8787',
+    'pickarr.example:7676',
     'myapp://pickarr',
     '/pickarr',
     'http://',
     'http://pickarr.example/pickarr',
-    'https://pickarr.example:8787/pickarr/',
+    'https://pickarr.example:7676/pickarr/',
     'http://pickarr.example/?x=1',
     'http://pickarr.example/#frag',
   ];

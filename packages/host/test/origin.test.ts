@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { assertOriginOnly } from '../src/origin.ts';
 
 test('an origin is accepted, with or without a trailing slash', () => {
-  for (const value of ['http://host', 'https://host', 'http://host:8787', 'https://host/', 'http://127.0.0.1:8787']) {
+  for (const value of ['http://host', 'https://host', 'http://host:7676', 'https://host/', 'http://127.0.0.1:7676']) {
     assert.doesNotThrow(() => { assertOriginOnly(value, 'LABEL'); }, `${value} must be accepted`);
   }
 });

@@ -12,12 +12,12 @@ export default defineConfig({
   // while every sign-in is refused. `strictPort` turns that into a refusal to
   // start, which is the failure you can read.
   //
-  // `8787` is the host's `DEFAULT_PORT`, and it is a literal here on purpose:
+  // `7676` is the host's `DEFAULT_PORT`, and it is a literal here on purpose:
   // `packages/web` does not import from `packages/host`. The two are held
   // together by `scripts/check-dev-scripts.test.ts` instead.
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://localhost:8787' },
+    proxy: { '/api': 'http://localhost:7676' },
   },
 });

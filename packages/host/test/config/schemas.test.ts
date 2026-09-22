@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from '../../src/config/schemas.ts';
 
 test('every host namespace parses an absent section into its defaults', () => {
-  assert.deepEqual(serverConfigSchema.parse(undefined), { host: '0.0.0.0', port: 8787 });
+  assert.deepEqual(serverConfigSchema.parse(undefined), { host: '0.0.0.0', port: 7676 });
   assert.deepEqual(databaseConfigSchema.parse(undefined), { path: '/config/pickarr.db' });
   assert.deepEqual(secretsConfigSchema.parse(undefined), { baseDir: '/run/secrets' });
 });
@@ -13,7 +13,7 @@ test('the server defaults match what the auth slice chose', () => {
   // 0.0.0.0 because a session is what protects the socket now, not the
   // interface it listens on.
   assert.equal(parsed.host, '0.0.0.0');
-  assert.equal(parsed.port, 8787);
+  assert.equal(parsed.port, 7676);
 });
 
 test('a publicUrl with a path is refused in the file, exactly as it is in the environment', () => {
@@ -32,7 +32,7 @@ test('a port outside the legal range is refused', () => {
 });
 
 test('an unknown key inside a namespace is refused rather than silently dropped', () => {
-  assert.throws(() => serverConfigSchema.parse({ prot: 8787 }), /unrecognized|unknown/i);
+  assert.throws(() => serverConfigSchema.parse({ prot: 7676 }), /unrecognized|unknown/i);
 });
 
 test('webRoot is absent by default, and a configured one passes through unmodified', () => {

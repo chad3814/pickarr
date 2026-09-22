@@ -155,7 +155,7 @@ function isPrivateIPv4(hostname: string): boolean {
  * same caveat: a local ULA of `fd45:…` does not make `fd00::1` unreachable
  * here, because nothing compares the two (measured -- both pass).
  *
- * The brackets are how it arrives -- `new URL('http://[::1]:8787').hostname`
+ * The brackets are how it arrives -- `new URL('http://[::1]:7676').hostname`
  * is `'[::1]'`, not `'::1'` -- and the address inside is already canonical,
  * because the URL parser lower-cases every hextet and compresses the longest
  * run of zeroes. So `[0:0:0:0:0:0:0:1]` reaches here as `[::1]` and the
@@ -222,13 +222,13 @@ function isPrivateIPv6(hostname: string): boolean {
  *
  * **What that scheme test actually catches is `ws:`, `wss:` and `ftp:`, not
  * `myapp:`** -- measured, by deleting the line and re-running both shapes.
- * Those three are WHATWG *special* schemes, so `new URL('ws://127.0.0.1:8787')`
+ * Those three are WHATWG *special* schemes, so `new URL('ws://127.0.0.1:7676')`
  * reports hostname `127.0.0.1` (which `isPrivateIPv4` places) *and* a real
  * tuple origin, and without the test this function would hand that origin
- * back as trusted: a sign-up carrying `Origin: ws://127.0.0.1:8787` answers
+ * back as trusted: a sign-up carrying `Origin: ws://127.0.0.1:7676` answers
  * 200 and writes a row. A custom scheme cannot get that far -- its `.origin`
  * is the opaque string `'null'`, which Better Auth refuses outright before
- * matching anything, so `myapp://127.0.0.1:8787` is refused with the test and
+ * matching anything, so `myapp://127.0.0.1:7676` is refused with the test and
  * without it. The isolating case is pinned by
  * `test/auth/instance.test.ts`'s `ws:` test, and it is the only thing in the
  * suite that notices: with this line deleted, 1936 of 1937 still pass and
@@ -289,7 +289,7 @@ function publicOrigin(publicUrl: string): string {
  * `origin || referer`.** So a state-changing request that omits `Origin` and
  * carries a `Referer` is checked against the referring *url*, and nothing
  * here places it: measured, a sign-up with only
- * `Referer: http://127.0.0.1:8787/x` is refused `403 INVALID_ORIGIN` even
+ * `Referer: http://127.0.0.1:7676/x` is refused `403 INVALID_ORIGIN` even
  * though the same request with that value as `Origin` is accepted. A
  * `Referer`-only request gets through only when the referring page's origin
  * is already in the trusted list for some other reason -- `baseURL`'s, which

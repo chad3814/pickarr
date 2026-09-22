@@ -950,7 +950,7 @@ test('the server binds the configured host, defaulting to 0.0.0.0', async () => 
   // The defaults themselves, pinned here because nothing else can: a default
   // is the one value no caller passes.
   assert.equal(DEFAULT_HOST, '0.0.0.0', 'every interface, which is what the auth slice\'s §6 asks for');
-  assert.equal(DEFAULT_PORT, 8787, 'the documented default port, which no test in this file binds');
+  assert.equal(DEFAULT_PORT, 7676, 'the documented default port, which no test in this file binds');
 });
 
 test('close stops the listener and does not wait for an in-flight read', async () => {

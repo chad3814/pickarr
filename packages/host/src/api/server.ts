@@ -150,10 +150,18 @@ import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 
 /**
  * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
- * 8787 rather than 1.x's 8080 so a 2.0 host and a 1.x install can run on one
- * machine without either having to be told a port.
+ *
+ * **7676, and the reason has changed twice.** It was 8080 in 1.x. It became
+ * 8787 so a 2.0 host and a 1.x install could share a machine without either
+ * being told a port -- a reason that died with 1.x. It is 7676 now because
+ * 8787 is readarr's, and two *arr* applications on one host is the ordinary
+ * case rather than the exotic one.
+ *
+ * `packages/web/vite.config.ts` repeats this number as a literal, because
+ * web must not import from host to learn it, and
+ * `scripts/check-dev-scripts.test.ts` is what holds the two together.
  */
-export const DEFAULT_PORT = 8787;
+export const DEFAULT_PORT = 7676;
 
 /** Enough for a feed; small enough that an unbounded client cannot make the host buy memory. */
 export const MAX_BODY_BYTES = 16 * 1024;
@@ -2178,8 +2186,8 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
  * knowing before `PICKARR_PUBLIC_URL` is made mandatory or this value is
  * normalized to something "nicer".
  *
- * An IPv6 address is bracketed, because `http://::1:8787` is not a url and
- * `http://[::1]:8787` is: `address.address` reports the bare address, and an
+ * An IPv6 address is bracketed, because `http://::1:7676` is not a url and
+ * `http://[::1]:7676` is: `address.address` reports the bare address, and an
  * origin that will not parse would refuse every state-changing request
  * against it rather than fail visibly at construction.
  */

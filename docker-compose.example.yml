@@ -2,7 +2,7 @@ services:
   pickarr:
     build: .
     ports:
-      - "8787:8787"
+      - "7676:7676"
     volumes:
       - ./config:/config
     secrets:

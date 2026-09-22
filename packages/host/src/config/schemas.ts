@@ -16,7 +16,7 @@ export const serverConfigSchema = z.object({
   // 0.0.0.0, not loopback: from the auth slice on, a session is what protects
   // this socket rather than the interface it listens on.
   host: z.string().min(1).default('0.0.0.0'),
-  port: z.number().int().min(1).max(65535).default(8787),
+  port: z.number().int().min(1).max(65535).default(7676),
   // Optional with no default: absent means "derive it from the bind address",
   // which is not a value this schema can compute.
   publicUrl: z.string()

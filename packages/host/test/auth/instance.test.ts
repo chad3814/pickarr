@@ -40,9 +40,9 @@ import { resolveAuthSecret } from '../../src/main.ts';
  * send acceptable. Every origin below is deliberately *not* this one, so a
  * pass means `createAuth`'s `trustedOrigins` placed it.
  */
-const BASE_URL = 'http://192.0.2.10:8787';
+const BASE_URL = 'http://192.0.2.10:7676';
 
-const LOOPBACK_ORIGIN = 'http://127.0.0.1:8787';
+const LOOPBACK_ORIGIN = 'http://127.0.0.1:7676';
 const PUBLIC_URL = 'https://pickarr.example';
 
 const PASSWORD = 'placeholder-not-a-real-password';
@@ -330,7 +330,7 @@ test('a private-range origin is trusted', async () => {
   // network reaching the host by its private address.
   const { auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://192.168.1.9:8787', 'owner@example.invalid', claimToken);
+  const response = await signUp(auth, 'http://192.168.1.9:7676', 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
 });
@@ -340,7 +340,7 @@ test('a link-local origin is trusted', async () => {
   // cable between a laptop and this machine still reaches it.
   const { auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://169.254.10.5:8787', 'owner@example.invalid', claimToken);
+  const response = await signUp(auth, 'http://169.254.10.5:7676', 'owner@example.invalid', claimToken);
 
   assert.equal(response.status, 200);
 });
@@ -353,9 +353,9 @@ test('the private block ends at 172.31, so 172.32 is refused', async () => {
   const last = harness(undefined);
   const outside = harness(undefined);
 
-  const inFirst = await signUp(first.auth, 'http://172.16.0.1:8787', 'owner@example.invalid', first.claimToken);
-  const inLast = await signUp(last.auth, 'http://172.31.255.254:8787', 'owner@example.invalid', last.claimToken);
-  const beyond = await signUp(outside.auth, 'http://172.32.0.1:8787', 'attacker@example.invalid', outside.claimToken);
+  const inFirst = await signUp(first.auth, 'http://172.16.0.1:7676', 'owner@example.invalid', first.claimToken);
+  const inLast = await signUp(last.auth, 'http://172.31.255.254:7676', 'owner@example.invalid', last.claimToken);
+  const beyond = await signUp(outside.auth, 'http://172.32.0.1:7676', 'attacker@example.invalid', outside.claimToken);
 
   assert.equal(inFirst.status, 200);
   assert.equal(inLast.status, 200);
@@ -364,15 +364,15 @@ test('the private block ends at 172.31, so 172.32 is refused', async () => {
 });
 
 test('a bracketed IPv6 loopback is trusted and a public IPv6 is not', async () => {
-  // `new URL('http://[::1]:8787').hostname` keeps the brackets, so an
+  // `new URL('http://[::1]:7676').hostname` keeps the brackets, so an
   // IPv6 origin is not four dot-separated numbers and never can be.
   const loopback = harness(undefined);
   const unique = harness(undefined);
   const global = harness(undefined);
 
-  const loopbackResponse = await signUp(loopback.auth, 'http://[::1]:8787', 'owner@example.invalid', loopback.claimToken);
-  const uniqueResponse = await signUp(unique.auth, 'http://[fd12:3456::1]:8787', 'owner@example.invalid', unique.claimToken);
-  const globalResponse = await signUp(global.auth, 'http://[2606:4700::1111]:8787', 'attacker@example.invalid', global.claimToken);
+  const loopbackResponse = await signUp(loopback.auth, 'http://[::1]:7676', 'owner@example.invalid', loopback.claimToken);
+  const uniqueResponse = await signUp(unique.auth, 'http://[fd12:3456::1]:7676', 'owner@example.invalid', unique.claimToken);
+  const globalResponse = await signUp(global.auth, 'http://[2606:4700::1111]:7676', 'attacker@example.invalid', global.claimToken);
 
   assert.equal(loopbackResponse.status, 200);
   // fc00::/7, the IPv6 equivalent of 10/8: `fd` is in the block, and the
@@ -388,7 +388,7 @@ test('a hostname other than localhost is refused, however it resolves', async ()
   // name an attacker controls and points at 127.0.0.1 is trusted too.
   const { raw, auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'http://pickarr.local:8787', 'attacker@example.invalid', claimToken);
+  const response = await signUp(auth, 'http://pickarr.local:7676', 'attacker@example.invalid', claimToken);
 
   assert.equal(response.status, 403);
   assert.ok(userRow(raw) === undefined, 'the unplaceable hostname still created an account');
@@ -401,21 +401,21 @@ test('a ws: origin over a loopback host is refused, because the scheme is checke
   // is this shape and not a tidier one is which schemes the URL parser treats
   // as special.
   //
-  // `ws` is special, so `new URL('ws://127.0.0.1:8787')` has hostname
+  // `ws` is special, so `new URL('ws://127.0.0.1:7676')` has hostname
   // `127.0.0.1` -- which `isPrivateIPv4` places -- *and* a real tuple origin,
-  // `ws://127.0.0.1:8787`. With the scheme test deleted, `trustedOrigins`
+  // `ws://127.0.0.1:7676`. With the scheme test deleted, `trustedOrigins`
   // returns that origin and Better Auth's own pattern match accepts it:
   // measured, 200 with a row in `auth_user`. `wss:` and `ftp:` behave the
   // same way.
   //
   // A *custom* scheme cannot reach that far and so cannot pin this:
-  // `new URL('myapp://127.0.0.1:8787').origin` is the opaque string `'null'`,
+  // `new URL('myapp://127.0.0.1:7676').origin` is the opaque string `'null'`,
   // which Better Auth refuses before matching anything, so `myapp://` is
   // refused with the scheme test and without it -- also measured. The
   // justification for this guard has to name `ws:`, not `myapp:`.
   const { raw, auth, claimToken } = harness(undefined);
 
-  const response = await signUp(auth, 'ws://127.0.0.1:8787', 'attacker@example.invalid', claimToken);
+  const response = await signUp(auth, 'ws://127.0.0.1:7676', 'attacker@example.invalid', claimToken);
 
   assert.equal(response.status, 403);
   assert.ok(userRow(raw) === undefined, 'the ws: origin still created an account');

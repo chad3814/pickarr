@@ -36,9 +36,9 @@ import { ensureClaimToken, isClaimed, matchesClaimToken } from '../../src/auth/c
  * Better Auth's implicit trust of `baseURL`'s own origin cannot be what
  * lets any request below through.
  */
-const BASE_URL = 'http://192.0.2.10:8787';
+const BASE_URL = 'http://192.0.2.10:7676';
 
-const LOOPBACK_ORIGIN = 'http://127.0.0.1:8787';
+const LOOPBACK_ORIGIN = 'http://127.0.0.1:7676';
 
 const PASSWORD = 'placeholder-not-a-real-password';
 const SECRET = 'placeholder-not-a-real-signing-secret';

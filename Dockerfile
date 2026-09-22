@@ -71,7 +71,7 @@ COPY --from=build /app/packages/host/dist          packages/host/dist
 COPY --from=build /app/packages/web/dist           packages/host/dist/web
 
 ENV PICKARR_CONFIG=/config/pickarr.config.json
-EXPOSE 8787
+EXPOSE 7676
 
 # Reads the port out of the config the way boot does, rather than guessing it.
 # See `resolveHealthPort`: the `node -e` one-liner this replaces could not

@@ -8,7 +8,7 @@
  * fails loudly when they drift:
  *
  * - **Vite's proxy target vs the host's `DEFAULT_PORT`.** `vite.config.ts`
- *   names `8787` as a literal, because `packages/web` must not import from
+ *   names `7676` as a literal, because `packages/web` must not import from
  *   `packages/host` to learn it (web's only workspace dependency is
  *   `@pickarr/contract`, and it is a type-only one). So the literal and the
  *   constant are tied together *here* instead: this test is the seam. Move

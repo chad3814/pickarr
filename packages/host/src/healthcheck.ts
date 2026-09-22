@@ -26,7 +26,7 @@ import { configuredEnvValue, resolveConfigPath, resolveReadPort } from './main.t
 
 /**
  * The port boot would resolve to: `PICKARR_READ_API_PORT`, else
- * `configDoc`'s `server.port`, else the schema's default (8787) --
+ * `configDoc`'s `server.port`, else the schema's default (7676) --
  * `resolveSettings`'s own order for this one field, restated here because
  * the healthcheck process never builds a full `HostSettings`.
  *

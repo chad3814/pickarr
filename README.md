@@ -92,7 +92,7 @@ key inside one is a boot failure rather than a setting that silently does nothin
 
 ```json
 {
-  "server": { "host": "0.0.0.0", "port": 8787 },
+  "server": { "host": "0.0.0.0", "port": 7676 },
   "database": { "path": "/config/pickarr.db" },
   "secrets": { "baseDir": "/run/secrets" }
 }
@@ -101,7 +101,7 @@ key inside one is a boot failure rather than a setting that silently does nothin
 | Key | Default | Meaning |
 |---|---|---|
 | `server.host` | `0.0.0.0` | Bind address. Not loopback: from the auth slice on, a session is what protects this socket rather than the interface it listens on. |
-| `server.port` | `8787` | Port for the read and sync API. |
+| `server.port` | `7676` | Port for the read and sync API. |
 | `server.publicUrl` | *(none)* | The externally reachable origin, for a host behind a reverse proxy. Must be an origin — no path, query string or fragment. Absent means "derive it from the bind address". |
 | `database.path` | `/config/pickarr.db` | The SQLite file. Artwork is stored in a directory derived from it. |
 | `secrets.baseDir` | `/run/secrets` | Where the secrets chain looks for files. |
@@ -133,7 +133,7 @@ it reached the listener, and `PICKARR_CONFIG=''` would mean "read the file `''`"
 every one of these treats empty as unset and falls back to its default.
 
 A value that is present but is not a port is a different matter, and only
-`PICKARR_READ_API_PORT` can be one: it refuses `0`, `70000`, `abc`, and even `' 8787'`
+`PICKARR_READ_API_PORT` can be one: it refuses `0`, `70000`, `abc`, and even `' 7676'`
 with a leading space, rather than starting on a port the operator did not ask for.
 
 ## Secrets
