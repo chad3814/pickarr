@@ -124,6 +124,7 @@ import {
   type ReadServer,
 } from '@pickarr/host';
 import { TV_MIGRATIONS, TV_SYNCED } from '@pickarr/plugin-tv';
+import { XXX_MIGRATIONS, XXX_SYNCED } from '@pickarr/plugin-xxx';
 import { webDist } from './paths.ts';
 
 /**
@@ -151,10 +152,18 @@ export type Category = 'tv' | 'movie' | 'xxx';
  * **Asymmetric on purpose, and the asymmetry is the point.** `tv` is the
  * only category any spec here reads a plugin-owned row back through, so it
  * is the only one that needs a table to read -- and giving the other two
- * their real schemas would replicate `movie_detail`, `xxx_scene` and
- * `xxx_site` to every browser in the suite for nothing. If a spec ever
- * needs a movie or scene row, the entry to change is here and the import is
- * the same shape.
+ * their real schemas would replicate `movie_detail` to every browser in the
+ * suite for nothing. If a spec ever needs a movie row, the entry to change
+ * is here and the import is the same shape.
+ *
+ * **`xxx` joined `tv` when its card started showing a site name**, which is
+ * that paragraph's own instruction followed: the adult card reads
+ * `xxx_scene.siteName` and renders it as a dimmed trailing label, and
+ * whether it is *dimmed* and *at the right-hand end* is a question only a
+ * browser can answer -- `getByRole` is satisfied by an unstyled span
+ * (`CLAUDE.md`). {@link Harness.seedXxxScene} writes the rows.
+ * `movie` stays empty because its year comes off `media_item` and needs no
+ * table at all.
  *
  * `TV_MIGRATIONS`' one migration is version 2, not 1 -- version 1 is the
  * lookup engine's own state table, which `createLookupPlugin` prepends and
@@ -171,7 +180,7 @@ const PLUGIN_SCHEMA: Record<Category, {
 }> = {
   tv: { migrations: TV_MIGRATIONS, synced: TV_SYNCED },
   movie: { migrations: [], synced: [] },
-  xxx: { migrations: [], synced: [] },
+  xxx: { migrations: XXX_MIGRATIONS, synced: XXX_SYNCED },
 };
 
 /**
@@ -479,6 +488,19 @@ export interface Harness {
    * exactly one client there is no draw to make, so nothing here depends
    * on `randomIndex`.
    */
+  /**
+   * One adult scene: a `media_item`, an `xxx_scene`, and -- when `siteName`
+   * is a string -- the `xxx_site` row it points at. Returns the media item
+   * id.
+   *
+   * `siteName: null` writes the scene with a null `site_id`, which is the
+   * case the host's own read reaches by a **left** join ("a scene whose
+   * site is unknown is still a scene worth having", `plugin-xxx/sync.ts`)
+   * and which the card must render with no trailing element at all. It is
+   * a real state of the table, not a hypothetical, so the seeder can
+   * produce it.
+   */
+  seedXxxScene(input: { title: string; siteName: string | null }): number;
   seedPickableRelease(input: {
     pluginId: Category;
     title: string;
@@ -772,11 +794,30 @@ export const test = base.extend<{ harness: Harness }>({
         return mediaItemId;
       }
 
+      function seedXxxScene({ title, siteName }: { title: string; siteName: string | null }): number {
+        const at = Date.now();
+        const mediaItemId = seedMediaItem('xxx', title);
+        // The site first, because the scene references it. Null when the
+        // caller asked for a scene with no known site -- `xxx_scene.site_id`
+        // is nullable and the host's read left-joins it, so this is the row
+        // that makes the card render no trailing label at all.
+        const siteId = siteName === null ? null : Number(raw.prepare(`
+          INSERT INTO xxx_site (provider, provider_ref, name, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(SEED_PROVIDER, `site-${String(mediaItemId)}`, siteName, at, at).lastInsertRowid);
+        raw.prepare(`
+          INSERT INTO xxx_scene (media_item_id, site_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?)
+        `).run(mediaItemId, siteId, at, at);
+        return mediaItemId;
+      }
+
       await use({
         origin: `http://${server.host}:${server.port}`,
         claimToken,
         seedMediaItem,
         seedTvRelease,
+        seedXxxScene,
         async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
           if (withDownloadClient) {
             const client = await host.addDownloadClient({

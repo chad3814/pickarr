@@ -72,6 +72,23 @@ export interface CardHeadingProps {
    * (`CLAUDE.md`).
    */
   readonly headline: string;
+  /**
+   * A secondary label for the right-hand end of the title line -- `xxx`'s
+   * site name today. Omitted renders nothing at all, not an empty element.
+   *
+   * **Inside the button, so it is announced and so it is clickable.** The
+   * alternative -- rendering it in the `<h2>` beside the button -- would
+   * leave a strip of the title row that looks like the title and does not
+   * open the card, and would drop the site from the button's accessible
+   * name while leaving it on screen. Putting visible text where a screen
+   * reader cannot reach it is the same mistake as naming a control with
+   * text nobody can see (`CLAUDE.md`), pointed the other way.
+   *
+   * So a card with a trailing label announces as `<headline> <trailing>`.
+   * `plugin-xxx/test/browser.test.tsx` pins that composed name literally,
+   * because it is a real change to what the control is called.
+   */
+  readonly trailing?: string;
   readonly expanded: boolean;
   readonly onToggle: () => void;
 }
@@ -84,12 +101,34 @@ export interface CardHeadingProps {
  * is web's business and is why this component, rather than each card,
  * decides it -- a plugin choosing `<h3>` would render unstyled and announce
  * a hierarchy the page does not have.
+ *
+ * The headline is wrapped in a `<span>` rather than left as a bare text
+ * node so that it and {@link CardHeadingProps.trailing} are two elements
+ * web's stylesheet can lay out against each other. A bare text node beside
+ * an element becomes an anonymous flex item, which no selector can reach.
  */
-export function CardHeading({ headline, expanded, onToggle }: CardHeadingProps): ReactElement {
+export function CardHeading({ headline, trailing, expanded, onToggle }: CardHeadingProps): ReactElement {
   return (
     <h2>
       <button type="button" aria-expanded={expanded} onClick={onToggle}>
-        {headline}
+        <span>{headline}</span>
+        {/*
+          `<small>`, and not a `<span>` with a class, because this package
+          ships markup and web ships the CSS (`plugin.ts`'s `Card` doc) and
+          web's stylesheets set no classes anywhere -- so web needs an
+          element it can select structurally. `<small>` is the element that
+          already means side-comment fine print, it appears nowhere else in
+          the rendered app, and `article h2 button small` in
+          `web/src/styles/library.css` is what pushes it right and dims it.
+
+          **Rendered only when there is something to say.** An always-present
+          empty `<small>` would still be a flex item, so `space-between`
+          would have nothing to push against and the headline would sit
+          where it does now purely by accident -- a card that later gained a
+          trailing label would shift its own title. Conditional keeps the
+          two-child and one-child layouts honestly different.
+        */}
+        {trailing !== undefined && <small>{trailing}</small>}
       </button>
     </h2>
   );

@@ -528,6 +528,116 @@ const TV_HEADLINE = "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)";
  *    other one 404s its artwork, and `MediaItemCard`'s `onError` then takes
  *    the `<img>` out of the DOM for good, leaving nothing to measure.
  */
+/**
+ * The three colours the adult card's site label is judged on, all read in
+ * the browser's own canonical form so none of them is a literal this file
+ * would have to keep in step with `tokens.css`.
+ */
+interface TitleColours {
+  /** The `<small>`'s computed colour, or `null` when it did not render. */
+  site: string | null;
+  /** The title line's own colour, which the site must *not* match. */
+  title: string;
+  /**
+   * `--color-text-dim` resolved through a real element, so it arrives in
+   * the same `rgb(...)` form `color` does.
+   *
+   * **Not `getPropertyValue('--color-text-dim')`.** That answers the
+   * token's raw text -- `#6b6459` -- while `getComputedStyle(x).color`
+   * answers `rgb(107, 100, 89)`, so comparing the two is comparing a hex
+   * string to a function string and is never equal. The first version of
+   * this helper had exactly that bug, and papered over it by asserting the
+   * token was merely non-empty while its own docblock claimed it matched.
+   */
+  token: string;
+}
+
+/**
+ * Asserts the site label is dim, and dim *relative to the title*.
+ *
+ * Two assertions rather than one because either alone is weak: taking the
+ * dim token proves nothing if `--color-text-dim` were ever set to the body
+ * colour, and differing from the title proves nothing about which colour
+ * it actually took. Together they say "this is the dim token, and the dim
+ * token is visibly not the title colour".
+ */
+function assertDimmed({ site, title, token }: TitleColours): void {
+  if (site === null) throw new Error('the site label did not render, so there is no colour to read');
+  expect(site, 'the site is painted in the dim token, not merely in some other colour').toBe(token);
+  expect(site, 'and the dim token is visibly not the title colour').not.toBe(title);
+}
+
+test('an adult card shows its site at the far right of the title, dimmed', async ({ page, harness }) => {
+  // **The only test that can see this feature at all.** The unit tests in
+  // `plugin-xxx/test/browser.test.tsx` prove a `<small>` exists holding
+  // the site name; they cannot prove it is dimmed or at the right-hand
+  // end, because `getByRole` reads the accessibility tree and an unstyled
+  // `<small>` sitting inline after the title satisfies every one of them
+  // -- which is exactly how `IdentityChangeConfirm` shipped unreadable
+  // with ten passing tests (`CLAUDE.md`). "Right aligned and dimmed" is
+  // the whole of what was asked for here, so it is measured in a browser.
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  harness.seedXxxScene({ title: 'A Scene', siteName: 'Example Studio' });
+
+  await page.goto(`${harness.origin}/xxx`);
+  const headline = page.getByRole('article').getByRole('heading').getByRole('button');
+  // The full round trip, the same one the TV spec above walks: two direct
+  // inserts, their `AFTER INSERT` triggers into `sync_log`, the tail, the
+  // replica, `usePluginRows`' batched read, and `XxxCard` narrowing
+  // `rows.xxx_scene`.
+  await expect(headline).toHaveText('A SceneExample Studio', { timeout: 15_000 });
+
+  const site = headline.locator('small');
+
+  // Dimmed: the same token `tokens.css` defines for secondary text, and
+  // resolved in the browser rather than spelled as an `rgb(...)` literal
+  // -- `--color-text-dim` has a different value in each palette and
+  // nothing here pins which one a run is in (the same reasoning
+  // `borderTopAgainstLineToken` above is built on). Asserted as *different
+  // from the title's colour* too, because a token that resolved to the
+  // same value as the body text would satisfy the first check and dim
+  // nothing.
+  const colours = await headline.evaluate((node) => {
+    const small = node.querySelector('small');
+    // A throwaway element carrying nothing but the token, so the browser
+    // resolves it into the same canonical form `color` reads back in.
+    // Inserted under the heading so it inherits whichever palette this run
+    // is in, and removed before anything else measures geometry.
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--color-text-dim)';
+    node.append(probe);
+    const token = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      site: small === null ? null : getComputedStyle(small).color,
+      title: getComputedStyle(node).color,
+      token,
+    };
+  });
+  assertDimmed(colours);
+
+  // Right-aligned: the site's right edge sits at the button's right edge,
+  // and its left edge is well past the title's. Measured as geometry
+  // rather than read back as `margin-left: auto`, because the declaration
+  // is not the claim -- a `float`, a `justify-content` or a wide margin
+  // would all satisfy "is it actually over there" and only geometry says
+  // so. Deleting the rule leaves the site inline after the title, which
+  // fails the gap assertion by a wide margin.
+  const buttonBox = await headline.boundingBox();
+  const siteBox = await site.boundingBox();
+  const titleBox = await headline.locator('span').first().boundingBox();
+  if (buttonBox === null || siteBox === null || titleBox === null) {
+    throw new Error('the title line did not render, so there is nothing to measure');
+  }
+  const rightEdgeGap = buttonBox.x + buttonBox.width - (siteBox.x + siteBox.width);
+  expect(rightEdgeGap, 'the site ends where the title line ends').toBeLessThan(2);
+  const titleEnd = titleBox.x + titleBox.width;
+  expect(siteBox.x - titleEnd, 'and starts far from where the title stops').toBeGreaterThan(50);
+});
+
 test('a TV card reads its series and episode before anyone expands it, under a cropped poster', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);

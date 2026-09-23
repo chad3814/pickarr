@@ -109,7 +109,18 @@ article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
    `packages/web/src/styles/` and a `<button>` computes `center` without it
    -- see this file's own header. */
 article h2 button {
-  display: block;
+  /* `flex`, where this was `block`, so a card with a trailing label can
+     push it to the far end. With one child -- every card that passes no
+     trailing label -- a full-width flex container lays its single item out
+     exactly where `block` did, which is why this is safe to change for
+     every card rather than only the one that needed it.
+
+     `text-align: left` still computes `left` and the browser pin that
+     reads it back is unaffected: `text-align` governs inline content
+     inside each flex item, and a flex container does not discard it. */
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   width: 100%;
   font: inherit;
   font-size: inherit;
@@ -120,6 +131,35 @@ article h2 button {
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* The trailing label at the right-hand end of a card's title line, and
+   the only `<small>` in the rendered app. The element comes from
+   `@pickarr/plugin-ui`'s `CardHeading`, whose `trailing` prop any card may
+   pass; that package ships markup and no CSS (`plugin.ts`'s `Card` doc),
+   so this rule is the whole of its appearance. Delete it and the label
+   renders as ordinary title-sized text inline after the title, which is
+   legible and wrong.
+
+   Deliberately not named after whichever plugin passes it today:
+   `test/plugins/registry.test.ts` fails this file for spelling a plugin
+   id, because a stylesheet that knows which plugin it is styling is a
+   stylesheet the next plugin cannot reuse. It caught this comment.
+
+   `margin-left: auto` rather than `justify-content: space-between` on the
+   parent: `auto` pushes only this element, so a headline that wraps to two
+   lines keeps its own alignment, and a card with no trailing label has
+   nothing whose absence could move the headline.
+
+   `font-size` is set explicitly because the button resets `font-size` to
+   `inherit` above, which `<small>` would otherwise inherit at full title
+   size -- the UA's own `smaller` is overridden by that reset. */
+article h2 button small {
+  margin-left: auto;
+  color: var(--color-text-dim);
+  font-size: var(--text-body);
+  font-weight: 400;
+  white-space: nowrap;
 }
 
 /*

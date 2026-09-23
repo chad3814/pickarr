@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# `tsc -b` writes one of these per project. The repo's own typecheck is
+# `tsgo --noEmit` and never produces them, so they only appear when
+# someone runs `tsc -b` by hand -- and have twice been committed by
+# accident on the next `git add -A`.
+*.tsbuildinfo
 *.db
 *.db-wal
 *.db-shm
