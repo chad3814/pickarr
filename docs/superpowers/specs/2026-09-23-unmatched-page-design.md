@@ -100,10 +100,15 @@ Four rules bound it, and each is load-bearing:
 2. **Cleared when an item resolves.** A release that was unresolved and is
    later matched by a retry drops its envelope in the same `UPDATE` that
    sets `resolution = 'resolved'`. Without this the column only ever grows.
-3. **`media` is never stored, even on a non-resolved envelope.** It is null
-   on every branch that writes, so this is belt and braces rather than a
-   filter — but it is the field that would make the column unbounded if a
-   later branch started writing.
+3. **`media` is never stored, even on a non-resolved envelope.** This was
+   written as belt and braces, on the assumption that `media` is null
+   whenever a lookup fails. **That assumption is false, and implementing
+   the engine wiring is what found it:** `validate.ts` parses `media`
+   regardless of the lookup's state, so a refused or unresolved envelope
+   may carry a full media payload. The exclusion is therefore a
+   load-bearing filter — the only thing keeping the largest field the
+   service returns out of every client's replica — and must not be removed
+   as redundant.
 4. **Capped at 8 KB.** A pathological response must not be able to grow
    every client's replica without limit. Over the cap, the column stores a
    short marker instead of the envelope, and the card renders that.
