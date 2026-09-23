@@ -61,6 +61,7 @@ Expanded:
 │   "lookupId": "lk_01H…",                             │
 │   "state": "unresolved",                             │
 │   "confidence": 0.31,                                │
+│   "media": { … },                                    │
 │   "suggestions": { … }                               │
 │ }                                                    │
 └──────────────────────────────────────────────────────┘
@@ -100,18 +101,28 @@ Four rules bound it, and each is load-bearing:
 2. **Cleared when an item resolves.** A release that was unresolved and is
    later matched by a retry drops its envelope in the same `UPDATE` that
    sets `resolution = 'resolved'`. Without this the column only ever grows.
-3. **`media` is never stored, even on a non-resolved envelope.** This was
-   written as belt and braces, on the assumption that `media` is null
-   whenever a lookup fails. **That assumption is false, and implementing
-   the engine wiring is what found it:** `validate.ts` parses `media`
-   regardless of the lookup's state, so a refused or unresolved envelope
-   may carry a full media payload. The exclusion is therefore a
-   load-bearing filter — the only thing keeping the largest field the
-   service returns out of every client's replica — and must not be removed
-   as redundant.
-4. **Capped at 8 KB.** A pathological response must not be able to grow
+3. **`media` IS stored**, on the repo owner's instruction, reversing an
+   earlier draft of this rule. The reasoning that excluded it was: `media`
+   is the largest field the service returns, and it is null whenever a
+   lookup fails so nothing is lost. **The second half turned out to be
+   false** — implementing the engine wiring found that `validate.ts`
+   parses `media` regardless of the lookup's state, so a refused or
+   unresolved envelope may carry a full payload. That makes it *worth*
+   keeping rather than safe to drop: when the service half-identified
+   something and then declined to commit, the media it was considering is
+   the most direct evidence of why. The cap below is what bounds it.
+4. **Capped at 32 KB.** A pathological response must not be able to grow
    every client's replica without limit. Over the cap, the column stores a
    short marker instead of the envelope, and the card renders that.
+
+   **32 KB rather than the 8 KB first chosen, because rule 3 changed.**
+   `Media` carries a synopsis, an arbitrary `details` object, parents and
+   a full cast; fifty people run about 6 KB on their own, so an 8 KB cap
+   would replace exactly the richest answers with the marker and leave the
+   thin ones visible — the opposite of useful. The cost is bounded by how
+   many releases are unmatched at once, which is normally a short tail:
+   500 of them at the cap is about 16 MB of replica, and only
+   non-resolved releases store anything at all.
 
 **Serialised from the validated shape, never from the response bytes.**
 `validate.ts` has already parsed the response into a `LookupEnvelope` by
