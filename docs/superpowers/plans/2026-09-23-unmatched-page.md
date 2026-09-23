@@ -55,9 +55,8 @@ In `packages/contract/src/sync.ts`, after `resolutionDetail` in `RssItemSyncRead
    * ever.
    *
    * Serialised from the validated `LookupEnvelope`, never from the
-   * response bytes, and with `media` omitted. Capped: over the cap the
-   * column holds a short marker instead, which the unmatched screen
-   * renders in place of the answer.
+   * response bytes. Capped: over the cap the column holds a short marker
+   * instead, which the unmatched screen renders in place of the answer.
    */
   lookupJson: string | null;
 ```
@@ -180,6 +179,16 @@ git commit -m "Carry a release's lookup answer to clients, for unmatched release
 ---
 
 ### Task 2: Serialising and capping the envelope
+
+> **NOTE — superseded mid-execution.** Task 2's text below describes `media`
+> being excluded from the stored answer and a cap of 8192 bytes. The repo
+> owner reversed both after Tasks 2 and 3 were complete: `media` IS stored,
+> and the cap is 32768. The reason is in the spec's storage rules, and the
+> short version is that the exclusion rested on "`media` is null when a
+> lookup fails", which implementing Task 3 proved false. The shipped code is
+> the spec's, not this task text's; this section is left as written so the
+> sequence of decisions stays legible.
+
 
 **Files:**
 - Create: `packages/openmetadata/src/lookupJson.ts`
