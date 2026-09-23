@@ -159,7 +159,21 @@ export interface MediaWriter {
    * the people the two answers shared.
    */
   attachRole(mediaItemId: number, role: RoleInit): Promise<void>;
-  setResolution(rssItemId: number, resolution: Resolution, detail: string | null): Promise<void>;
+  /**
+   * Records what became of a release's identification.
+   *
+   * `lookupJson` is the service's own answer, or `null` to clear one --
+   * **a required parameter, never defaulted.** A default would let a
+   * branch that resolves a release forget to clear the answer that failed
+   * it, which is the one mistake that makes this column grow without
+   * bound (`RssItemSyncRead.lookupJson`).
+   */
+  setResolution(
+    rssItemId: number,
+    resolution: Resolution,
+    detail: string | null,
+    lookupJson: string | null,
+  ): Promise<void>;
 }
 
 /**

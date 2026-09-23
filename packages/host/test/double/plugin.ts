@@ -569,7 +569,12 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
       .where(eq(doubleMedia.rssItemId, rssItemId));
 
     await attachPeople(entry.people, claim.kept, ctx);
-    await ctx.media.setResolution(rssItemId, 'resolved', null);
+    // `null`, `null`: no detail for a resolved answer, and no envelope to
+    // store either -- this double's `LookupEntry` predates
+    // `@pickarr/openmetadata`'s `LookupEnvelope`/`lookupJsonFor` and carries
+    // nothing to serialise there, and clearing with `null` is still correct
+    // for a retry that resolves after an earlier failed attempt.
+    await ctx.media.setResolution(rssItemId, 'resolved', null, null);
 
     // A separate job, not fetched inline here, and only when the service
     // actually offered something: enqueuing an empty job would still be
@@ -610,7 +615,8 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
       // Terminal: no retry, and no media rows to write. Folding it into
       // `unresolved` would retry a subtitle forever and show it to a reader
       // as a problem they cannot fix.
-      await ctx.media.setResolution(rssItemId, 'refused', entry.refusal);
+      // `null`: as above, this double has no envelope shape to store.
+      await ctx.media.setResolution(rssItemId, 'refused', entry.refusal, null);
       return;
     }
 
@@ -621,6 +627,7 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
         rssItemId,
         'unresolved',
         `the parser service did not recognise "${entry.name}"`,
+        null,
       );
       return;
     }

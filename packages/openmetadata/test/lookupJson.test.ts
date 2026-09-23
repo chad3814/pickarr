@@ -35,10 +35,17 @@ test('the envelope is serialised as readable JSON', () => {
 });
 
 test('media is never stored, however large the answer', () => {
-  // Belt and braces: `media` is null on both branches that call this, so
-  // this cannot fire today. It is the one field that would make the column
-  // unbounded if a later branch started writing, and a test is cheaper
-  // than noticing that in a replica.
+  // Belt and braces, not dead code: `engine.ts` now calls `lookupJsonFor`
+  // from three branches -- refused, unresolved, and the poll ceiling
+  // giving up -- and nothing in this package enforces that the service
+  // actually leaves `media` null on any of them. `validate.ts`'s `media()`
+  // parses whatever sits at the wire envelope's `media` key regardless of
+  // `state` or `refusal`; "filled only for a resolved answer" is the API
+  // document's rule, not a check this package makes. So this is not a
+  // belt for a case that cannot happen -- it is what keeps a service that
+  // violated its own document from growing the column anyway, because
+  // `media` is excluded by never being named in the destructure below,
+  // whatever value it holds.
   const withMedia = envelope({
     media: { title: 'A Film', people: [] } as unknown as LookupEnvelope['media'],
   });

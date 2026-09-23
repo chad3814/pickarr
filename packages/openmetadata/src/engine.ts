@@ -25,6 +25,7 @@ import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
 import { lookupTable, lookupTableMigration } from './table.ts';
+import { lookupJsonFor } from './lookupJson.ts';
 import { isPlaced, recordPlacement } from './placement.ts';
 import { select } from './select.ts';
 import type { Expectation } from './select.ts';
@@ -172,7 +173,10 @@ async function applyResolved(
   // rather than a duplicate.
   await deps.apply({ media, mediaItemId: claim.kept, raw: deps.raw, ctx, now: deps.now });
   await attachPeople(media, claim.kept, ctx);
-  await ctx.media.setResolution(target.rssItemId, 'resolved', null);
+  // `null` clears any answer an earlier failed attempt at this same rss item
+  // left in `lookup_json` -- a retry that now resolves must not keep the
+  // envelope that explained why it did not, or the column would only grow.
+  await ctx.media.setResolution(target.rssItemId, 'resolved', null, null);
 }
 
 /**
@@ -205,10 +209,14 @@ export async function applyEnvelope(
   if (envelope.partial || envelope.state === 'pending') {
     const polls = target.polls + 1;
     if (polls > MAX_POLLS) {
+      // The service never finished, so the last envelope it sent is the only
+      // record of how far it got -- `lookupJsonFor` is what a reader of
+      // `/unmatched` sees instead of a bare "gave up" sentence.
       await ctx.media.setResolution(
         target.rssItemId,
         'unresolved',
         `the lookup service never finished lookup ${envelope.lookupId} for "${target.filename}"`,
+        lookupJsonFor(envelope),
       );
       return;
     }
@@ -225,7 +233,10 @@ export async function applyEnvelope(
   //    `unresolved` would retry a subtitle forever and show it to a reader as
   //    a problem they cannot fix.
   if (envelope.refusal !== null) {
-    await ctx.media.setResolution(target.rssItemId, 'refused', envelope.refusal);
+    // The refusal sentence says *that* the name was rejected; the envelope
+    // behind `lookupJsonFor` is what the service actually saw, which is what
+    // `/unmatched` shows for the second question a reader asks.
+    await ctx.media.setResolution(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
     return;
   }
 
@@ -236,6 +247,7 @@ export async function applyEnvelope(
       target.rssItemId,
       'unresolved',
       describeUnresolved(target.filename, envelope.suggestions),
+      lookupJsonFor(envelope),
     );
     return;
   }

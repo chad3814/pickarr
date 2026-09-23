@@ -73,10 +73,16 @@ function readMediaItem(raw: DatabaseSync, id: number) {
 /** A row read back from `rss_item`. */
 function readRssItem(raw: DatabaseSync, id: number) {
   const row = raw.prepare(
-    'SELECT media_item_id, resolution, resolution_detail, updated_at FROM rss_item WHERE id = ?',
+    'SELECT media_item_id, resolution, resolution_detail, lookup_json, updated_at FROM rss_item WHERE id = ?',
   ).get(id);
   return row as
-    | { media_item_id: unknown; resolution: unknown; resolution_detail: unknown; updated_at: unknown }
+    | {
+      media_item_id: unknown;
+      resolution: unknown;
+      resolution_detail: unknown;
+      lookup_json: unknown;
+      updated_at: unknown;
+    }
     | undefined;
 }
 
@@ -339,20 +345,43 @@ test('setResolution records refused and unresolved as different states', async (
   const itemId = insertRssItem(raw, feedId, 0);
   const writer = createMediaWriter(db, () => 1000, unusedArtwork);
 
-  await writer.setResolution(itemId, 'refused', null);
+  await writer.setResolution(itemId, 'refused', null, '{"lookupId":"lk_1"}');
   const refused = readRssItem(raw, itemId);
   assert.ok(refused);
   assert.equal(refused.resolution, 'refused');
   assert.equal(refused.resolution_detail, null);
+  assert.equal(refused.lookup_json, '{"lookupId":"lk_1"}');
 
-  await writer.setResolution(itemId, 'unresolved', 'unrecognised filename');
+  await writer.setResolution(itemId, 'unresolved', 'unrecognised filename', '{"lookupId":"lk_2"}');
   const unresolved = readRssItem(raw, itemId);
   assert.ok(unresolved);
   assert.equal(unresolved.resolution, 'unresolved');
   assert.equal(unresolved.resolution_detail, 'unrecognised filename');
+  assert.equal(unresolved.lookup_json, '{"lookupId":"lk_2"}');
   // The two `assert.equal`s above are already what stops the two states
   // collapsing into one; a third assertion that the two differ restates them
   // rather than adding a way for this test to fail.
+});
+
+test('setResolution clears lookup_json a failed attempt left, when the retry resolves', async () => {
+  // The half a happy-path test misses: a release that failed, was retried
+  // and matched must not keep the answer that explained the earlier
+  // failure. `rss_item.lookup_json` is what `/unmatched` reads, so a
+  // resolved row that still carried it would show a stale refusal for an
+  // item that has since been identified.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const feedId = insertFeed(raw, 'https://example.test/feed');
+  const itemId = insertRssItem(raw, feedId, 0);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+
+  await writer.setResolution(itemId, 'unresolved', 'unrecognised filename', '{"lookupId":"lk_3"}');
+  assert.equal(readRssItem(raw, itemId)?.lookup_json, '{"lookupId":"lk_3"}', 'the failed attempt left an envelope');
+
+  await writer.setResolution(itemId, 'resolved', null, null);
+  const resolved = readRssItem(raw, itemId);
+  assert.equal(resolved?.resolution, 'resolved');
+  assert.equal(resolved?.lookup_json, null, 'the resolved retry clears the earlier envelope');
 });
 
 test('upsertPerson returns the same id for a repeated providerRef', async () => {

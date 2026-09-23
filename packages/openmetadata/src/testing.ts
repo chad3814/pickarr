@@ -212,7 +212,7 @@ export interface RecordingMedia {
   readonly reader: MediaReader;
   readonly calls: readonly RecordedCall[];
   readonly items: ReadonlyMap<number, MediaItemRead>;
-  readonly resolutions: ReadonlyMap<number, { resolution: Resolution; detail: string | null }>;
+  readonly resolutions: ReadonlyMap<number, { resolution: Resolution; detail: string | null; lookupJson: string | null }>;
   readonly roles: readonly { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[];
   /** Makes the next `claimProviderRef` report `winner` as the keeper. */
   loseNextClaim(winner: number): void;
@@ -228,7 +228,7 @@ export function createRecordingMedia(): RecordingMedia {
   const calls: RecordedCall[] = [];
   const items = new Map<number, MediaItemRead>();
   const people = new Map<string, number>();
-  const resolutions = new Map<number, { resolution: Resolution; detail: string | null }>();
+  const resolutions = new Map<number, { resolution: Resolution; detail: string | null; lookupJson: string | null }>();
   const roles: { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[] = [];
   const links = new Map<number, number | null>();
   let nextItem = 0;
@@ -297,9 +297,9 @@ export function createRecordingMedia(): RecordingMedia {
       record('attachRole', mediaItemId, role);
       roles.push({ mediaItemId, ...role });
     },
-    async setResolution(rssItemId, resolution, detail): Promise<void> {
-      record('setResolution', rssItemId, resolution, detail);
-      resolutions.set(rssItemId, { resolution, detail });
+    async setResolution(rssItemId, resolution, detail, lookupJson): Promise<void> {
+      record('setResolution', rssItemId, resolution, detail, lookupJson);
+      resolutions.set(rssItemId, { resolution, detail, lookupJson });
     },
   };
 

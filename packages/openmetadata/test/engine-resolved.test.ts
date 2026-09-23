@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { drizzle } from 'drizzle-orm/node-sqlite';
 import { applyEnvelope } from '../src/engine.ts';
 import { lookupTable, lookupTableMigration } from '../src/table.ts';
-import { createTestHarness, resolvedEnvelope } from '../src/testing.ts';
+import { createTestHarness, resolvedEnvelope, unresolvedEnvelope } from '../src/testing.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { Media } from '../src/types.ts';
 
@@ -81,7 +81,45 @@ test('creates the media item from the answer and claims its provider reference',
   assert.equal(item?.description, 'Paul unites with the Fremen.');
   assert.equal(item?.provider, 'tmdb');
   assert.equal(item?.providerRef, 'tmdb:movie:693134');
-  assert.deepEqual(harness.media.resolutions.get(rssItemId), { resolution: 'resolved', detail: null });
+  assert.deepEqual(
+    harness.media.resolutions.get(rssItemId),
+    { resolution: 'resolved', detail: null, lookupJson: null },
+  );
+});
+
+test('a resolved answer stores no envelope, and clears one left by an earlier failure', async () => {
+  // The clear is the half a happy-path test misses, and it is what bounds
+  // `rss_item.lookup_json`: a release that failed, was retried and matched
+  // must not keep a copy of the answer that failed it. Driven through two
+  // real `applyEnvelope` calls against the same rss item -- an unresolved
+  // attempt first, so there is a real envelope in `resolutions` to lose --
+  // rather than asserting `null` as if nothing had ever been written.
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    unresolvedEnvelope({ lookupId: 'lookup-fail' }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+  assert.notEqual(
+    harness.media.resolutions.get(rssItemId)?.lookupJson,
+    null,
+    'the failed attempt left an envelope behind',
+  );
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-9', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  // Asserted as an explicit `null` fourth argument, not as "absent": the
+  // recording fake stores exactly what `setResolution` was called with, so
+  // this fails if the resolved branch ever stops passing a fourth argument
+  // at all just as surely as if it passed something other than `null`.
+  const setResolutionCalls = harness.media.calls.filter((call) => call.method === 'setResolution');
+  assert.deepEqual(setResolutionCalls.at(-1)?.args, [rssItemId, 'resolved', null, null]);
+  assert.equal(harness.media.resolutions.get(rssItemId)?.lookupJson, null, 'the retry clears the earlier envelope');
 });
 
 test('records the lookup id, the reference and the confidence on its own row', async () => {
