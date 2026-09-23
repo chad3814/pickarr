@@ -91,7 +91,7 @@ test('migration 22 adds lookup_json without rebuilding rss_item, so its sync tri
 
 - [ ] **Step 3: Run it and watch it fail**
 
-Run: `npm run test -w @pickarr/host -- --test-name-pattern="migration 22"`
+Run: `npm run test:server -- --test-name-pattern="migration 22"`
 Expected: FAIL — `the column is there` (`lookup_json` is not in `pragma_table_info`).
 
 - [ ] **Step 4: Add the migration**
@@ -138,7 +138,7 @@ In `packages/host/src/db/schema.ts`, in `rssItem`, after `resolutionDetail`:
 
 - [ ] **Step 6: Run the schema-parity test**
 
-Run: `npm run test -w @pickarr/host -- --test-name-pattern="schema"`
+Run: `npm run test:server -- --test-name-pattern="schema"`
 Expected: PASS. `test/db/schema.test.ts` compares migration DDL against `schema.ts` in both directions, so a column in one and not the other fails here.
 
 - [ ] **Step 7: Add it to the projection and its witness**
@@ -167,7 +167,7 @@ In `packages/host/test/sync/tables.test.ts`, `HOST_READ_SHAPE_FIELDS.rss_item`:
 
 - [ ] **Step 8: Run the whole host suite**
 
-Run: `npm run test -w @pickarr/host`
+Run: `npm run test:server`
 Expected: PASS. The `satisfies` is exhaustive both ways, so step 1 without this step is a compile error and this step without step 7 is an assertion failure.
 
 - [ ] **Step 9: Commit**
@@ -268,7 +268,7 @@ test('the cap is measured in bytes, not characters', () => {
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `npm run test -w @pickarr/openmetadata -- --test-name-pattern="envelope|cap"`
+Run: `npm run test:server -- --test-name-pattern="envelope|cap"`
 Expected: FAIL — cannot resolve `../src/lookupJson.ts`.
 
 - [ ] **Step 3: Write the module**
@@ -329,7 +329,7 @@ export function lookupJsonFor(envelope: LookupEnvelope): string {
 
 - [ ] **Step 4: Run them and watch them pass**
 
-Run: `npm run test -w @pickarr/openmetadata -- --test-name-pattern="envelope|cap"`
+Run: `npm run test:server -- --test-name-pattern="envelope|cap"`
 Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
@@ -386,7 +386,7 @@ test('an envelope over the cap is stored as the marker', () => {});
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `npm run test -w @pickarr/openmetadata -- --test-name-pattern="envelope|clears"`
+Run: `npm run test:server -- --test-name-pattern="envelope|clears"`
 Expected: FAIL — `setResolution` is recorded with three arguments.
 
 - [ ] **Step 3: Widen the contract and the writer**
@@ -451,7 +451,7 @@ await ctx.media.setResolution(
 
 - [ ] **Step 5: Run the suites and watch them pass**
 
-Run: `npm run test -w @pickarr/openmetadata && npm run test -w @pickarr/host`
+Run: `npm run test:server`
 Expected: PASS.
 
 - [ ] **Step 6: Mutation-check the clear**
@@ -502,7 +502,7 @@ test('reading feed names never calls fetch', async () => {
 
 - [ ] **Step 2: Run and watch fail**
 
-Run: `npm run test -w @pickarr/web -- --test-name-pattern="feed id resolves"`
+Run: `npm run test:web -- --test-name-pattern="feed id resolves"`
 Expected: FAIL — cannot resolve `../src/library/useFeedNames.ts`.
 
 - [ ] **Step 3: Write the hook**
@@ -578,7 +578,7 @@ export function useFeedNames(source: FeedNamesSource): ReadonlyMap<number, strin
 
 - [ ] **Step 4: Run and watch pass**
 
-Run: `npm run test -w @pickarr/web -- --test-name-pattern="feed id resolves|no feed claims|renamed|never calls fetch"`
+Run: `npm run test:web -- --test-name-pattern="feed id resolves|no feed claims|renamed|never calls fetch"`
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Commit**
@@ -641,7 +641,7 @@ test('an answer too large to store says so, rather than rendering the marker JSO
 
 - [ ] **Step 2: Run and watch fail**
 
-Run: `npm run test -w @pickarr/web -- --test-name-pattern="renders as a card"`
+Run: `npm run test:web -- --test-name-pattern="renders as a card"`
 Expected: FAIL — the screen renders `<li>` text, not an `<article>`.
 
 - [ ] **Step 3: Rewrite the row as a card**
@@ -689,7 +689,7 @@ In `packages/web/src/styles/library.css`, after the `article h2 button small` ru
 
 - [ ] **Step 7: Run and watch pass**
 
-Run: `npm run test -w @pickarr/web`
+Run: `npm run test:web`
 Expected: PASS.
 
 - [ ] **Step 8: Commit**
@@ -736,7 +736,7 @@ test('paging does not re-walk the pages already read', async () => {
 
 - [ ] **Step 2: Run and watch fail**
 
-Run: `npm run test -w @pickarr/web -- --test-name-pattern="second page"`
+Run: `npm run test:web -- --test-name-pattern="second page"`
 Expected: FAIL — there is no way to ask for more.
 
 - [ ] **Step 3: Give `readUnmatched` a cursor and `Unmatched` a `loadMore`**
@@ -758,7 +758,7 @@ The same shape `Category` uses — sentinel above a retained Load more button, b
 
 - [ ] **Step 5: Run and watch pass**
 
-Run: `npm run test -w @pickarr/web`
+Run: `npm run test:web`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
