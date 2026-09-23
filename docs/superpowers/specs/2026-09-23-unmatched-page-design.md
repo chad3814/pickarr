@@ -1,0 +1,186 @@
+# Unmatched page: expandable cards, and the lookup answer behind them
+
+**Date:** 2026-09-23
+**Status:** proposed
+
+## The problem
+
+`/unmatched` renders a bare `<ul>` of filenames:
+
+```
+Unmatched
+─────────────────────────────────
+Some.Show.S01E01.1080p-GROUP.mkv
+Another.Release.2024.WEB-DL.mkv
+```
+
+Three things are wrong with it, and one is invisible.
+
+1. **It stops at 24 rows and says nothing.** `readUnmatched` collects until
+   `PAGE_SIZE`, and the component renders whatever it got. `Category` gained
+   infinite scroll *and* a Load more button; this screen got neither. With
+   500 unmatched releases an operator sees 24 of them, for ever, with
+   nothing on screen suggesting there are more.
+2. **A filename alone does not say which feed produced it.** `rss_item`
+   carries `feedId`, and `rss_feed` joined the synced set, so the feed's
+   *name* is resolvable in the browser now. Without it, "one misconfigured
+   feed is producing all of this" is not a conclusion this screen can
+   support.
+3. **Nothing says why an item is unmatched** — even though the host already
+   knows and already tells the client. `rss_item.resolution` is
+   `pending | resolved | refused | unresolved` and `resolutionDetail` is a
+   sentence naming what the service did recognise. Both are on
+   `RssItemSyncRead` today and neither is rendered anywhere.
+4. **The lookup answer itself is discarded.** `engine.ts` reads a
+   `LookupEnvelope`, derives `resolution` and `resolutionDetail` from it,
+   and drops the rest. When an operator wants to know *why* the service
+   failed on a name, the evidence no longer exists.
+
+## What this builds
+
+Each unmatched release becomes an expandable card, styled like an `xxx`
+browse card — filename as the title, feed name dimmed at the right:
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Some.Show.S01E01.1080p-GROUP.mkv        Example Feed │
+└──────────────────────────────────────────────────────┘
+```
+
+Expanded:
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Some.Show.S01E01.1080p-GROUP.mkv        Example Feed │
+│                                                      │
+│ Unresolved · arrived 2 Sep 14:20 · torrent           │
+│ the lookup service recognised site Foo and           │
+│ performers A, B in "Some.Show…", but not the item    │
+│                                                      │
+│ {                                                    │
+│   "lookupId": "lk_01H…",                             │
+│   "state": "unresolved",                             │
+│   "confidence": 0.31,                                │
+│   "suggestions": { … }                               │
+│ }                                                    │
+└──────────────────────────────────────────────────────┘
+```
+
+## Architecture
+
+### The card is web's, not a plugin's
+
+An unmatched release has no `media_item` and therefore no plugin card — but
+it should not *look* like a different app. Web already holds the
+`<article>` that every browse card renders into, and
+`@pickarr/plugin-ui` exports the two pieces that make a title line:
+`CardHeading` (with the `trailing` slot added for the adult card) and
+`useExpansion`.
+
+So `Unmatched` composes those directly. The title line needs **no new CSS**:
+`article`, `article h2 button` and `article h2 button small` already style
+it. Only the expanded body is new.
+
+This is the first web-side consumer of `CardHeading`. That is the point of
+the component living in `plugin-ui` rather than in each plugin — but it does
+mean `plugin-ui` is no longer "the plugin seam" exclusively, and its own
+docblock should say so.
+
+### Storing the lookup answer
+
+**A new nullable column, `rss_item.lookup_json`**, written by the lookup
+engine and replicated to clients.
+
+Four rules bound it, and each is load-bearing:
+
+1. **Only when the lookup did not resolve.** A resolved item is not
+   unmatched and its envelope would never be read — and `media` on a
+   resolved envelope is the largest thing the service returns. Written on
+   the `refused` and `unresolved` terminal branches only.
+2. **Cleared when an item resolves.** A release that was unresolved and is
+   later matched by a retry drops its envelope in the same `UPDATE` that
+   sets `resolution = 'resolved'`. Without this the column only ever grows.
+3. **`media` is never stored, even on a non-resolved envelope.** It is null
+   on every branch that writes, so this is belt and braces rather than a
+   filter — but it is the field that would make the column unbounded if a
+   later branch started writing.
+4. **Capped at 8 KB.** A pathological response must not be able to grow
+   every client's replica without limit. Over the cap, the column stores a
+   short marker instead of the envelope, and the card renders that.
+
+**Serialised from the validated shape, never from the response bytes.**
+`validate.ts` has already parsed the response into a `LookupEnvelope` by
+the time the engine sees it, so what is stored is a re-serialisation of a
+shape the contract declares. The one exception is `parsed`, which the type
+itself documents as "carried through unvalidated beyond object or null" —
+arbitrary third-party JSON. It is also the single most useful field for
+diagnosing a bad parse, so it is stored, and this paragraph is the record
+that it is the one part of this column that is not shape-checked.
+
+**Why this needs stating at all:** `sync/tables.ts` excludes
+`rss_item.link` from the replica on the reasoning that a passkey in it
+would become "a copy sitting in a browser's storage indefinitely". A new
+string column crossing the same boundary is exactly the decision that
+policy exists to make deliberate. The envelope is the lookup service's
+answer about a filename; the filename is already in the replica, and the
+service is given no credentials belonging to the tracker the release came
+from. It is not redacted through `redactSecrets`, because that would mangle
+`lookupId` — an opaque token of exactly the shape its hex and alphanumeric
+rules match — and destroy the field most useful for correlating with the
+service's own logs.
+
+### Paging
+
+Infinite scroll plus a retained Load more button, the same shape
+`Category` uses, over `useInfiniteScroll`.
+
+`readUnmatched` already walks pages and stops at 24 collected. It grows a
+cursor so a second call resumes where the first stopped, rather than
+re-walking. The existing measurement stands and gets worse with paging —
+21 page reads per refresh at 500 rows, always to exhaustion when the
+unmatched set is short — so the walk keeps its coalescing refresher and the
+cursor is reset on any wake, since a re-read cannot trust a cursor taken
+before the change.
+
+## Components
+
+| File | Responsibility |
+|---|---|
+| `packages/contract/src/sync.ts` | `RssItemSyncRead.lookupJson: string \| null` |
+| `packages/host/src/db/migrate.ts` | `ALTER TABLE rss_item ADD COLUMN lookup_json TEXT` — additive, so the sync triggers survive |
+| `packages/host/src/db/schema.ts` | the drizzle column, for the DDL-parity guard |
+| `packages/host/src/sync/tables.ts` | the projection, and the three guards that pin it |
+| `packages/host/src/media/writer.ts` | `setResolution` gains the envelope argument |
+| `packages/openmetadata/src/engine.ts` | serialises, caps, and hands it over on the two non-resolved branches; clears it on resolve |
+| `packages/web/src/library/Unmatched.tsx` | cards, expansion, the feed-name join, paging |
+| `packages/web/src/library/useUnmatchedFeeds.ts` | `feedId → name`, read from the `rss_feed` replica |
+| `packages/web/src/styles/library.css` | the expanded body only |
+
+## Testing
+
+- **Host:** the engine writes on `refused`/`unresolved`, writes nothing on
+  `resolved`, **clears** on a resolve that follows a failure, and caps an
+  oversized envelope. The cap and the clear are the two that a happy-path
+  test would miss.
+- **Sync:** the three existing `rss_item` guards extend to the new field —
+  field coverage, projection key list, drizzle/DDL parity. A migration test
+  that the column is added without rebuilding the table, since a rebuild
+  silently drops the sync triggers (`docs/database-migrations.md`).
+- **Web:** a card renders filename and feed name; expanding shows the state,
+  the detail and the JSON; an item with no envelope expands without an empty
+  `<pre>`; paging past 24.
+- **Browser:** one spec. The card must *look* like a browse card, and
+  `getByRole` cannot see that — the same gap `CLAUDE.md` records for
+  `IdentityChangeConfirm`. It measures the title line against a real
+  `xxx` card's geometry, so "styled like the xxx category" is a pinned
+  claim rather than a comment.
+
+## Out of scope
+
+- **Actions on a row** — retry, dismiss, manual match. Each needs a host
+  route; none is needed to read the screen.
+- **Issue #98's browse-list half.** `resolution` still renders beside each
+  release filename in `ReleaseList`, where it reads as a quality marker.
+  Left deliberately, to be handled as its own change.
+- **Indexing "`mediaItemId` is null".** Still not bought; still a third
+  schema bump. The walk cost is unchanged by this work.
