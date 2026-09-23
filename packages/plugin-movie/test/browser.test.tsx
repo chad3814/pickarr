@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import type { PickSubmit } from '@pickarr/plugin-ui';
-import { movieBrowser } from '../src/browser.tsx';
+import { movieBrowser, movieHeadline } from '../src/browser.tsx';
 
 afterEach(cleanup);
 
@@ -33,7 +33,24 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
 
-test('the item’s title renders in the expander button’s accessible name', () => {
+test('a film with a release date is titled with its year, in the film-library convention', () => {
+  // Spelled literally rather than built from `mediaItem(...)`'s own
+  // values: an expectation computed by the code under test cannot see
+  // that code change (`CLAUDE.md`), and `Title (2024)` is the exact
+  // string a film library names a folder by.
+  render(
+    <Card
+      item={mediaItem({ title: 'The Room', releaseDate: '2003-06-27' })}
+      rows={{}}
+      gathered={undefined}
+      onExpandedChange={() => {}}
+      submit={submit}
+    />,
+  );
+  assert.ok(screen.getByRole('button', { name: 'The Room (2003)' }));
+});
+
+test('a film with no release date is titled exactly as before, not with empty parentheses', () => {
   render(
     <Card
       item={mediaItem({ title: 'The Room' })}
@@ -45,8 +62,25 @@ test('the item’s title renders in the expander button’s accessible name', ()
   );
   assert.ok(
     screen.getByRole('button', { name: 'The Room' }),
-    'the title alone names the collapsed button, unchanged from the shared card',
+    'no date means no year, and no bracket either',
   );
+});
+
+test('the year is the first four characters, never a parsed Date', () => {
+  // **The reason this is a unit test and not only a render test.**
+  // `new Date('2003-01-01').getFullYear()` is 2002 anywhere west of UTC,
+  // so a `Date`-based implementation is correct in the timezone whoever
+  // wrote it runs in and wrong by a year for everyone else -- a bug no
+  // render assertion above would catch on a CI runner pinned to UTC.
+  // January the first is the only date that shows it.
+  assert.equal(movieHeadline('Film', '2003-01-01'), 'Film (2003)');
+  assert.equal(movieHeadline('Film', '2003-12-31'), 'Film (2003)');
+  // Anything not shaped like four digits contributes no year at all,
+  // rather than four characters of whatever it happens to be.
+  assert.equal(movieHeadline('Film', ''), 'Film');
+  assert.equal(movieHeadline('Film', 'unknown'), 'Film');
+  assert.equal(movieHeadline('Film', '20xx-01-01'), 'Film');
+  assert.equal(movieHeadline('Film', null), 'Film');
 });
 
 test('every expand and every collapse is reported, with the state the card moved to', () => {
