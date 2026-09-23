@@ -757,8 +757,17 @@ const UNMATCHED_FILENAME =
   'Some.Release.Nobody.Recognises.2024.2160p.UHD.BluRay.REMUX.DolbyVision.HDR10Plus.HEVC.TrueHD.Atmos.7.1.MULTi.SUBS.INTERNAL.PROPER.REPACK.iNTERNAL.RELEASEGROUPNAME.mkv';
 
 /**
- * A second unmatched release, whose name is the same length in spaces
- * rather than dots -- and it exists for one declaration.
+ * A second unmatched release, whose name breaks at spaces where
+ * {@link UNMATCHED_FILENAME}'s breaks nowhere -- and it exists for one
+ * declaration.
+ *
+ * 120 characters against that one's 166, and shorter on purpose rather
+ * than by accident: all this card has to do is overflow its title line,
+ * and it does -- measured at 996px of text through a 716px box, the box
+ * being narrower than the other card's because this feed's name is
+ * longer. Every character past that would only make the overflow
+ * bigger. (An earlier version of this sentence called the two "the same
+ * length", which was simply untrue.)
  *
  * `white-space: nowrap` in `article h2 button span` is **invisible on
  * {@link UNMATCHED_FILENAME}**: a name with no soft wrap opportunity
@@ -790,6 +799,19 @@ const UNMATCHED_FEED = 'Nightly torrents';
  * about an expectation computed by the code that produces it. The
  * filename is interpolated because the two must agree; the wording is
  * this file's.
+ *
+ * **It does not agree with {@link LOOKUP_ANSWER}, which carries a
+ * hundred suggested performers, and the fixture is deliberately that
+ * pair rather than a coherent one.** A real `unresolved` row with those
+ * suggestions would read "recognised performers ... but not the item
+ * itself"; `describeUnresolved` composes the sentence from the same
+ * envelope the answer is serialised from, so production writes one or
+ * the other. This spec is not testing `describeUnresolved` -- it renders
+ * whatever string the column holds (`Unmatched.tsx`) -- and it needs the
+ * *shortest* sentence beside the *longest* answer: a one-line `Detail`
+ * keeps the `<dd>` assertion readable, and a 6690-character answer is
+ * what makes the `16rem` bound on the well observable. Two renderers,
+ * one card.
  */
 const UNMATCHED_DETAIL = `the lookup service did not recognise "${UNMATCHED_FILENAME}"`;
 
@@ -880,19 +902,29 @@ const ANSWER_MAX_HEIGHT_PX = 256 + 16 + 2;
  *    `article dl` sets, and 52191/48184 is 1.0832 against 13/12's
  *    1.0833; and `max-height` removed on its own leaves the
  *    well **1083px** tall where a bounded one reports 274.
- * 2. `article h2 button span`'s `min-width: 0` and the three text
- *    declarations with it, and `article h2 button small`'s
- *    `flex-shrink: 0`. **This pin is the inverse of the one that stood
- *    here yesterday**, which asserted the headline wrapped to more than
- *    one line; the owner asked instead that the trailing label always
- *    stay visible and the filename truncate, "like it does in the
- *    expanded cards" -- the release rows' own
+ * 2. `article h2 button span`, the rule that truncates a card's
+ *    headline so its trailing label survives. **This pin is the inverse
+ *    of the one that stood here yesterday**, which asserted the headline
+ *    wrapped to more than one line; the owner asked instead that the
+ *    label always stay visible and the filename truncate, "like it does
+ *    in the expanded cards" -- the release rows' own
  *    `ul[aria-label='releases'] li > span[id$='-filename']`. Inverted
  *    rather than deleted: one line box, text genuinely wider than the
  *    box it is clipped to, the label at the right edge, and the label's
- *    box no narrower than its own text. See {@link UNMATCHED_FILENAME}
- *    for why 1474px of filename through an 816px title line is what
- *    makes any of that observable.
+ *    box holding its whole text on one line. See {@link
+ *    UNMATCHED_FILENAME} for why 1474px of filename through an 816px
+ *    title line is what makes any of that observable.
+ *
+ *    **Which declarations that does and does not pin, because the honest
+ *    answer is not "the rule".** Deleting the rule outright reds it, and
+ *    so do `white-space: nowrap` (on the second, spaced-name card) and
+ *    `text-overflow: ellipsis`. `overflow: hidden` is read back rather
+ *    than measured, for the reason given at that assertion.
+ *    **`min-width: 0` and `article h2 button small`'s `flex-shrink: 0`
+ *    are not pinned at all** -- both survived deletion, `overflow:
+ *    hidden` and a zero flex basis respectively doing their work for
+ *    them -- and the call sites say so where they are relevant. The
+ *    mutation table is in task 7's report.
  *
  * The other four (`article dl`, `dt`, `dd`, `dd:last-child`) are spacing
  * and colour on a body that reads correctly without them, and are
@@ -1047,25 +1079,43 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
     'which stays inside the card',
   ).toBeLessThanOrEqual(cardBox.x + cardBox.width);
 
-  // `text-overflow: ellipsis` itself, and the one assertion in this spec
-  // that reads a declaration back rather than measuring a consequence --
-  // said plainly, because this file's other pins are measurements on
-  // purpose. Clipping and ellipsising differ only in the glyph painted
-  // in the last few pixels: `scrollWidth` above proves the text is cut,
-  // and nothing in the DOM distinguishes which of the two cut it. The
-  // alternative is a screenshot comparison, which `CLAUDE.md` explicitly
-  // declines as the lesson to draw. So this is worth exactly one thing
-  // -- catching that declaration being dropped from the rule while the
-  // other four stay -- and is spelled here rather than left to look like
-  // a measurement.
+  // The two declarations in this rule that **paint** rather than lay out,
+  // and the only assertions in this spec that read a declaration back
+  // instead of measuring a consequence -- said plainly, because
+  // everything else here is a measurement on purpose.
+  //
+  // `overflow: hidden` is the one that matters most and is the hardest
+  // to see. Every other assertion above measures a *box*, and boxes do
+  // not change when it goes: with `overflow: visible` the headline's
+  // 1474px paints straight over the feed label -- the owner's
+  // requirement defeated -- while the label's box, the right-edge gap
+  // and `scrollWidth` all still read exactly as they do now. Measured:
+  // that mutant was **green** across this whole spec (task 7's report,
+  // the paired run under `min-width: 0`). `text-overflow: ellipsis` has
+  // the same shape one step smaller: clipping and ellipsising differ
+  // only in the glyph painted in the last few pixels, and `scrollWidth`
+  // above proves the text is cut without saying which of the two cut it.
+  //
+  // **What these two buy, exactly: they catch the declaration being
+  // deleted. They do not prove that nothing paints over the label.** No
+  // DOM reading does. A `Range` cannot -- it reports the text's full
+  // laid-out extent whether or not an ancestor clips it, which is why it
+  // was right for the adult card's repair and is no use here -- and
+  // `elementFromPoint` cannot either, because the span's box never
+  // extends over the label; only its paint does. The measurement that
+  // would close it is a screenshot comparison, which `CLAUDE.md`
+  // explicitly declines as the lesson to draw. That residual gap is
+  // written here, where a reader meets the weakest assertion in the
+  // spec, rather than left in a report.
+  await expect(filename).toHaveCSS('overflow', 'hidden');
   await expect(filename).toHaveCSS('text-overflow', 'ellipsis');
 
   // And the same for a headline that *could* wrap: the second card's
-  // name is the same length in spaces, so `white-space: nowrap` is the
-  // only thing keeping it on one line. Without it this measures 2 -- the
-  // card grows a second title line and the release below it moves -- and
-  // the dotted card above cannot see that at all, which is why there are
-  // two cards on this screen.
+  // name breaks at spaces, so `white-space: nowrap` is the only thing
+  // keeping it on one line. Without it this measures 2 -- the card grows
+  // a second title line and the release below it moves -- and the dotted
+  // card above cannot see that at all, which is why there are two cards
+  // on this screen.
   const spacedHeadline = page
     .getByRole('article')
     .filter({ hasText: SPACED_FILENAME })

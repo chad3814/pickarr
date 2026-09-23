@@ -65,19 +65,28 @@ test('the headline is the button’s accessible name, and it is a real heading',
 });
 
 test('the full headline is reachable as a title, and names nothing it is attached to', () => {
-  // **Two assertions that pull in opposite directions, which is why both
-  // are here.** Web truncates this span to one line with an ellipsis so a
-  // card's trailing label stays visible, so the full headline has to be
-  // reachable some other way -- the `title`. But `title` is the *last*
-  // fallback in the accessible-name algorithm, and the button is named
-  // from the content of its subtree, so a `title` that did win would
-  // rename every card in the app. `ReleaseList.test.tsx` pins the same
-  // pair for a release row's filename; neither is reasoned about here.
+  // Web truncates this span to one line with an ellipsis so a card's
+  // trailing label stays visible, so the full headline has to be
+  // reachable some other way -- the `title`.
+  //
+  // **What this test proves, and what it cannot.** It proves the
+  // attribute is there, that it is the same string the span renders,
+  // and that the button's composed two-part name is what it was. It
+  // does **not** exercise the hazard its own subject suggests -- that
+  // `title` is the last fallback in the accessible-name algorithm and
+  // must not outrank the subtree's content -- because `title` and the
+  // text node come from one prop, so both branches of the algorithm
+  // yield the same name and no assertion can separate them. The pin is
+  // aimed at the day they diverge: a `title` carrying anything but the
+  // rendered headline breaks the equality assertion below, and a name
+  // recomputed from a winning `title` breaks the composed one above.
+  // The corresponding pair in `ReleaseList.test.tsx` has the same
+  // limitation for the same reason.
   //
   // The name is spelled as a literal rather than built from the two
   // props, and the trailing label is present rather than omitted: with
   // one child there is no composition to get wrong, and composition is
-  // what a stray `title` would replace.
+  // what a differing `title` would replace.
   const long = 'Some.Release.Nobody.Recognises.2024.2160p.UHD.BluRay.REMUX.HEVC.TrueHD.Atmos.mkv';
   render(
     <CardHeading

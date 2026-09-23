@@ -149,13 +149,23 @@ export function CardHeading({ headline, trailing, expanded, onToggle }: CardHead
           call `ReleaseList.tsx` makes for a release row's filename, one
           component over, against the same rule shape.
 
-          It does **not** change what the button announces, and that is
-          worth knowing rather than assuming: `title` is the last fallback
-          in the accessible-name algorithm, so an element with content is
-          named by its content, and the button is named from its subtree's
-          content either way. `plugin-ui/test/expansion.test.tsx` pins the
-          name against exactly that -- with a trailing label too, since
-          that composes a two-part name a stray `title` could replace.
+          It does **not** change what the button announces: `title` is the
+          last fallback in the accessible-name algorithm, so an element
+          with content is named by its content, and the button is named
+          from its subtree's content either way.
+
+          **That is reasoning, and no test here can currently turn it
+          into evidence** -- said plainly rather than left to look
+          pinned. `title` and the text node are the same prop, so
+          whichever branch of the algorithm wins, the name comes out
+          identical; a test cannot tell the two apart while they agree.
+          What `plugin-ui/test/expansion.test.tsx` does pin is the day
+          they stop agreeing: the attribute is asserted equal to the
+          rendered text, and the button's *composed* two-part name is
+          asserted with a trailing label present -- so a future `title`
+          carrying something else (a path, a composed summary) fails
+          there, which is the change that would make the algorithm's
+          answer matter.
         */}
         <span title={headline}>{headline}</span>
         {/*

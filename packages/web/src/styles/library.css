@@ -182,6 +182,17 @@ article h2 button {
    explicit statement, and the report records it as unpinned rather than
    leaving a reader to infer that a green suite proves it.
 
+   **Kept while `margin-left: auto` was deleted, and the separator is
+   not "is it pinned?" -- by that test all three would go.** It is
+   whether a declaration makes a false statement about how this layout
+   works. `margin-left: auto` did: it named the mechanism putting the
+   label at the right-hand end, and that mechanism is now the headline's
+   `flex: 1`, so reading the rule taught the next person something
+   untrue. This one and the `min-width: 0` above state *constraints* --
+   never shrink this, never floor that -- which stay true whether or not
+   anything currently tests them, and which become load-bearing again
+   the moment the declaration doing the work today changes.
+
    **`margin-left: auto` was here and is gone, rather than kept as
    decoration.** It pushed this element to the end back when the headline
    was content-sized and there was free space in the row for an auto
