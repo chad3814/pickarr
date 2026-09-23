@@ -3,15 +3,27 @@
  * first one, `library.css`, reaches browse's markup by structure alone
  * rather than a class -- the same reasoning applies here and is not
  * repeated). `/settings` is its own file rather than a further section of
- * `library.css`: that file's own docblock is a closed accounting of browse's
- * markup -- "`<article>`, `<img>` and `ul[aria-label='releases']` each
- * appear exactly once ... outside `styles/` and `test/`" -- and the settings
+ * `library.css`: that file's own docblock is a closed accounting, element
+ * type by element type, of the card markup it styles -- and the settings
  * screen's `<form>`s, lists and error alerts are none of what that
  * accounting was written about. Appending them there would mean either
- * rewriting an accounting that is still true of the markup it describes, or
- * leaving it to quietly go stale the way `CLAUDE.md`'s testing hazard warns
- * against for prose -- a second file keeps each accounting scoped to the
- * screen it was written against.
+ * rewriting an accounting written against different markup, or leaving it
+ * to quietly go stale the way `CLAUDE.md`'s testing hazard warns against
+ * for prose -- a second file keeps each accounting scoped to the screens
+ * it was written against.
+ *
+ * **This paragraph used to quote that accounting verbatim -- "`<article>`,
+ * `<img>` and `ul[aria-label='releases']` each appear exactly once" -- and
+ * assert it was "still true of the markup it describes". Both halves went
+ * false at once.** The unmatched screen grew a card, so `<article>` has
+ * two sites, and `library.css`'s header was rewritten to count them; the
+ * sentence quoted here no longer exists in the file it was quoted from.
+ * That is the failure this very paragraph warned about, one file
+ * downstream of where it was watching for it, and it is why the quotation
+ * is gone rather than merely corrected: a copy of another file's counts
+ * goes stale on that file's schedule, not on this one's. What matters here
+ * is the *split*, which is unaffected by how many `<article>`s there
+ * are.
  *
  * **Both of `/settings`'s sections are styled here, in this one file, and
  * the download clients slice did not get a stylesheet of its own.** That is

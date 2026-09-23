@@ -278,8 +278,16 @@ article dd:last-child {
  * sideways for the width of a JSON object wraps inside the card instead;
  * `overflow-wrap: anywhere` because the stored string is compact JSON with
  * no spaces to wrap at. `max-height` with `overflow: auto` bounds it: the
- * answer may be anything up to `LOOKUP_JSON_CAP_BYTES` (8KB), which is
- * several screens of text and would bury every card below it.
+ * answer may be anything up to `LOOKUP_JSON_CAP_BYTES`, which is
+ * **32768 bytes** -- read off `@pickarr/contract` rather than remembered,
+ * because it moved. An earlier version of this comment said 8KB, the value
+ * the cap held while `media` was omitted from the stored answer; `media`
+ * is stored now and the cap rose to fit it, on the argument that the
+ * richest answers are the ones most worth reading and a smaller cap turned
+ * exactly those into the marker. So this rule is *more* load-bearing than
+ * when it was written, not less: 32KB of compact JSON is many screens of
+ * text, a card is now likelier to hold a big answer than a marker, and
+ * without the bound one opened card would bury every card below it.
  */
 article dd pre {
   margin: 0;

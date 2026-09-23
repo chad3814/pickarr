@@ -73,10 +73,20 @@
  * existed: 400 `rss_item` rows with 24 listed cost **408** page reads (24
  * independent walks of 17 pages each) for one batch, plus 24 renders each
  * tearing down and rebuilding 24 subscriptions. {@link makeRefresh} turns
- * that into at most two. This matters most during exactly the event this
- * branch creates: `SCHEMA_VERSION`'s 1->2 bump forces every client through a
- * bootstrap and backfill of `rss_item`, a continuous stream of batches into
- * the one table this screen walks.
+ * that into at most two. It matters whenever batches arrive into
+ * `rss_item` back to back: a feed poll landing a run of releases, the
+ * lookups that follow it resolving in a stream, or a client bootstrapping
+ * a replica it does not yet hold.
+ *
+ * **This paragraph used to name "exactly the event this branch creates:
+ * `SCHEMA_VERSION`'s 1->2 bump", and that was wrong twice over.** The bump
+ * is on `main` -- `store/db.ts` is untouched by this branch -- so it is
+ * not this branch's event; and if a resync really were forced here,
+ * {@link textOf} further down would have nothing to be tolerant *of*,
+ * since its whole premise is that a replica row written before
+ * `lookupJson` existed is never refreshed. Two comments in one file
+ * disagreeing about whether the replica had just been rebuilt is what
+ * gave it away.
  *
  * **Each release renders as a card, not as a line of a list.** A release
  * here has no `media_item` and so no plugin card of its own, but it should
@@ -169,8 +179,16 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  *
  * The empty string answers `undefined` too. It is not a value worth a
  * label, and rendering it would leave a `<dt>` standing over an empty
- * `<dd>` -- the same call `CardHeading`'s `trailing` makes for an empty
- * `<small>`.
+ * `<dd>`.
+ *
+ * **That exclusion has to happen here, because the shared components do
+ * not make it.** `CardHeading`'s gate is `trailing !== undefined`, so a
+ * `trailing` of `''` renders an empty `<small>` -- and the one card in
+ * this repo that passes a trailing label filters the empty string out
+ * itself, before passing it, for exactly that reason. An earlier version
+ * of this comment credited `CardHeading` with the call; it makes none.
+ * The rule is that a shared component renders what it is given, and
+ * "there is nothing here" is the caller's fact to establish.
  */
 function textOf(value: Record<string, unknown>, field: string): string | undefined {
   const held = value[field];
