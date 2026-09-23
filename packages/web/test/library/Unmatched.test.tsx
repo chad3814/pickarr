@@ -10,6 +10,7 @@ import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts, subscribeTable } from '../../src/store/notify.ts';
 import { Unmatched, type UnmatchedSource } from '../../src/library/Unmatched.tsx';
+import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -507,4 +508,209 @@ test('a batch that matches every listed release costs one re-read, not one per l
   const settled = await quiesce(() => walks) - walksAfterFirstRender;
   assert.ok(settled <= 2, `one batch settles in at most two walks, not ${String(settled)}`);
   assert.ok(pageReads > 0, 'and the screen really did read the replica');
+});
+
+test('a second page is read on demand, and the first page is kept', async () => {
+  const db = await freshDb();
+  const total = 30;
+  const seedOps: SyncOp[] = [];
+  for (let id = 1; id <= total; id += 1) {
+    seedOps.push(rssOp({ id, filename: costFixtureFilename(id), mediaItemId: null, updatedAt: id }));
+  }
+  await seed(db, seedOps);
+
+  render(<Unmatched source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.deepEqual(
+      filenamesShown(),
+      Array.from({ length: PAGE_SIZE }, (_, i) => costFixtureFilename(total - i)),
+      'one screenful, newest first',
+    );
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+
+  await waitFor(() => {
+    assert.deepEqual(
+      filenamesShown(),
+      Array.from({ length: total }, (_, i) => costFixtureFilename(total - i)),
+      'the second page is appended, and the first screenful is still exactly where it was',
+    );
+  });
+});
+
+test('the sentinel and the button both disappear once the table is exhausted', async () => {
+  // Zero is an answer: appending a page of zero new rows still has to flip
+  // `done`, and "no more to load" must not look like "not loaded yet" --
+  // which is why this seeds exactly one screenful rather than fewer.
+  // `readUnmatched`'s exhaustion signal is a raw page shorter than
+  // `PAGE_SIZE`, not a row count, so a first page that exactly fills one
+  // cannot yet tell there is nothing behind it, and both controls start out
+  // offered here.
+  const db = await freshDb();
+  const seedOps: SyncOp[] = [];
+  for (let id = 1; id <= PAGE_SIZE; id += 1) {
+    seedOps.push(rssOp({ id, filename: costFixtureFilename(id), mediaItemId: null, updatedAt: id }));
+  }
+  await seed(db, seedOps);
+
+  render(<Unmatched source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful, exactly filling the first raw page');
+  });
+  assert.ok(screen.getByTestId('load-more-sentinel'), 'more may exist, so the sentinel is offered');
+  assert.ok(screen.getByRole('button', { name: /load more/i }), 'and so is the button');
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+
+  await waitFor(() => {
+    assert.ok(!screen.queryByTestId('load-more-sentinel'), 'the next page came back empty, and now the sentinel is gone');
+  });
+  assert.ok(gone(/load more/i), 'the button too -- neither looks like "not loaded", both look like "no more"');
+  assert.equal(filenamesShown().length, PAGE_SIZE, 'and nothing already shown was lost in the process');
+});
+
+test('a wake resets the walk rather than resuming a stale cursor', async () => {
+  // **The trap this whole task walks into.** `cursorRef` names a position
+  // in the raw table, taken from a page read before the batch seeded below
+  // committed. `loadMore` resumes that cursor; a wake never does
+  // (`makeRefresh`'s own docblock) -- it re-reads the whole screen from the
+  // top instead. If a wake lands while `loadMore`'s own resumption is still
+  // in flight and that resumption is allowed to land anyway, its page gets
+  // appended to rows the wake already replaced -- which can skip a row the
+  // fresh read never reached, or repeat one it already showed, and neither
+  // failure looks like one.
+  const db = await freshDb();
+  const total = 26;
+  const seedOps: SyncOp[] = [];
+  for (let id = 1; id <= total; id += 1) {
+    seedOps.push(rssOp({ id, filename: costFixtureFilename(id), mediaItemId: null, updatedAt: id }));
+  }
+  await seed(db, seedOps);
+
+  const real = sourceFor(db);
+  let releaseStalePage: (() => void) | undefined;
+  let held = false;
+  const source: UnmatchedSource = {
+    ...real,
+    // Only the paging call `loadMore` is about to issue names a `from` at
+    // all -- the mount's own first read and the wake's own re-read both
+    // omit it (`readUnmatched`'s own doc) -- so holding exactly the first
+    // such call isolates the race without touching anything else this
+    // screen reads. `held` lets every later paging call through normally,
+    // so the walk this test provokes at its own end is not itself held.
+    listByTable: (table, opts) => {
+      if (table === 'rss_item' && opts.from !== undefined && !held) {
+        held = true;
+        return new Promise((resolve) => {
+          releaseStalePage = () => { resolve(real.listByTable(table, opts)); };
+        });
+      }
+      return real.listByTable(table, opts);
+    },
+  };
+
+  render(<Unmatched source={source} />);
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful of the first 26 releases');
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => {
+    assert.ok(releaseStalePage !== undefined, 'the second page was requested and is being held open');
+  });
+
+  // A fresh release lands while that page is still in flight -- the same
+  // shape a live feed poll delivers, and exactly what wakes this screen
+  // through `subscribeInserts`.
+  await seed(db, [rssOp({ id: 27, filename: costFixtureFilename(27), mediaItemId: null, updatedAt: 100 })]);
+
+  const freshWindow = Array.from({ length: PAGE_SIZE }, (_, i) => costFixtureFilename(27 - i));
+  await waitFor(() => {
+    assert.deepEqual(filenamesShown(), freshWindow, 'the wake re-read from the top and replaced the whole window');
+  });
+
+  // Now let the stale page resolve. Its cursor still names a real boundary
+  // in the table -- IndexedDB does not invalidate it -- but `rows` is not
+  // the array it was taken against any more.
+  releaseStalePage?.();
+  const settledLength = await quiesce(() => filenamesShown().length);
+
+  assert.equal(settledLength, PAGE_SIZE, 'the stale page was discarded, not appended');
+  assert.deepEqual(filenamesShown(), freshWindow, 'what is shown is exactly the fresh window, unchanged by the stale answer');
+  assert.ok(
+    screen.getByRole('button', { name: /load more/i }),
+    'there is still more to load -- the stale page\'s exhaustion was discarded too',
+  );
+
+  // The walk still works correctly from here: the next `loadMore` resumes
+  // from the *fresh* cursor and reaches every row the wake's window left
+  // out, rather than the ones the discarded stale page would have.
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, total + 1, 'every release, including the ones only the fresh cursor could reach');
+  });
+  assert.ok(!screen.queryByRole('button', { name: /load more/i }), 'and now the table really is exhausted');
+});
+
+test('paging does not re-walk the pages already read', async () => {
+  // Counted as calls to `listByTable`, because the cost is the reason the
+  // cursor exists at all (this file's own docblock: no index on
+  // "mediaItemId is null", so every read walks the raw table). A design
+  // that answered `loadMore` by growing a target count and re-reading the
+  // whole accumulated window from the top -- a plausible-looking port of
+  // `useMediaItems.ts`'s own `windowSizeRef` approach -- would pay for the
+  // newest screenful's own raw page a second time on every `loadMore`; this
+  // fixture makes that concrete rather than asymptotic.
+  const db = await freshDb();
+  const oldestUnmatched = PAGE_SIZE; // ids 1..24: reachable only by loadMore, past the gap below
+  const matchedGap = PAGE_SIZE; // ids 25..48: a whole raw page every walk that reaches the oldest block must pass through
+  const newestUnmatched = PAGE_SIZE; // ids 49..72: exactly the first screenful, needing no skip at all
+  const total = oldestUnmatched + matchedGap + newestUnmatched;
+
+  const seedOps: SyncOp[] = [];
+  for (let id = 1; id <= total; id += 1) {
+    const mediaItemId = id > oldestUnmatched && id <= oldestUnmatched + matchedGap ? 7 : null;
+    seedOps.push(rssOp({ id, filename: costFixtureFilename(id), mediaItemId, updatedAt: id }));
+  }
+  await seed(db, seedOps);
+
+  const real = sourceFor(db);
+  let pageReads = 0;
+  const source: UnmatchedSource = {
+    ...real,
+    listByTable: (table, opts) => {
+      if (table === 'rss_item') pageReads += 1;
+      return real.listByTable(table, opts);
+    },
+  };
+
+  render(<Unmatched source={source} />);
+  await waitFor(() => {
+    assert.equal(filenamesShown().length, newestUnmatched, 'one screenful -- exactly the newest, unmatched block');
+  });
+  const readsForFirstPage = pageReads;
+  assert.equal(readsForFirstPage, 1, 'the newest block alone fills a whole raw page, so one read is enough');
+
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => {
+    assert.equal(
+      filenamesShown().length,
+      oldestUnmatched + newestUnmatched,
+      'the oldest block is now shown too, on top of the first screenful',
+    );
+  });
+
+  // Reaching the oldest block costs exactly two more raw pages: one to
+  // skip the matched gap, one to collect the oldest block itself. A design
+  // that re-walked the newest block's own page to get there would make
+  // this three instead of two -- the exact page this test's first read
+  // already paid for.
+  assert.equal(
+    pageReads - readsForFirstPage,
+    2,
+    'loadMore paid for the gap and the next block, and nothing it already had',
+  );
 });

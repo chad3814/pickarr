@@ -100,12 +100,13 @@
  * actually answered, both of which the host has been sending and nothing
  * has been showing.
  */
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { CardHeading, useExpansion } from '@pickarr/plugin-ui';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
 import { useFeedNames } from './useFeedNames.ts';
+import { useInfiniteScroll } from './useInfiniteScroll.ts';
 
 /**
  * The four `Store` members this screen needs, and nothing else -- so a
@@ -238,20 +239,53 @@ interface UnmatchedRow {
   readonly lookupJson: string | undefined;
 }
 
+/** The full key `by_table_updated` orders by -- what {@link readUnmatched} resumes a walk from, and what it hands back as where it stopped. */
+type Cursor = { updatedAt: number; id: number };
+
+/**
+ * One page of {@link readUnmatched}'s walk: the rows it collected, and
+ * where to resume the raw-table walk to get the next page.
+ *
+ * `cursor` is `undefined` exactly when the walk reached the table's
+ * earliest row -- there is nothing more to page into, however few or many
+ * rows `rows` holds (zero included: see the "no more" test in this file's
+ * own suite). It is defined otherwise, whether or not `rows` filled a whole
+ * screen, so a caller can always tell "exhausted" from "stopped for its own
+ * reasons" without inspecting `rows.length` at all.
+ */
+interface UnmatchedPage {
+  readonly rows: readonly UnmatchedRow[];
+  readonly cursor: Cursor | undefined;
+}
+
 /**
  * Walks `rss_item` newest-first through `source.listByTable`, keeping only
  * the rows whose `mediaItemId` is `null`, until either enough have been
  * collected for one screen or the table is exhausted. See this file's
  * docblock for why the filter lives here instead of in an index.
+ *
+ * `from` resumes the raw-table walk exactly where a previous call's
+ * returned {@link UnmatchedPage.cursor} left it -- `ListByTableOptions.from`'s
+ * own doc: the row named there is excluded from the next page, so passing
+ * it back neither skips a row nor repeats one. Omitted, the walk starts
+ * from the newest row in the table.
+ *
+ * **Resuming this cursor is `loadMore`'s job alone.** A cursor names a
+ * position in the raw table, not in any particular rendering of this
+ * screen's rows -- and a batch committing between the read that produced it
+ * and the read that resumes it can change what rows exist above that
+ * position without changing the position itself. Nothing here can tell the
+ * two situations apart; that is `Unmatched`'s own job, and its docblock
+ * says how it draws the line.
  */
-async function readUnmatched(source: UnmatchedSource): Promise<readonly UnmatchedRow[]> {
+async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<UnmatchedPage> {
   const collected: UnmatchedRow[] = [];
-  let from: { updatedAt: number; id: number } | undefined;
+  let cursor = from;
 
   for (;;) {
     // eslint-disable-next-line no-await-in-loop -- each page's cursor comes from the previous page's last row, so the walk is inherently sequential
     const page = await source.listByTable('rss_item', {
-      ...(from !== undefined ? { from } : {}),
+      ...(cursor !== undefined ? { from: cursor } : {}),
       direction: 'prev',
       limit: PAGE_SIZE,
     });
@@ -273,17 +307,18 @@ async function readUnmatched(source: UnmatchedSource): Promise<readonly Unmatche
       });
     }
 
-    if (page.length < PAGE_SIZE) break; // the table's earliest row was reached
-    if (collected.length >= PAGE_SIZE) break; // enough for one screen
+    // The table's earliest row was reached before this page even filled --
+    // there is no further cursor to hand back, whatever `collected` holds.
+    if (page.length < PAGE_SIZE) return { rows: collected, cursor: undefined };
 
     const last = page[page.length - 1];
-    // `page.length === PAGE_SIZE` here (neither break fired), so `page` is
-    // non-empty and `last` is defined.
-    if (last === undefined) break;
-    from = { updatedAt: updatedAtOf(last), id: last.id };
-  }
+    // `page.length === PAGE_SIZE` here, so `page` is non-empty and `last`
+    // is defined; the check is for the type checker, not a real branch.
+    if (last === undefined) return { rows: collected, cursor: undefined };
+    cursor = { updatedAt: updatedAtOf(last), id: last.id };
 
-  return collected;
+    if (collected.length >= PAGE_SIZE) return { rows: collected, cursor }; // enough for one screen; resume from here next time
+  }
 }
 
 /**
@@ -308,10 +343,17 @@ async function readUnmatched(source: UnmatchedSource): Promise<readonly Unmatche
  * cannot drift into reading the replica two different ways -- and, now that
  * they share it, cannot walk the table concurrently and apply their two
  * answers in whichever order finished last.
+ *
+ * **Every walk here calls {@link readUnmatched} with no cursor.** A wake
+ * means something changed somewhere in the table; it says nothing about
+ * where, so the only read that can answer it is a fresh one from the top,
+ * discarding whatever page or cursor `Unmatched` had accumulated through
+ * `loadMore`. See that function's own docblock for why resuming a cursor
+ * across a wake is unsafe rather than merely unnecessary.
  */
 function makeRefresh(
   source: UnmatchedSource,
-  apply: (rows: readonly UnmatchedRow[]) => void,
+  apply: (page: UnmatchedPage) => void,
   isCancelled: () => boolean,
 ): () => void {
   let walking = false;
@@ -480,6 +522,49 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // answer, and the two must not render the same way).
   const [rows, setRows] = useState<readonly UnmatchedRow[] | undefined>(undefined);
 
+  // Whether the raw-table walk has reached its earliest row. Starts `false`
+  // rather than `true`: before the first page resolves there may well be
+  // more to load, and defaulting to "no more" would flash the sentinel and
+  // button away and back the instant that page lands, for a screen with
+  // more than one page. See {@link UnmatchedPage.cursor}'s own doc for
+  // exactly when this becomes `true`.
+  const [done, setDone] = useState(false);
+
+  // Where the raw-table walk stopped, for `loadMore` to resume from. A ref,
+  // not state: `loadMore` reads and writes it without waiting on a render,
+  // the same reason `useMediaItems.ts`'s own `cursorRef` is one.
+  // `undefined` both before the first page resolves and once the table is
+  // exhausted -- `loadMore` treats the two alike, since neither has
+  // anywhere to resume from.
+  const cursorRef = useRef<Cursor | undefined>(undefined);
+
+  // Whether a `loadMore` request is already in flight, guarding a second
+  // click the same way `useMediaItems.ts`'s own `loadingMoreRef` does: a
+  // second call before the first resolves would resume from the same
+  // cursor twice and append the same page twice.
+  const loadingMoreRef = useRef(false);
+
+  // Bumped every time `rows`/`done`/`cursorRef` are replaced wholesale from
+  // a fresh, cursor-less read -- by `makeRefresh`'s `apply` below, and by
+  // this effect re-running for a new `source`. `loadMore` captures this
+  // before issuing its request and discards the answer if it has moved by
+  // the time the request resolves.
+  //
+  // **This is the trap this whole task exists to avoid.** `cursorRef`
+  // names a position in the raw table, taken from a page that may have been
+  // read before some other batch committed. A wake between that read and
+  // `loadMore`'s own resuming it re-reads the whole screen from the top --
+  // `makeRefresh` never passes a cursor -- and once that fresh read lands,
+  // the old cursor no longer describes a boundary anything on screen
+  // corresponds to: rows above it may have shifted, and appending the page
+  // it names to the *new* `rows` can silently skip a row the fresh read
+  // never got to, or repeat one it already showed. Discarding the stale
+  // answer outright is what `useMediaItems.ts`'s own `windowGenerationRef`
+  // does for the same shape of race, and the reasoning is identical: the
+  // read that bumped this generation already answered for everything the
+  // held request was going to add, because it started over from nothing.
+  const generationRef = useRef(0);
+
   // `feedId -> name`, for the trailing label on each card's title line.
   // Kept current by its own `subscribeTable` subscription, so a feed
   // renamed on the settings screen relabels these cards without a reload;
@@ -505,7 +590,19 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // lets a walk started under one page of rows still apply under the next.
   useEffect(() => {
     let cancelled = false;
-    const refresh = makeRefresh(source, setRows, () => cancelled);
+
+    // Replaces `rows`, `done` and `cursorRef` together, from a read that
+    // started with no cursor of its own -- see `generationRef`'s own doc
+    // for why the bump happens first, and this file's docblock on
+    // `makeRefresh` for why every wake reads this way rather than resuming.
+    function apply(page: UnmatchedPage): void {
+      generationRef.current += 1;
+      setRows(page.rows);
+      setDone(page.cursor === undefined);
+      cursorRef.current = page.cursor;
+    }
+
+    const refresh = makeRefresh(source, apply, () => cancelled);
     refreshRef.current = refresh;
 
     refresh();
@@ -516,6 +613,45 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
       unsubscribe();
     };
   }, [source]);
+
+  // Resumes the walk from `cursorRef` for one more page, appending it to
+  // `rows` rather than replacing them -- the one path that *does* resume a
+  // cursor, and the reason it is safe here and unsafe in `makeRefresh`: it
+  // captures `generationRef` before issuing the request and, per
+  // `generationRef`'s own doc, discards the answer if a wake has replaced
+  // the window it was resuming underneath by the time it lands.
+  const loadMore = useCallback(() => {
+    if (loadingMoreRef.current) return; // a request is already in flight; a second click is a no-op
+    const cursor = cursorRef.current;
+    if (cursor === undefined) return; // exhausted, or the first page has not resolved yet
+    loadingMoreRef.current = true;
+    const generation = generationRef.current;
+
+    readUnmatched(source, cursor)
+      .then((page) => {
+        // A wake already re-read the whole screen from the top while this
+        // page was in flight, and that re-read already answered for
+        // everything this page was going to add -- see `generationRef`'s
+        // own doc for why resuming `cursor` now would be wrong rather than
+        // merely redundant.
+        if (generation !== generationRef.current) return;
+        setRows((current) => [...(current ?? []), ...page.rows]);
+        setDone(page.cursor === undefined);
+        cursorRef.current = page.cursor;
+      })
+      .catch((err: unknown) => {
+        if (isStoreClosed(err)) return;
+        throw err;
+      })
+      .finally(() => {
+        loadingMoreRef.current = false;
+      });
+  }, [source]);
+
+  // Scrolling loads the next page; the button rendered below still does
+  // too. See `useInfiniteScroll` for why both, and note the order in the
+  // markup below: the sentinel sits above the button, matching `Category`.
+  const sentinel = useInfiniteScroll(loadMore, !done);
 
   // Wakes on a plain update to any release *currently listed here* -- the
   // one shape `subscribeInserts` cannot see (this file's docblock). Torn
@@ -542,13 +678,31 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
         (rows.length === 0 ? (
           <p>Everything has been matched.</p>
         ) : (
-          rows.map((row) => (
-            <UnmatchedCard
-              key={row.id}
-              row={row}
-              feedName={row.feedId === undefined ? undefined : feedNames.get(row.feedId)}
-            />
-          ))
+          <>
+            {rows.map((row) => (
+              <UnmatchedCard
+                key={row.id}
+                row={row}
+                feedName={row.feedId === undefined ? undefined : feedNames.get(row.feedId)}
+              />
+            ))}
+            {/*
+              Gated on `!done`, the same as `Category.tsx`'s own pair: once
+              the walk has reached the table's earliest row there is
+              nothing left to page into, and offering either control would
+              be an affordance with nothing behind it. Not `aria-hidden`
+              either, for the same reason `Category.tsx` gives -- an empty
+              `<div>` with no role is already nothing to a screen reader.
+            */}
+            {!done && (
+              <>
+                <div ref={sentinel} data-testid="load-more-sentinel" />
+                <button type="button" onClick={loadMore}>
+                  Load more
+                </button>
+              </>
+            )}
+          </>
         ))}
     </section>
   );
