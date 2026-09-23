@@ -78,9 +78,26 @@ it should not *look* like a different app. Web already holds the
 `CardHeading` (with the `trailing` slot added for the adult card) and
 `useExpansion`.
 
-So `Unmatched` composes those directly. The title line needs **no new CSS**:
-`article`, `article h2 button` and `article h2 button small` already style
-it. Only the expanded body is new.
+So `Unmatched` composes those directly.
+
+**This section first said the title line needed "no new CSS" -- that
+`article`, `article h2 button` and `article h2 button small` already
+styled it, and only the expanded body was new. That stopped being true
+when a card's title went from wrapping to truncating.** The reversal was
+made so a trailing label stays visible whatever the headline's length,
+and it cannot be had from the rules that already existed: the branch adds
+`article h2 button span` (`flex: 1; min-width: 0; overflow: hidden;
+text-overflow: ellipsis; white-space: nowrap`) and rewrites
+`article h2 button small`, replacing `margin-left: auto` with
+`flex-shrink: 0` -- the label now holds its place because the headline is
+the flexible item, not because a margin pushes it.
+
+Both rules are unscoped, and deliberately: keeping a trailing label
+legible is every card's business, not this screen's, so the browse cards
+get the same treatment. So the accurate statement is that the title line
+needs **no new markup** -- it is the same two shared components -- while
+the CSS under it changed for every card that has a trailing label. The
+expanded body is new on top of that.
 
 This is the first web-side consumer of `CardHeading`. That is the point of
 the component living in `plugin-ui` rather than in each plugin — but it does
@@ -169,7 +186,7 @@ before the change.
 | `packages/host/src/media/writer.ts` | `setResolution` gains the envelope argument |
 | `packages/openmetadata/src/engine.ts` | serialises, caps, and hands it over on the two non-resolved branches; clears it on resolve |
 | `packages/web/src/library/Unmatched.tsx` | cards, expansion, the feed-name join, paging |
-| `packages/web/src/library/useUnmatchedFeeds.ts` | `feedId → name`, read from the `rss_feed` replica |
+| `packages/web/src/library/useFeedNames.ts` | `feedId → name`, read from the `rss_feed` replica (planned as `useUnmatchedFeeds.ts`; renamed on the way in, since nothing about it is specific to this screen) |
 | `packages/web/src/styles/library.css` | the expanded body only |
 
 ## Testing
@@ -185,11 +202,25 @@ before the change.
 - **Web:** a card renders filename and feed name; expanding shows the state,
   the detail and the JSON; an item with no envelope expands without an empty
   `<pre>`; paging past 24.
-- **Browser:** one spec. The card must *look* like a browse card, and
-  `getByRole` cannot see that — the same gap `CLAUDE.md` records for
-  `IdentityChangeConfirm`. It measures the title line against a real
-  `xxx` card's geometry, so "styled like the xxx category" is a pinned
-  claim rather than a comment.
+- **Browser:** one spec. The card must *look* like a card and not like an
+  unstyled block, and `getByRole` cannot see that — the same gap
+  `CLAUDE.md` records for `IdentityChangeConfirm`.
+
+  **This bullet first said the spec "measures the title line against a
+  real `xxx` card's geometry, so 'styled like the xxx category' is a
+  pinned claim". It does not, and no comparison against another category
+  was ever written.** The shipped spec measures the unmatched card
+  *against itself*: the gap between the feed label's right edge and the
+  card's, the label's box against its own text width, its line count and
+  the filename's by distinct `Range` rect tops, and `scrollWidth` against
+  `clientWidth` for both the truncated filename and the wrapping answer
+  well. Nothing in it visits another category route.
+
+  That is the weaker claim, and it is the right one to make: the two
+  screens are held together by *sharing the rules*, not by a test that
+  compares them, and the one comparison that would have been meaningful —
+  the browse card's own geometry — is pinned by that card's own spec,
+  which this branch repaired rather than reused.
 
 ## Out of scope
 

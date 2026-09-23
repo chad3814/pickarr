@@ -218,6 +218,57 @@ test('a release whose feed the replica has not got renders no trailing label', a
   assert.ok(screen.getByRole('button', { name: 'orphan.mkv' }), 'and the name is the filename alone');
 });
 
+test('a feed named with the empty string renders no trailing label', async () => {
+  // Reachable, not defensive: `POST /api/feeds`'s body guard checks
+  // `typeof name === 'string'` and `addFeed` refuses only on the plugin,
+  // the transport, the poll interval and a duplicate url. The settings
+  // form's `required` is a browser constraint an API caller does not go
+  // through, so `''` really can reach the replica.
+  //
+  // `CardHeading`'s gate is `trailing !== undefined`, so an unfiltered
+  // `''` renders an empty `<small>` -- a flex item with no content, which
+  // moves the title line for nothing. Neither shared component makes this
+  // call, so `feedLabel` does.
+  const db = await freshDb();
+  await seed(db, [
+    feedOp({ id: 7, name: '' }),
+    rssOp({ id: 1, filename: 'nameless-feed.mkv', mediaItemId: null, updatedAt: 10, feedId: 7 }),
+  ]);
+
+  render(<Unmatched source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.deepEqual(filenamesShown(), ['nameless-feed.mkv']);
+  });
+  assert.ok(
+    screen.getByRole('button').querySelector('small') === null,
+    'an empty name is no name, and renders no element',
+  );
+  assert.ok(screen.getByRole('button', { name: 'nameless-feed.mkv' }), 'nor does it change what the control is called');
+});
+
+test('an empty detail sentence renders no label standing over nothing', async () => {
+  // `resolutionDetail` is `string | null` on the wire and the host writes
+  // `envelope.refusal` straight into it on the refused branch, gated on
+  // `!== null` -- so a service answering with an empty refusal string
+  // stores `''`. That is the state `textOf`'s empty-string exclusion is
+  // for, and it is the one of its three guards that no other test reaches.
+  const db = await freshDb();
+  await seed(db, [
+    rssOp({ id: 1, filename: 'blank-detail.mkv', mediaItemId: null, updatedAt: 10, resolutionDetail: '' }),
+  ]);
+
+  render(<Unmatched source={sourceFor(db)} />);
+  await waitFor(() => {
+    assert.deepEqual(filenamesShown(), ['blank-detail.mkv']);
+  });
+
+  expandTheOnlyCard();
+
+  assert.ok(screen.getByText('unresolved'), 'the card did open');
+  assert.ok(gone('Detail'), 'and the pair with nothing in it is absent entirely, not rendered empty');
+});
+
 test('collapsed, a card shows no detail and no JSON', async () => {
   // `useExpansion` starts closed, and the body is gated on it. Without
   // this, a card that rendered its body unconditionally would pass every
@@ -306,6 +357,81 @@ test('a release with no stored answer expands without an empty block', async () 
   assert.ok(screen.getByText('pending'), 'the card did open -- the state line is there');
   assert.ok(document.querySelector('pre') === null, 'and no empty block came with it');
   assert.ok(gone('Lookup answer'), 'nor a label standing over nothing');
+});
+
+/**
+ * One `rss_item` `upsert` op in the shape the replica held **before**
+ * `lookupJson` was on the wire: no `lookupJson` key at all, and no
+ * `resolution` either.
+ *
+ * **Hand-built, and deliberately not typed `RssItemSyncRead`.** That is
+ * the whole point of it existing. `CLAUDE.md`: "a test whose fixtures all
+ * come from the code under test cannot see that code's history ... When
+ * behaviour changes and stored data does not, hand-build a fixture in the
+ * old shape." Every other fixture in this file goes through `rssOp`,
+ * which satisfies the *current* interface and therefore always supplies
+ * both fields -- so before this existed, `textOf`'s tolerance and the
+ * `not recorded` fallback were unreachable by any test, and the longest
+ * justification comment in `Unmatched.tsx` was unproven. Proved by
+ * mutation: with only `rssOp` fixtures, reading those fields straight off
+ * the narrowed type left the whole suite green.
+ *
+ * `SyncOp.value` is `unknown`, so this needs no cast and no partial type
+ * -- the wire shape is exactly what a replica holds, and a replica
+ * outlives the build that wrote it.
+ *
+ * `resolution` is the second omission rather than the only one because
+ * the two are tolerated by different code: `textOf` for `lookupJson`,
+ * and `?? 'not recorded'` at the render site for `resolution`.
+ */
+function legacyRssOp({ id, filename, updatedAt }: { id: number; filename: string; updatedAt: number }): SyncOp {
+  return {
+    op: 'upsert',
+    table: 'rss_item',
+    id,
+    value: {
+      id,
+      feedId: 1,
+      filename,
+      createdAt: updatedAt,
+      updatedAt,
+      downloadType: 'torrent',
+      mediaItemId: null,
+      rankingScore: null,
+      resolutionDetail: null,
+      deliveredAt: null,
+    },
+  };
+}
+
+test('a release stored before the lookup answer existed still lists, and still opens', async () => {
+  // The state `textOf` and the `not recorded` fallback were written for,
+  // and until this test the only evidence for it was prose. A replica
+  // persists across client builds and neither `SCHEMA_VERSION` nor the
+  // generation token fires on a wire-shape change (`store/gather.ts`), so
+  // a client that was running before `lookupJson` shipped holds rows
+  // without it -- and the host does not rewrite a row that has not
+  // otherwise changed, so the upgrade never refreshes them.
+  //
+  // The listing half is the more important of the two assertions. The
+  // alternative design -- widening `isRssItem` to demand the new fields --
+  // would make such a release *vanish* from the screen, which is the exact
+  // failure this screen exists to prevent, and it would be invisible to
+  // every other test in this file.
+  const db = await freshDb();
+  await seed(db, [legacyRssOp({ id: 1, filename: 'from-an-older-build.mkv', updatedAt: 10 })]);
+
+  render(<Unmatched source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.deepEqual(filenamesShown(), ['from-an-older-build.mkv'], 'an older row is still an unmatched release');
+  });
+
+  expandTheOnlyCard();
+
+  assert.ok(screen.getByText('not recorded'), 'the state line says what it does not have');
+  assert.ok(document.querySelector('pre') === null, 'and no empty block stands in for the answer it never held');
+  assert.ok(gone('Lookup answer'), 'nor a label over nothing');
 });
 
 test('an answer too large to store says so, rather than rendering the marker JSON', async () => {

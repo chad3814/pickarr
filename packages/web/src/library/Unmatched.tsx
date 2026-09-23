@@ -157,20 +157,40 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  * A string field of a stored row, or `undefined` when there is nothing to
  * show for it.
  *
- * **Read off the record rather than off the narrowed type, and that is the
- * point of this function existing.** {@link isRssItem} above answers
- * `value is RssItemSyncRead`, and that interface declares `resolution:
- * string` and `lookupJson: string | null` -- but it checks neither, so
- * after the narrowing those two fields are *typed* present and may be
- * absent at run time. That is not hypothetical here: `store/gather.ts`'s
- * own doc states the rule ("a replica *persists across client builds* ...
- * `SCHEMA_VERSION` rebuilds it when the store's own schema changes and the
- * generation token rebuilds it when the server's database changes, but
- * neither fires when a **wire shape** changes"), and `lookupJson` is a
- * field this very branch added. A client that was running before it
- * existed holds `rss_item` rows without it, and the host only rewrites a
- * row when something about it changes, so those rows are not refreshed by
- * the upgrade either.
+ * **Read off the record rather than off the narrowed type.**
+ * {@link isRssItem} above answers `value is RssItemSyncRead`, and that
+ * interface declares `resolution: string` and `lookupJson: string | null`
+ * -- but it checks neither, so after the narrowing those two fields are
+ * *typed* present and may be absent at run time. That is not hypothetical:
+ * `store/gather.ts`'s own doc states the rule ("a replica *persists across
+ * client builds* ... `SCHEMA_VERSION` rebuilds it when the store's own
+ * schema changes and the generation token rebuilds it when the server's
+ * database changes, but neither fires when a **wire shape** changes"), and
+ * `lookupJson` is a field this branch added. A client that was running
+ * before it existed holds `rss_item` rows without it, and the host only
+ * rewrites a row when something about it changes, so those rows are not
+ * refreshed by the upgrade either.
+ * `Unmatched.test.tsx`'s `legacyRssOp` is a fixture hand-built in that
+ * older shape, which is the only way any test here can see it.
+ *
+ * **What this buys over `value.resolution`, stated precisely, because an
+ * earlier version of this comment overclaimed and mutation testing caught
+ * it.** Property access on a missing key already answers `undefined` in
+ * JavaScript, so for *absence alone* a direct read behaves identically --
+ * a mutant that made all three reads direct left every test green. Three
+ * things are actually bought:
+ *
+ * - **The `typeof` guard.** A field holding something that is not a string
+ *   would otherwise reach React: `null` renders as the text `null` through
+ *   a `String()` coercion, and an object throws outright. Pinned -- the
+ *   mutant that coerced instead of checking reds "a release with no stored
+ *   answer expands without an empty block", because `lookupJson` is
+ *   genuinely `null` on the wire for a release whose lookup never ran.
+ * - **The empty-string exclusion**, below.
+ * - **Honesty about the type.** `value.resolution` types as `string`, so
+ *   the `?? 'not recorded'` fallback at the render site would read as dead
+ *   code to the next person, who would delete it. It is not dead: deleting
+ *   it reds the legacy-shape test.
  *
  * Widening {@link isRssItem} to demand the new fields was the alternative
  * and is worse: a row missing one would stop being an unmatched release at
@@ -178,18 +198,14 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  * failure this screen exists to prevent. Declining to render one *line of
  * a card* is the proportionate loss.
  *
- * The empty string answers `undefined` too. It is not a value worth a
- * label, and rendering it would leave a `<dt>` standing over an empty
- * `<dd>`.
- *
- * **That exclusion has to happen here, because the shared components do
- * not make it.** `CardHeading`'s gate is `trailing !== undefined`, so a
- * `trailing` of `''` renders an empty `<small>` -- and the one card in
- * this repo that passes a trailing label filters the empty string out
- * itself, before passing it, for exactly that reason. An earlier version
- * of this comment credited `CardHeading` with the call; it makes none.
- * The rule is that a shared component renders what it is given, and
- * "there is nothing here" is the caller's fact to establish.
+ * **The empty string answers `undefined` too**, because a shared component
+ * renders what it is given and "there is nothing here" is the caller's
+ * fact to establish. `<dt>` over an empty `<dd>` is a label standing over
+ * nothing; `CardHeading`'s gate is `trailing !== undefined`, so a
+ * `trailing` of `''` is an empty `<small>` -- a flex item with no content.
+ * That is why {@link feedLabel} filters the same value on the way *in* to
+ * the heading, and this function on the way in to the body: neither shared
+ * component makes the call, and there is no one place upstream that could.
  */
 function textOf(value: Record<string, unknown>, field: string): string | undefined {
   const held = value[field];
@@ -384,6 +400,43 @@ function makeRefresh(
     }
     walk();
   };
+}
+
+/**
+ * A card's trailing label: the name of the feed that delivered the
+ * release, or `undefined` when there is none to show.
+ *
+ * Three states collapse into that one `undefined`, deliberately:
+ *
+ * - the stored row carries no numeric `feedId` ({@link textOf}'s
+ *   neighbour in `readUnmatched`);
+ * - no `rss_feed` row claims the id -- the feeds table replicates
+ *   separately, so a release can land before the feed that produced it
+ *   does, and `useFeedNames` answers `undefined` rather than mapping the
+ *   id to an empty string for exactly this reason;
+ * - the feed is named `''`.
+ *
+ * **That last one is reachable, not defensive.** `POST /api/feeds`'s own
+ * body guard (`host/src/api/server.ts`'s `isFeedBody`) checks
+ * `typeof name === 'string'` and nothing more, and `addFeed`'s four
+ * refusals are about the plugin, the transport, the poll interval and a
+ * duplicate url -- none about the name. The settings form marks the field
+ * `required`, but that is a browser constraint an API caller does not go
+ * through. So a feed named `''` really can reach this map, and passing it
+ * as `trailing` would render an empty `<small>`: a flex item with no
+ * content, which moves the title line for nothing
+ * (`plugin-ui/src/expansion.tsx`'s own note on why the element is
+ * conditional at all).
+ *
+ * The filtering is here rather than in `CardHeading` or in
+ * `useFeedNames` because both of those are shared: the heading renders
+ * what it is given, and the map's job is to say what the replica holds,
+ * which for a feed named `''` is `''`.
+ */
+function feedLabel(feedNames: ReadonlyMap<number, string>, feedId: number | undefined): string | undefined {
+  if (feedId === undefined) return undefined;
+  const name = feedNames.get(feedId);
+  return name === undefined || name === '' ? undefined : name;
 }
 
 /**
@@ -683,7 +736,7 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
               <UnmatchedCard
                 key={row.id}
                 row={row}
-                feedName={row.feedId === undefined ? undefined : feedNames.get(row.feedId)}
+                feedName={feedLabel(feedNames, row.feedId)}
               />
             ))}
             {/*

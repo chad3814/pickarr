@@ -12,8 +12,11 @@
  * record that it is the part of this column that is not shape-checked.
  *
  * **`media` is kept, not dropped.** An earlier revision of this function
- * omitted it, on the reasoning that `media` is null on both branches that
- * call this -- `refused` and `unresolved` -- so nothing would be lost.
+ * omitted it, on the reasoning that `media` is null wherever this is
+ * called -- the non-resolved outcomes, `refused` and `unresolved`, which
+ * `engine.ts` reaches from three call sites rather than two, since
+ * `unresolved` is written both when the service says so and when it never
+ * finishes inside `MAX_POLLS` -- so nothing would be lost.
  * That reasoning was false: `validate.ts`'s `readEnvelope` parses `media`
  * unconditionally, with no gate on `state` or `refusal`, so a non-resolved
  * envelope can carry a full `media` payload when the service half-
