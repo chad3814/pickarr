@@ -253,9 +253,15 @@ export interface RssItemSyncRead {
    * ever.
    *
    * Serialised from the validated `LookupEnvelope`, never from the
-   * response bytes, and with `media` omitted. Capped: over the cap the
-   * column holds a short marker instead, which the unmatched screen
-   * renders in place of the answer.
+   * response bytes -- `media` included. It was omitted in an earlier
+   * revision on the assumption that a non-resolved envelope always carries
+   * a null `media`; `packages/openmetadata/src/validate.ts`'s
+   * `readEnvelope` parses `media` unconditionally, with no gate on `state`
+   * or `refusal`, so that assumption was false, and dropping it would have
+   * discarded the most direct evidence of *why* a half-identified release
+   * was not confirmed -- the whole question this column exists to answer.
+   * Capped: over the cap the column holds a short marker instead, which
+   * the unmatched screen renders in place of the answer.
    */
   lookupJson: string | null;
   deliveredAt: number | null;
@@ -270,8 +276,18 @@ export interface RssItemSyncRead {
  * `@pickarr/openmetadata`, and `packages/web` must never depend on that
  * package -- it reaches `node:sqlite` through drizzle, which has no browser
  * build. `@pickarr/contract` is the one package both already depend on.
+ *
+ * 32768, not 8192: `Media` carries a synopsis, an arbitrary `details`
+ * object, its `parents` chain and a full cast, and fifty people is roughly
+ * 6 KB on its own now that `media` is part of what this column stores. At
+ * the smaller cap the richest answers -- the ones with the most cast and
+ * detail to show -- would all become the marker and only the thin ones
+ * would stay readable, which is backwards: the bound should cost the
+ * unmatched set as a whole, not punish the answers most worth reading. It
+ * is still a real bound, because only non-resolved releases store
+ * anything here and the unmatched set is normally a short tail.
  */
-export const LOOKUP_JSON_CAP_BYTES = 8192;
+export const LOOKUP_JSON_CAP_BYTES = 32768;
 
 /**
  * What `lookupJson` holds instead of an answer too large to keep. Valid

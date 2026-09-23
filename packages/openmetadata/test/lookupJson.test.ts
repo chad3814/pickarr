@@ -2,7 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lookupJsonFor } from '../src/lookupJson.ts';
 import { LOOKUP_JSON_CAP_BYTES, LOOKUP_JSON_TOO_LARGE } from '@pickarr/contract';
-import type { LookupEnvelope } from '../src/types.ts';
+import type { LookupEnvelope, Media } from '../src/types.ts';
+
+/** A real `Media`, for the test below that needs one attached to a non-resolved envelope. */
+function halfIdentifiedMedia(): Media {
+  return {
+    id: '33333333-3333-3333-3333-333333333333',
+    kind: 'movie',
+    title: 'A Working Title',
+    releaseDate: null,
+    year: 2023,
+    provider: 'tmdb',
+    providerRef: 'tmdb:movie:1',
+    overview: 'A near match the service would not commit to.',
+    details: { runtimeMinutes: 101 },
+    parents: [],
+    people: [
+      { providerRef: 'tmdb:person:9', name: 'Someone Billed', role: 'cast', characterName: 'A Role', billingOrder: 0 },
+    ],
+  };
+}
 
 function envelope(over: Partial<LookupEnvelope> = {}): LookupEnvelope {
   return {
@@ -30,28 +49,26 @@ test('the envelope is serialised as readable JSON', () => {
     confidence: 0.25,
     refusal: null,
     parsed: null,
+    media: null,
     suggestions: null,
   });
 });
 
-test('media is never stored, however large the answer', () => {
-  // Belt and braces, not dead code: `engine.ts` now calls `lookupJsonFor`
-  // from three branches -- refused, unresolved, and the poll ceiling
-  // giving up -- and nothing in this package enforces that the service
-  // actually leaves `media` null on any of them. `validate.ts`'s `media()`
-  // parses whatever sits at the wire envelope's `media` key regardless of
-  // `state` or `refusal`; "filled only for a resolved answer" is the API
-  // document's rule, not a check this package makes. So this is not a
-  // belt for a case that cannot happen -- it is what keeps a service that
-  // violated its own document from growing the column anyway, because
-  // `media` is excluded by never being named in the destructure below,
-  // whatever value it holds.
-  const withMedia = envelope({
-    media: { title: 'A Film', people: [] } as unknown as LookupEnvelope['media'],
-  });
+test('a non-resolved envelope carrying media stores it, not just the thin fields', () => {
+  // Reverses an earlier decision to drop `media`, made on the assumption
+  // that it is always null here. That assumption was false:
+  // `validate.ts`'s `readEnvelope` calls `media()` unconditionally, with
+  // no gate on `state` or `refusal`, so an `unresolved` or `refused`
+  // envelope can carry a full payload when the service half-identified
+  // something and then declined to commit. That payload -- what the
+  // service was weighing when it gave up -- is the most direct evidence
+  // of why the release is unmatched, which is the whole reason this test
+  // exists: a card rendering this answer should be able to show it.
+  const media = halfIdentifiedMedia();
+  const withMedia = envelope({ media });
   const back: unknown = JSON.parse(lookupJsonFor(withMedia));
-  assert.ok(typeof back === 'object' && back !== null && !('media' in back),
-    'media is dropped rather than serialised');
+  assert.ok(typeof back === 'object' && back !== null && 'media' in back);
+  assert.deepEqual((back as { media: unknown }).media, media);
 });
 
 test('an oversized envelope is replaced by a marker, not truncated', () => {

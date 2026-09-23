@@ -11,6 +11,17 @@
  * diagnosing why a name was not recognised, and this sentence is the
  * record that it is the part of this column that is not shape-checked.
  *
+ * **`media` is kept, not dropped.** An earlier revision of this function
+ * omitted it, on the reasoning that `media` is null on both branches that
+ * call this -- `refused` and `unresolved` -- so nothing would be lost.
+ * That reasoning was false: `validate.ts`'s `readEnvelope` parses `media`
+ * unconditionally, with no gate on `state` or `refusal`, so a non-resolved
+ * envelope can carry a full `media` payload when the service half-
+ * identified something and then declined to commit to it. That payload is
+ * the most direct evidence of *why* the release is unmatched -- the whole
+ * question this screen exists to answer -- so it is worth the bytes.
+ * `LOOKUP_JSON_CAP_BYTES` is what bounds it, not an exclusion here.
+ *
  * **Not passed through `redactSecrets`** (`packages/host/src/clients/redact.ts`).
  * That function scans free text for runs that merely look machine-generated
  * -- a long run of same-case hex, or of mixed-case alphanumerics -- because
@@ -36,17 +47,17 @@ import type { LookupEnvelope } from './types.ts';
 /**
  * The lookup service's answer, as the string `rss_item.lookup_json` stores.
  *
- * `media` is dropped, `lookupId` through `suggestions` are kept, and the
+ * Every field of `LookupEnvelope`, `media` included, is kept, and the
  * result is capped at {@link LOOKUP_JSON_CAP_BYTES} bytes -- see the module
- * doc comment above for why each of those is safe to do here.
+ * doc comment above for why that is safe to do here.
  */
 export function lookupJsonFor(envelope: LookupEnvelope): string {
-  // Destructured rather than deleted from a copy: `media` is excluded by
-  // not being named, which is a rule the reader can check by reading, and
-  // a field added to `LookupEnvelope` later is excluded by default rather
-  // than included by accident.
-  const { lookupId, state, partial, cached, confidence, refusal, parsed, suggestions } = envelope;
-  const json = JSON.stringify({ lookupId, state, partial, cached, confidence, refusal, parsed, suggestions });
+  // Destructured rather than spread: naming every field, `media` included,
+  // means a field added to `LookupEnvelope` later is left out by default
+  // rather than included by accident -- the reader can check the rule by
+  // reading this line, without cross-referencing `types.ts`.
+  const { lookupId, state, partial, cached, confidence, refusal, parsed, media, suggestions } = envelope;
+  const json = JSON.stringify({ lookupId, state, partial, cached, confidence, refusal, parsed, media, suggestions });
   // `Buffer.byteLength`, not `.length`: a multi-byte character counts once
   // as a character and up to four times in the replica.
   return Buffer.byteLength(json, 'utf8') > LOOKUP_JSON_CAP_BYTES ? LOOKUP_JSON_TOO_LARGE : json;
