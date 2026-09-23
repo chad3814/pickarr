@@ -139,7 +139,25 @@ export function CardHeading({ headline, trailing, expanded, onToggle }: CardHead
   return (
     <h2>
       <button type="button" aria-expanded={expanded} onClick={onToggle}>
-        <span>{headline}</span>
+        {/*
+          `title` so the full headline is reachable when the rendered one
+          is cut off. Web's `article h2 button span` truncates this to one
+          line with an ellipsis so that a card's trailing label is always
+          visible (`web/src/styles/library.css`), and a headline can be a
+          release filename -- the longest string the app renders and the
+          one an operator most needs to read exactly. This is the same
+          call `ReleaseList.tsx` makes for a release row's filename, one
+          component over, against the same rule shape.
+
+          It does **not** change what the button announces, and that is
+          worth knowing rather than assuming: `title` is the last fallback
+          in the accessible-name algorithm, so an element with content is
+          named by its content, and the button is named from its subtree's
+          content either way. `plugin-ui/test/expansion.test.tsx` pins the
+          name against exactly that -- with a trailing label too, since
+          that composes a two-part name a stray `title` could replace.
+        */}
+        <span title={headline}>{headline}</span>
         {/*
           `<small>`, and not a `<span>` with a class, because this package
           ships markup and web ships the CSS (`plugin.ts`'s `Card` doc) and
@@ -147,14 +165,21 @@ export function CardHeading({ headline, trailing, expanded, onToggle }: CardHead
           element it can select structurally. `<small>` is the element that
           already means side-comment fine print, it appears nowhere else in
           the rendered app, and `article h2 button small` in
-          `web/src/styles/library.css` is what pushes it right and dims it.
+          `web/src/styles/library.css` is what dims it and declares that it
+          is never the item that gives way. **What puts it at the
+          right-hand end is the headline beside it**, which takes the
+          line's slack (`article h2 button span`'s `flex: 1`) and
+          truncates rather than pushing this out of the card. An earlier
+          version of this comment credited the `small` rule's own
+          `margin-left: auto` with the push; that declaration is gone,
+          because a headline that grows leaves no free space for an auto
+          margin to absorb.
 
-          **Rendered only when there is something to say.** An always-present
-          empty `<small>` would still be a flex item, so `space-between`
-          would have nothing to push against and the headline would sit
-          where it does now purely by accident -- a card that later gained a
-          trailing label would shift its own title. Conditional keeps the
-          two-child and one-child layouts honestly different.
+          **Rendered only when there is something to say.** An
+          always-present empty `<small>` would still be a flex item, so a
+          heading with no label would be laid out as though it had one,
+          and nothing in the markup would distinguish the two.
+          Conditional keeps them honestly different.
         */}
         {trailing !== undefined && <small>{trailing}</small>}
       </button>

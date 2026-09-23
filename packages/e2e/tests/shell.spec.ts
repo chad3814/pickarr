@@ -620,22 +620,35 @@ test('an adult card shows its site at the far right of the title, dimmed', async
   assertDimmed(colours);
 
   // Right-aligned: the site's right edge sits at the button's right edge,
-  // and its left edge is well past the title's. Measured as geometry
-  // rather than read back as `margin-left: auto`, because the declaration
-  // is not the claim -- a `float`, a `justify-content` or a wide margin
-  // would all satisfy "is it actually over there" and only geometry says
-  // so. Deleting the rule leaves the site inline after the title, which
-  // fails the gap assertion by a wide margin.
+  // and its left edge is well past where the title's *text* stops.
+  // Measured as geometry rather than read back as a declaration, because
+  // the declaration is not the claim -- a `float`, a `justify-content`,
+  // a wide margin or a growing sibling would all satisfy "is it actually
+  // over there" and only geometry says so.
+  //
+  // **The second measurement is taken over a `Range`, where it used to
+  // be the headline span's own box, and the rewrite is not cosmetic.**
+  // While `article h2 button small` carried `margin-left: auto` the span
+  // was content-sized, so its box ended where its text did. The
+  // truncation change made the span `flex: 1`, so it now fills the line
+  // and its box ends 8px short of the site -- this assertion measured 8
+  // against a floor of 50 and went red on a card that renders exactly as
+  // it did before. A range over the text is what the sentence above
+  // always meant.
   const buttonBox = await headline.boundingBox();
   const siteBox = await site.boundingBox();
-  const titleBox = await headline.locator('span').first().boundingBox();
-  if (buttonBox === null || siteBox === null || titleBox === null) {
+  const titleTextEnd = await headline.locator('span').first().evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const rect = range.getBoundingClientRect();
+    return rect.x + rect.width;
+  });
+  if (buttonBox === null || siteBox === null) {
     throw new Error('the title line did not render, so there is nothing to measure');
   }
   const rightEdgeGap = buttonBox.x + buttonBox.width - (siteBox.x + siteBox.width);
   expect(rightEdgeGap, 'the site ends where the title line ends').toBeLessThan(2);
-  const titleEnd = titleBox.x + titleBox.width;
-  expect(siteBox.x - titleEnd, 'and starts far from where the title stops').toBeGreaterThan(50);
+  expect(siteBox.x - titleTextEnd, 'and starts far from where the title stops').toBeGreaterThan(50);
 });
 
 test('a TV card reads its series and episode before anyone expands it, under a cropped poster', async ({ page, harness }) => {
@@ -727,8 +740,11 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
  * a `.` between alphanumerics is not one, so a name like this is a single
  * unbreakable run 166 characters long. A hyphen *is* one (a line may break
  * after it), which is why the usual `-GROUP` suffix is spelled without it
- * here -- keeping it would have left the browser somewhere to wrap and the
- * pin below would have passed with the rule under test deleted.
+ * here. That mattered directly while this headline wrapped; it still
+ * matters now that it truncates, because an unbreakable run is what makes
+ * the flex item's min-content width the whole string -- which is what
+ * `min-width: 0` has to override, and what the label beside it would
+ * otherwise be pushed out of the card by.
  *
  * The length is chosen against the layout and then measured, not picked
  * for looks. On this suite's 1280px viewport the card measures 850px wide
@@ -739,6 +755,28 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
  */
 const UNMATCHED_FILENAME =
   'Some.Release.Nobody.Recognises.2024.2160p.UHD.BluRay.REMUX.DolbyVision.HDR10Plus.HEVC.TrueHD.Atmos.7.1.MULTi.SUBS.INTERNAL.PROPER.REPACK.iNTERNAL.RELEASEGROUPNAME.mkv';
+
+/**
+ * A second unmatched release, whose name is the same length in spaces
+ * rather than dots -- and it exists for one declaration.
+ *
+ * `white-space: nowrap` in `article h2 button span` is **invisible on
+ * {@link UNMATCHED_FILENAME}**: a name with no soft wrap opportunity
+ * cannot wrap whether it is allowed to or not, so removing that
+ * declaration on its own left every assertion in this spec green
+ * (measured -- the mutation table in task 7's report). A headline with
+ * spaces is the case it is actually for, and it is not a contrived one:
+ * plenty of feeds deliver names spelled this way, and every browse card's
+ * headline is a human title, which is what this rule reaches now that it
+ * has stopped being scoped to `/unmatched`.
+ *
+ * Seeded *first*, so it is the older row and renders second: this screen
+ * lists newest first, which keeps the `document.querySelector('article h2
+ * button small')` in the colour probe below pointed at the same card the
+ * rest of the spec measures.
+ */
+const SPACED_FILENAME =
+  'The Really Long Release Name Nobody Recognises Here 2024 2160p UHD BluRay REMUX Dolby Vision HEVC TrueHD Atmos MULTi.mkv';
 
 /** The feed the release arrived on, and so the dimmed label at the right of its title. */
 const UNMATCHED_FEED = 'Nightly torrents';
@@ -819,8 +857,10 @@ const ANSWER_MAX_HEIGHT_PX = 256 + 16 + 2;
  * at all. `toBeVisible()` would not have caught that either: an unstyled
  * `<div>` full of text is genuinely visible.
  *
- * Six rules are new for this card and this spec pins two of them, which
- * are the two whose absence breaks the layout rather than dulling it:
+ * Six rules were new for this card and this spec pins the two whose
+ * absence breaks the layout rather than dulling it -- plus, since the
+ * owner's change of requirements, the pair that keeps a card's trailing
+ * label visible:
  *
  * 1. `article dd pre`. A `<pre>` defaults to `white-space: pre`, so
  *    without the rule the stored answer -- compact JSON with no space in
@@ -840,12 +880,19 @@ const ANSWER_MAX_HEIGHT_PX = 256 + 16 + 2;
  *    `article dl` sets, and 52191/48184 is 1.0832 against 13/12's
  *    1.0833; and `max-height` removed on its own leaves the
  *    well **1083px** tall where a bounded one reports 274.
- * 2. The headline's `overflow-wrap: anywhere`. See {@link
- *    UNMATCHED_FILENAME}: without it the title has nowhere to break and
- *    runs out through the card's right border -- 1474px of filename
- *    through an 816px title line, both measured. Counted as line boxes,
- *    which needs no threshold to tune: deleting the rule takes the count
- *    to exactly 1, which is the mutation run this pin rests on.
+ * 2. `article h2 button span`'s `min-width: 0` and the three text
+ *    declarations with it, and `article h2 button small`'s
+ *    `flex-shrink: 0`. **This pin is the inverse of the one that stood
+ *    here yesterday**, which asserted the headline wrapped to more than
+ *    one line; the owner asked instead that the trailing label always
+ *    stay visible and the filename truncate, "like it does in the
+ *    expanded cards" -- the release rows' own
+ *    `ul[aria-label='releases'] li > span[id$='-filename']`. Inverted
+ *    rather than deleted: one line box, text genuinely wider than the
+ *    box it is clipped to, the label at the right edge, and the label's
+ *    box no narrower than its own text. See {@link UNMATCHED_FILENAME}
+ *    for why 1474px of filename through an 816px title line is what
+ *    makes any of that observable.
  *
  * The other four (`article dl`, `dt`, `dd`, `dd:last-child`) are spacing
  * and colour on a body that reads correctly without them, and are
@@ -866,6 +913,16 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
   expect(LOOKUP_ANSWER.length, 'the answer is long enough to overflow a 16rem well').toBeGreaterThan(4_000);
   expect(LOOKUP_ANSWER.length, 'and short enough that the host would store it rather than the marker').toBeLessThan(32_768);
 
+  // The spaced-name card first -- see {@link SPACED_FILENAME} for what it
+  // is here to pin and why its order matters.
+  await harness.seedUnmatchedRelease({
+    filename: SPACED_FILENAME,
+    feedName: 'Weekly torrents',
+    resolution: 'unresolved',
+    detail: `the lookup service did not recognise "${SPACED_FILENAME}"`,
+    lookupJson: null,
+  });
+
   await harness.seedUnmatchedRelease({
     filename: UNMATCHED_FILENAME,
     feedName: UNMATCHED_FEED,
@@ -880,7 +937,10 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
 
   await page.goto(`${harness.origin}/unmatched`);
 
-  const card = page.getByRole('article');
+  // Filtered rather than `.first()`: two cards render here now, and a
+  // locator that depended on which sorted first would break when a
+  // fixture's timestamp changed rather than when the app did.
+  const card = page.getByRole('article').filter({ hasText: UNMATCHED_FILENAME });
   const headline = card.getByRole('heading').getByRole('button');
   const filename = headline.locator('span');
   const feedLabel = headline.locator('small');
@@ -907,42 +967,125 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
   const feedBox = await boxOf(feedLabel, 'the feed label');
   const cardBox = await boxOf(card, 'the card');
 
-  // At the right-hand edge of the title line. **What this does and does
-  // not prove, stated honestly:** the filename above is long enough to
-  // fill the line, so the label would end here under `margin-left: auto`
-  // and without it alike -- the push itself is pinned by the adult-card
-  // spec above, whose headline is short enough for the gap to mean
-  // something. What this catches is the label having wrapped below the
-  // title, or been pushed outside the card by the filename beside it,
-  // which is the failure mode this screen actually has.
+  // At the right-hand edge of the title line, which is the whole of what
+  // the owner asked for: the label is always there. The filename beside
+  // it is 1474px of unbreakable run, so this is the measurement that
+  // fails the moment the headline is allowed to push it.
   expect(
     headlineBox.x + headlineBox.width - (feedBox.x + feedBox.width),
     'the feed label ends where the title line ends',
   ).toBeLessThan(2);
 
-  // The filename wraps inside the card instead of running out through its
-  // right border. Counted as line boxes, which is a direct reading of "it
-  // wrapped" with no threshold to tune. Deleting the rule measures `1`
-  // here -- the whole filename on one line, running out of the card --
-  // which is this pin's own mutation run (task 7's report).
+  // And it is *whole*: its box holds all of its own text, on one line. A
+  // label cut to `Nightly to…` reads as a different feed, which is worse
+  // than no label at all.
   //
-  // **Over a `Range`, not `node.getClientRects()`.** That was the first
-  // version and it answered `1` with the rule in place and working: the
-  // headline span is a child of `article h2 button`, which is
-  // `display: flex`, so it is a blockified flex item and its own box is
-  // a single rect however many lines of text it holds. A range's rects
-  // are per line box, which is the question actually being asked.
-  const filenameLines = await filename.evaluate((node) => {
+  // **This does not pin `article h2 button small`'s `flex-shrink: 0`,
+  // and saying so is the point.** Four mutant combinations were run
+  // against it -- deleted alone; deleted with the headline switched to
+  // `flex: 1 1 auto` so the line genuinely overflows; and both again
+  // with the label's own `white-space: nowrap` removed -- and all four
+  // stayed green (task 7's report). Nothing reaches the case: `flex: 1`
+  // gives the headline a zero basis, so the line never overflows and
+  // nothing is asked to shrink, and `nowrap` plus the default
+  // `min-width: auto` floors this label at its whole string even when it
+  // is. What these two assertions do catch is the outcome the owner
+  // asked for, by whichever mechanism delivers it -- a label that is
+  // clipped, overflowing, or broken across two lines fails them.
+  const label = await feedLabel.evaluate((node) => {
     const range = document.createRange();
     range.selectNodeContents(node);
-    return range.getClientRects().length;
+    return {
+      box: node.getBoundingClientRect().width,
+      text: range.getBoundingClientRect().width,
+      lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size,
+    };
   });
-  expect(filenameLines, 'the filename wraps rather than running off the card').toBeGreaterThan(1);
+  expect(label.box, 'the feed label is never squeezed: its box holds its whole text').toBeGreaterThanOrEqual(label.text - 0.5);
+  expect(label.lines, 'and holds it on one line').toBe(1);
+
+  // The filename gives way instead: one line, clipped to the space left
+  // over, with the rest reachable through the `title` `CardHeading` sets
+  // (pinned in `packages/plugin-ui/test/expansion.test.tsx`, where a
+  // browser is not needed to read an attribute).
+  //
+  // **This is the inverse of what stood here yesterday**, which required
+  // more than one line box; see this spec's own preamble for the change
+  // of requirements. Three readings, because "truncated" is three
+  // separate things and any one alone is weak: exactly one line box (it
+  // did not wrap), `scrollWidth` genuinely wider than `clientWidth` (it
+  // is longer than its box, so something is being cut -- otherwise a
+  // short title would satisfy the other two), and the box inside the
+  // card (the cut happens at the card's edge rather than past it).
+  //
+  // **The line count is taken over a `Range`, and counts distinct tops
+  // rather than rects.** Two earlier versions of this measurement were
+  // wrong in two different ways, both found by running them:
+  // `node.getClientRects().length` answered `1` even while the headline
+  // wrapped, because the span is a child of `article h2 button`, which
+  // is `display: flex`, so it is a blockified flex item whose own box is
+  // one rect however many lines it holds; and a *range's* rect count
+  // answered `2` for a headline that is plainly on one line, because
+  // inside an `overflow: hidden` box Chromium returns both the full text
+  // rect and its clipped intersection -- measured here as `1474x20` and
+  // `702x20` at the same `y`. Distinct tops is the question actually
+  // being asked, and neither quirk touches it.
+  const filenameMetrics = await filename.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const tops = new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top)));
+    return { lines: tops.size, clientWidth: node.clientWidth, scrollWidth: node.scrollWidth };
+  });
+  expect(filenameMetrics.lines, 'the filename stays on one line').toBe(1);
+  expect(
+    filenameMetrics.scrollWidth,
+    'and is genuinely longer than the box it is cut to',
+  ).toBeGreaterThan(filenameMetrics.clientWidth);
   const filenameBox = await boxOf(filename, 'the filename');
   expect(
     filenameBox.x + filenameBox.width,
-    'and every line of it stays inside the card',
+    'which stays inside the card',
   ).toBeLessThanOrEqual(cardBox.x + cardBox.width);
+
+  // `text-overflow: ellipsis` itself, and the one assertion in this spec
+  // that reads a declaration back rather than measuring a consequence --
+  // said plainly, because this file's other pins are measurements on
+  // purpose. Clipping and ellipsising differ only in the glyph painted
+  // in the last few pixels: `scrollWidth` above proves the text is cut,
+  // and nothing in the DOM distinguishes which of the two cut it. The
+  // alternative is a screenshot comparison, which `CLAUDE.md` explicitly
+  // declines as the lesson to draw. So this is worth exactly one thing
+  // -- catching that declaration being dropped from the rule while the
+  // other four stay -- and is spelled here rather than left to look like
+  // a measurement.
+  await expect(filename).toHaveCSS('text-overflow', 'ellipsis');
+
+  // And the same for a headline that *could* wrap: the second card's
+  // name is the same length in spaces, so `white-space: nowrap` is the
+  // only thing keeping it on one line. Without it this measures 2 -- the
+  // card grows a second title line and the release below it moves -- and
+  // the dotted card above cannot see that at all, which is why there are
+  // two cards on this screen.
+  const spacedHeadline = page
+    .getByRole('article')
+    .filter({ hasText: SPACED_FILENAME })
+    .getByRole('heading')
+    .getByRole('button')
+    .locator('span');
+  const spacedMetrics = await spacedHeadline.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return {
+      lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size,
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+    };
+  });
+  expect(spacedMetrics.lines, 'a headline with spaces in it stays on one line too').toBe(1);
+  expect(
+    spacedMetrics.scrollWidth,
+    'and is cut off rather than given a second line',
+  ).toBeGreaterThan(spacedMetrics.clientWidth);
 
   // Closed, and closed with nothing behind it: the `<dl>` is not in the
   // DOM at all, so this rules out a body that was merely hidden.

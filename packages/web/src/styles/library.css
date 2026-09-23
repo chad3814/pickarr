@@ -166,16 +166,37 @@ article h2 button {
    id, because a stylesheet that knows which plugin it is styling is a
    stylesheet the next plugin cannot reuse. It caught this comment.
 
-   `margin-left: auto` rather than `justify-content: space-between` on the
-   parent: `auto` pushes only this element, so a headline that wraps to two
-   lines keeps its own alignment, and a card with no trailing label has
-   nothing whose absence could move the headline.
+   **`flex-shrink: 0` says this label is never the thing that gives way,
+   and it is insurance rather than load-bearing today -- measured, not
+   guessed.** A site or feed name cut to `Exam…` is worse than no label,
+   because it reads as a different site, so the intent is worth stating.
+   But nothing currently reaches the case: the headline beside it is
+   `flex: 1`, whose zero basis means the line never overflows and so
+   nothing is ever asked to shrink; and even forced to overflow (the
+   headline switched to `flex: 1 1 auto`), this label's own
+   `white-space: nowrap` makes its min-content width the whole string and
+   `min-width: auto` floors it there. Four mutant combinations in
+   `packages/e2e/tests/shell.spec.ts` -- this declaration deleted alone,
+   deleted with `flex: 1 1 auto`, and both of those again with the
+   `white-space` below removed -- all stayed green. So it is here as the
+   explicit statement, and the report records it as unpinned rather than
+   leaving a reader to infer that a green suite proves it.
+
+   **`margin-left: auto` was here and is gone, rather than kept as
+   decoration.** It pushed this element to the end back when the headline
+   was content-sized and there was free space in the row for an auto
+   margin to absorb. The headline now grows into that space itself
+   (`flex: 1`, one rule above), so the margin could never resolve to
+   anything but zero again -- and a declaration that cannot fire is one
+   the next reader has to work out. What puts this label at the end is
+   the headline taking the slack, and the browser pin on the adult card's
+   site label measures that outcome rather than either mechanism.
 
    `font-size` is set explicitly because the button resets `font-size` to
    `inherit` above, which `<small>` would otherwise inherit at full title
    size -- the UA's own `smaller` is overridden by that reset. */
 article h2 button small {
-  margin-left: auto;
+  flex-shrink: 0;
   color: var(--color-text-dim);
   font-size: var(--text-body);
   font-weight: 400;
@@ -183,32 +204,67 @@ article h2 button small {
 }
 
 /*
- * An unmatched release's headline is a *filename*, which is the one thing
- * a card title can be that has no spaces in it. `Some.Release.2024.1080p.
- * WEB-DL-GROUP.mkv` has no break opportunity at all under the default
- * `overflow-wrap: normal`, so it runs straight out of the bordered card
- * rather than wrapping inside it. `anywhere` rather than `break-word`
- * because the two differ on min-content sizing, and this headline is a
- * flex item beside a trailing label that must keep its own width.
+ * The headline half of a card's title line: it takes the slack, and it
+ * gives way before the trailing label does.
  *
- * Scoped to this screen, not applied to `article h2 button span`
- * generally: the three browse cards' headlines are human titles with
- * spaces in them, they wrap fine already, and changing how they size is
- * not this rule's business. `aria-labelledby` is the hook because it is
- * already load-bearing for accessibility -- the same justification
- * `ul[aria-label='releases']` above is keyed on, and the same one
- * `settings.css` uses for `ul[aria-labelledby='destinations-heading']`.
- * A `data-testid` would not do: that attribute exists for tests and
- * styling it would make deleting a test hook a visual regression.
+ * **A card title can be a *filename*, which is the one string here with no
+ * soft wrap opportunity in it at all.** `Some.Release.2024.2160p.WEB.DL.
+ * GROUP.mkv` -- an unmatched release's headline, `Unmatched.tsx` -- breaks
+ * nowhere under `overflow-wrap: normal`: a `.` between alphanumerics is not
+ * a break opportunity, so the whole name is one unbreakable run. As a flex
+ * item its min-content width is therefore that run's full width, and
+ * `min-width: auto` would refuse to shrink below it: the headline pushes
+ * the trailing label out of the card, and then runs out through the
+ * border itself. Measured, on a 166-character name in a browser: 1474px
+ * of filename through an 816px title line
+ * (`packages/e2e/tests/shell.spec.ts`).
  *
- * The old `<ul>` this screen rendered before it had cards took the same
- * call for the same reason, in a rule deleted with it: a filename here is
- * exactly what the screen exists to show in full, so it wraps rather than
- * being ellipsised, the same call 1.x's `dialog.css` made for `.confirm`'s
- * own file lists.
+ * `min-width: 0` is what lets it shrink past that, and the three text
+ * declarations are what it does with the space it is given: one line, cut
+ * off, with an ellipsis. The full name is not lost -- `@pickarr/plugin-ui`'s
+ * `CardHeading` puts it on the span's `title`, the same call `ReleaseList`
+ * makes for a release row's filename, for the same reason.
+ *
+ * **`min-width: 0` is redundant as this rule stands, and that was
+ * measured rather than assumed.** Flexbox's automatic minimum size --
+ * what `min-width: auto` resolves to -- is the content-based minimum only
+ * for an item whose computed `overflow` is `visible`, and `overflow:
+ * hidden` two lines below already makes it zero. Deleting `min-width: 0`
+ * on its own leaves every browser assertion green; deleting it *and*
+ * relaxing `overflow` to `visible` reds them, with the headline pinned at
+ * its full 1474px. It is kept because it is the declaration that states
+ * the intent, because the rule this copies has it, and because
+ * `overflow` doing this job is a coincidence of two properties that are
+ * here for different reasons.
+ *
+ * **This is the same rule as `ul[aria-label='releases'] li >
+ * span[id$='-filename']` below, deliberately**: the release rows inside an
+ * expanded card already truncate exactly this way, and a card title that
+ * wrapped to three lines while the rows beneath it ellipsised would be two
+ * answers to one question.
+ *
+ * **It replaced an `overflow-wrap: anywhere` that wrapped instead, and the
+ * argument that rule carried is now the wrong one, not merely outvoted.**
+ * It reasoned that "a filename here is exactly what the screen exists to
+ * show in full", and it was scoped to `section[aria-labelledby=
+ * 'unmatched-heading']` on the ground that browse headlines are human
+ * titles that wrap fine. Both halves failed the thing actually asked for:
+ * a headline free to wrap is a headline free to take the whole line, so
+ * the trailing label -- a feed name, a site name -- is what gets pushed
+ * around by the longest name on the screen. Keeping that label visible is
+ * the requirement, and `title` is what keeps the full name reachable
+ * without it. The scoping went with the reasoning: any card with a
+ * trailing label wants this, a human title is shorter than the line and
+ * never reaches the ellipsis, and a rule that knows which screen it is
+ * styling is a rule the next screen cannot reuse -- which is
+ * `article h2 button small`'s own argument, one rule below.
  */
-section[aria-labelledby='unmatched-heading'] article h2 button span {
-  overflow-wrap: anywhere;
+article h2 button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /*
@@ -224,10 +280,13 @@ section[aria-labelledby='unmatched-heading'] article h2 button span {
  * a rule that knows which screen it is styling is a rule the next one
  * cannot reuse.
  *
- * The rule above is scoped and this one is not, and the difference is
- * real: `overflow-wrap: anywhere` is a consequence of the *content* being
- * a filename, which is true only here, while a labelled-value list looks
- * the same wherever it appears.
+ * **This paragraph used to draw a contrast with the rule above, which was
+ * scoped to `section[aria-labelledby='unmatched-heading']` while this one
+ * is not.** That rule is now unscoped too -- keeping a trailing label
+ * visible is every card's business, not this screen's -- so there is no
+ * contrast left to draw, only the one reason that applies to both: a
+ * shape that would look the same on the next screen is keyed on the
+ * shape.
  */
 article dl {
   margin: var(--space-3) 0 0;
