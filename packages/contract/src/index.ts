@@ -71,4 +71,4 @@ export type {
   XxxRead,
   XxxSiteRead,
 } from './sync.ts';
-export { assertSyncedTableName } from './sync.ts';
+export { assertSyncedTableName, LOOKUP_JSON_CAP_BYTES, LOOKUP_JSON_TOO_LARGE } from './sync.ts';
