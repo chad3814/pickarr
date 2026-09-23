@@ -1291,9 +1291,12 @@ ALTER TABLE rss_feed ADD COLUMN disabled_at INTEGER;
  * create-copy-drop-rename would take `rss_item`'s three sync triggers with
  * it and silently stop the table replicating.
  *
- * **No `seedSyncLog` and no `installSyncTriggers`.** `rss_item` has been in
- * the synced set since the first migration that built it, so its triggers
- * are already attached and every existing row is already indexed in
+ * **No `seedSyncLog` and no `installSyncTriggers`.** `rss_item` predates its
+ * own replication: `INITIAL_SCHEMA` creates it with no triggers at all, and
+ * it only joins the synced set at `migration15`, via `MIGRATION_15_TABLES`.
+ * That migration necessarily runs before this one -- the runner applies
+ * versions in order -- so by the time 22 runs, `rss_item`'s triggers are
+ * already attached and every existing row is already indexed in
  * `sync_log`. Adding a column does not change which rows exist -- and the
  * `UPDATE` that first writes this column fires the existing update trigger,
  * which is what carries the new value to clients.
