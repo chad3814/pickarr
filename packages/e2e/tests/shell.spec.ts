@@ -718,6 +718,276 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
   await expect(empty).toHaveCSS('font-style', 'italic');
 });
 
+/**
+ * The filename an unmatched card is titled with, and the reason it is this
+ * shape rather than a short one.
+ *
+ * **It contains no space and no hyphen, deliberately.** A release name is
+ * the one card title that can have no soft wrap opportunity in it at all:
+ * a `.` between alphanumerics is not one, so a name like this is a single
+ * unbreakable run 166 characters long. A hyphen *is* one (a line may break
+ * after it), which is why the usual `-GROUP` suffix is spelled without it
+ * here -- keeping it would have left the browser somewhere to wrap and the
+ * pin below would have passed with the rule under test deleted.
+ *
+ * The length is chosen against the layout and then measured, not picked
+ * for looks. On this suite's 1280px viewport the card measures 850px wide
+ * and its title line 816px -- `base.css` caps the page at `60rem` and
+ * puts the nav beside the content inside it -- while these 166 characters
+ * of `--text-title` measure 1474px on a single line. That 1.8x margin is
+ * what makes the overflow unambiguous rather than a one-character thing.
+ */
+const UNMATCHED_FILENAME =
+  'Some.Release.Nobody.Recognises.2024.2160p.UHD.BluRay.REMUX.DolbyVision.HDR10Plus.HEVC.TrueHD.Atmos.7.1.MULTi.SUBS.INTERNAL.PROPER.REPACK.iNTERNAL.RELEASEGROUPNAME.mkv';
+
+/** The feed the release arrived on, and so the dimmed label at the right of its title. */
+const UNMATCHED_FEED = 'Nightly torrents';
+
+/**
+ * The sentence the card shows under `Detail`.
+ *
+ * Spelled here as the literal `openmetadata/src/engine.ts`'s
+ * `describeUnresolved` produces for an envelope with no suggestions --
+ * *spelled*, not imported and called, which is `CLAUDE.md`'s own hazard
+ * about an expectation computed by the code that produces it. The
+ * filename is interpolated because the two must agree; the wording is
+ * this file's.
+ */
+const UNMATCHED_DETAIL = `the lookup service did not recognise "${UNMATCHED_FILENAME}"`;
+
+/**
+ * The service's own answer, as `rss_item.lookup_json` stores it: the exact
+ * field order `openmetadata/src/lookupJson.ts` serialises, compact, with
+ * no whitespace anywhere in it.
+ *
+ * **Its size is load-bearing twice over and is checked in the spec rather
+ * than trusted.** It has to be tall enough wrapped to exceed the `16rem`
+ * bound `article dd pre` puts on it -- otherwise "bounded" is unobservable
+ * and deleting `max-height` would change nothing -- and it has to stay
+ * under `LOOKUP_JSON_CAP_BYTES` (32768), because past that the host stores
+ * `LOOKUP_JSON_TOO_LARGE` instead and the screen renders a sentence where
+ * this spec expects a `<pre>`. The performer list is what gets it there:
+ * a hundred of them is the sort of half-identification that leaves a
+ * release unmatched in the first place, which is the whole reason `media`
+ * and `suggestions` are stored (that module's own doc).
+ */
+const LOOKUP_ANSWER = JSON.stringify({
+  lookupId: 'lookup-8f14e45fceea167a5a36dedd4bea2543',
+  state: 'unresolved',
+  partial: false,
+  cached: false,
+  confidence: 0.31,
+  refusal: null,
+  parsed: { title: 'Some Release Nobody Recognises', year: 2024, resolution: '2160p', source: 'BluRay' },
+  media: null,
+  suggestions: {
+    site: null,
+    performers: Array.from({ length: 100 }, (_, index) => ({
+      name: `Suggested Performer ${String(index + 1)}`,
+      providerRef: `person-${String(index + 1).padStart(6, '0')}`,
+    })),
+  },
+});
+
+/**
+ * The tallest box `article dd pre` can report, in the pixels a browser
+ * computes against an unchanged root font size -- the same way the TV
+ * spec above reads `--size-poster`'s `6rem` back as `96px`. Spelled as
+ * literals here so that nothing about this expectation comes from the
+ * stylesheet under test.
+ *
+ * Three numbers rather than one, because `max-height` bounds the
+ * **content** box: `16rem` is 256px, and nothing under
+ * `packages/web/src/styles/` sets a `box-sizing` reset, so a `<pre>`
+ * keeps the UA's `content-box` (the UA's `border-box` is for form
+ * controls, `tokens.css`'s own note). The rule adds `--space-2` of
+ * padding on each side and a 1px border, so a bounded well reports
+ * 256 + 16 + 2. Measured, not derived: the first version of this spec
+ * asserted 256 and the browser answered exactly 274.
+ */
+const ANSWER_MAX_HEIGHT_PX = 256 + 16 + 2;
+
+/*
+ * **The only test that can see the unmatched card at all**, and the first
+ * time any of it has rendered in a browser. `Unmatched.test.tsx` proves
+ * every piece of the markup -- the heading button, the `<small>`, the
+ * three `<dt>`/`<dd>` pairs, the `<pre>` -- and none of it proves the
+ * screen is usable, because `getByRole` and `getByText` read the
+ * accessibility tree and an unstyled block of text satisfies all of them.
+ * That is `CLAUDE.md`'s longest hazard, and `IdentityChangeConfirm`
+ * shipped through exactly it with ten green tests and no stylesheet rule
+ * at all. `toBeVisible()` would not have caught that either: an unstyled
+ * `<div>` full of text is genuinely visible.
+ *
+ * Six rules are new for this card and this spec pins two of them, which
+ * are the two whose absence breaks the layout rather than dulling it:
+ *
+ * 1. `article dd pre`. A `<pre>` defaults to `white-space: pre`, so
+ *    without the rule the stored answer -- compact JSON with no space in
+ *    it -- is **one line**, as wide as the answer is long, unbounded in
+ *    height and spilling out of the card. Measured as overflow rather
+ *    than read back as a declaration: `scrollWidth` against `clientWidth`
+ *    says it wrapped, and a bounded height with a taller `scrollHeight`
+ *    says it is a scrolling well rather than 30 screens of text pushing
+ *    every card below it off the page.
+ *
+ *    Three mutants, all red, all measured (task 7's report): the whole
+ *    rule deleted puts the answer on one line **52,191px** wide inside an
+ *    816px box; `white-space: pre-wrap` removed on its own -- the mutant
+ *    that changes one behaviour and nothing else -- gives 48,184px
+ *    against 814px -- narrower because the first mutant also took the
+ *    rule's 12px `--text-meta` and left the answer at the 13px
+ *    `article dl` sets, and 52191/48184 is 1.0832 against 13/12's
+ *    1.0833; and `max-height` removed on its own leaves the
+ *    well **1083px** tall where a bounded one reports 274.
+ * 2. The headline's `overflow-wrap: anywhere`. See {@link
+ *    UNMATCHED_FILENAME}: without it the title has nowhere to break and
+ *    runs out through the card's right border -- 1474px of filename
+ *    through an 816px title line, both measured. Counted as line boxes,
+ *    which needs no threshold to tune: deleting the rule takes the count
+ *    to exactly 1, which is the mutation run this pin rests on.
+ *
+ * The other four (`article dl`, `dt`, `dd`, `dd:last-child`) are spacing
+ * and colour on a body that reads correctly without them, and are
+ * deliberately left unpinned: a pin written for the sake of coverage is
+ * a rule nobody may adjust afterwards.
+ */
+test('an unmatched release reads as a card, and opens to show why it is unmatched', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  // Awaited before the navigation below, as every spec in this file does:
+  // `claimInstall` only clicks, and a `page.goto` fired while that POST is
+  // still in flight cancels it.
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  // The fixture's own two bounds, asserted rather than assumed -- see
+  // {@link LOOKUP_ANSWER}. A future edit that shortens the answer would
+  // otherwise quietly turn the `max-height` pin below into a tautology.
+  expect(LOOKUP_ANSWER.length, 'the answer is long enough to overflow a 16rem well').toBeGreaterThan(4_000);
+  expect(LOOKUP_ANSWER.length, 'and short enough that the host would store it rather than the marker').toBeLessThan(32_768);
+
+  await harness.seedUnmatchedRelease({
+    filename: UNMATCHED_FILENAME,
+    feedName: UNMATCHED_FEED,
+    // `unresolved` -- `@pickarr/contract`'s `Resolution` word for "the
+    // name was not recognised", which is the commonest reason a release
+    // is on this screen and the state `describeUnresolved` writes its
+    // sentence for.
+    resolution: 'unresolved',
+    detail: UNMATCHED_DETAIL,
+    lookupJson: LOOKUP_ANSWER,
+  });
+
+  await page.goto(`${harness.origin}/unmatched`);
+
+  const card = page.getByRole('article');
+  const headline = card.getByRole('heading').getByRole('button');
+  const filename = headline.locator('span');
+  const feedLabel = headline.locator('small');
+
+  // The full round trip, the same one the browse specs above walk: a real
+  // `POST /api/feeds` through `Host.addFeed`, a direct `rss_item` insert,
+  // both tables' `AFTER INSERT` triggers into `sync_log`, this tab's
+  // `/api/sync` tail, the replica, `Unmatched`'s own walk of
+  // `by_table_updated`, and `useFeedNames` resolving the feed id.
+  // `toHaveText` reads rendered text, not an accessible name.
+  await expect(headline).toHaveText(`${UNMATCHED_FILENAME}${UNMATCHED_FEED}`, { timeout: 15_000 });
+
+  // Dimmed, and dim *relative to the title*: either half alone is weak.
+  // The token is resolved through a throwaway probe rather than spelled
+  // as an `rgb(...)` literal, because `--color-text-dim` differs between
+  // `tokens.css`'s two palettes and nothing here pins which one a run is
+  // in (`colorAgainstToken`'s own doc). The second assertion is what
+  // would catch a token that had been set to the body colour.
+  const dim = await colorAgainstToken(page, 'article h2 button small', '--color-text-dim');
+  expect(dim.color, 'the feed label takes the dim token, not merely some other colour').toBe(dim.tokenColor);
+  await expect(filename, 'and the dim token is visibly not the filename colour').not.toHaveCSS('color', dim.tokenColor);
+
+  const headlineBox = await boxOf(headline, 'the card title line');
+  const feedBox = await boxOf(feedLabel, 'the feed label');
+  const cardBox = await boxOf(card, 'the card');
+
+  // At the right-hand edge of the title line. **What this does and does
+  // not prove, stated honestly:** the filename above is long enough to
+  // fill the line, so the label would end here under `margin-left: auto`
+  // and without it alike -- the push itself is pinned by the adult-card
+  // spec above, whose headline is short enough for the gap to mean
+  // something. What this catches is the label having wrapped below the
+  // title, or been pushed outside the card by the filename beside it,
+  // which is the failure mode this screen actually has.
+  expect(
+    headlineBox.x + headlineBox.width - (feedBox.x + feedBox.width),
+    'the feed label ends where the title line ends',
+  ).toBeLessThan(2);
+
+  // The filename wraps inside the card instead of running out through its
+  // right border. Counted as line boxes, which is a direct reading of "it
+  // wrapped" with no threshold to tune. Deleting the rule measures `1`
+  // here -- the whole filename on one line, running out of the card --
+  // which is this pin's own mutation run (task 7's report).
+  //
+  // **Over a `Range`, not `node.getClientRects()`.** That was the first
+  // version and it answered `1` with the rule in place and working: the
+  // headline span is a child of `article h2 button`, which is
+  // `display: flex`, so it is a blockified flex item and its own box is
+  // a single rect however many lines of text it holds. A range's rects
+  // are per line box, which is the question actually being asked.
+  const filenameLines = await filename.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return range.getClientRects().length;
+  });
+  expect(filenameLines, 'the filename wraps rather than running off the card').toBeGreaterThan(1);
+  const filenameBox = await boxOf(filename, 'the filename');
+  expect(
+    filenameBox.x + filenameBox.width,
+    'and every line of it stays inside the card',
+  ).toBeLessThanOrEqual(cardBox.x + cardBox.width);
+
+  // Closed, and closed with nothing behind it: the `<dl>` is not in the
+  // DOM at all, so this rules out a body that was merely hidden.
+  await expect(headline).toHaveAttribute('aria-expanded', 'false');
+  await expect(card.locator('dl')).toHaveCount(0);
+
+  await headline.click();
+
+  // All three labelled values, in the order `UnmatchedDetail` renders
+  // them. The state is the word the host recorded, not a sentence mapped
+  // from it, and `Detail` is the sentence.
+  await expect(card.locator('dt')).toHaveText(['State', 'Detail', 'Lookup answer']);
+  await expect(card.locator('dd').nth(0)).toHaveText('unresolved');
+  await expect(card.locator('dd').nth(1)).toHaveText(UNMATCHED_DETAIL);
+
+  // Verbatim, character for character: what the replica holds is what the
+  // service said, and nothing on the way re-serialised it.
+  const answer = card.locator('dd pre');
+  await expect(answer).toHaveText(LOOKUP_ANSWER);
+
+  // And it is a bounded, wrapping well rather than one endless line.
+  // Three readings, because each covers a different half of the rule:
+  // `scrollWidth` against `clientWidth` is `white-space: pre-wrap` doing
+  // its job (a `<pre>` defaults to `pre`, which would leave this one line
+  // several thousand pixels wide); the height against `max-height` is the
+  // bound; and `scrollHeight` above `clientHeight` is what makes that
+  // bound observable at all -- without it a short answer would satisfy
+  // the height check with the rule deleted.
+  const well = await answer.evaluate((node) => ({
+    clientWidth: node.clientWidth,
+    scrollWidth: node.scrollWidth,
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+  }));
+  expect(well.scrollWidth, 'the answer wraps inside its box instead of running off sideways').toBeLessThanOrEqual(well.clientWidth);
+  const answerBox = await boxOf(answer, 'the stored answer');
+  expect(answerBox.height, 'the well is bounded at 16rem of content').toBeLessThanOrEqual(ANSWER_MAX_HEIGHT_PX);
+  expect(well.scrollHeight, 'and the answer is taller than that, so the bound is doing something').toBeGreaterThan(well.clientHeight);
+  const openCardBox = await boxOf(card, 'the opened card');
+  expect(
+    answerBox.x + answerBox.width,
+    'and the well stays inside the card',
+  ).toBeLessThanOrEqual(openCardBox.x + openCardBox.width);
+});
+
 /*
  * The feed-settings slice's own browser proof (task 6's brief). What this
  * spec actually measures, stated precisely rather than as "the whole

@@ -501,6 +501,53 @@ export interface Harness {
    * produce it.
    */
   seedXxxScene(input: { title: string; siteName: string | null }): number;
+  /**
+   * One release nothing has matched: the feed it arrived on, and the
+   * `rss_item` under it that `/unmatched` renders a card for. Returns the
+   * `rss_item` id.
+   *
+   * **`media_item_id` is left NULL, and that is the whole of what puts the
+   * row on that screen.** `Unmatched.tsx` walks `rss_item` in modification
+   * order and keeps only the rows whose `mediaItemId` is null; a row with
+   * one set is a browse card's release instead, which is what
+   * {@link Harness.seedPickableRelease} seeds.
+   *
+   * **The feed goes through `Host.addFeed` and the item does not** -- the
+   * same split `seedPickableRelease` makes, for the reason its own doc
+   * gives: `addFeed` is the real writer, already wired to `POST
+   * /api/feeds`, and there is no equivalent writer for an `rss_item`,
+   * which normally only arrives from a feed poll this harness never
+   * dispatches (the module doc).
+   *
+   * **`Promise<number>`, where the plan's interface said `number`.**
+   * `Host.addFeed` is async, so anything that goes through it is too.
+   * Nothing here wants the one-synchronous-call atomicity
+   * {@link Harness.seedTvRelease} documents, and the reason is the write
+   * order rather than a judgement call: the feed is written before the
+   * item that references it, so the only way the two can land in
+   * different sync batches is feed first, and a card whose feed is
+   * already in the replica renders its label on first paint. (The reverse
+   * would recover too -- `library/useFeedNames.ts` subscribes to
+   * `rss_feed` and re-reads -- but it cannot arise here.)
+   *
+   * **`resolution` and `detail` are plain strings, not
+   * `@pickarr/contract`'s `Resolution` union and its nullable detail.**
+   * `rss_item.resolution` is unconstrained TEXT, and the screen prints
+   * whatever word it holds rather than mapping it to a sentence
+   * (`Unmatched.tsx`), so a seeder narrowed to the four words this build
+   * knows could not stand in for a replica row some other build wrote --
+   * `CLAUDE.md`'s "fixtures all from the code under test" hazard. The
+   * absent-detail and absent-answer branches stay with the unit tests
+   * (`packages/web/test/library/Unmatched.test.tsx`); what needed a
+   * browser is a card with all three values on screen at once.
+   */
+  seedUnmatchedRelease(input: {
+    filename: string;
+    feedName: string;
+    resolution: string;
+    detail: string;
+    lookupJson: string | null;
+  }): Promise<number>;
   seedPickableRelease(input: {
     pluginId: Category;
     title: string;
@@ -729,6 +776,11 @@ export const test = base.extend<{ harness: Harness }>({
     const { raw, dir, server, host, qbittorrent, posterPath } = await boot();
     try {
       const claimToken = ensureClaimToken(raw, Date.now());
+      // How many feeds {@link Harness.seedUnmatchedRelease} has created in
+      // this test, which is what keeps each one's url its own: `addFeed`
+      // refuses a `duplicate-url`, and that method takes the feed's *name*
+      // from its caller, not its address.
+      let unmatchedFeeds = 0;
       function seedMediaItem(pluginId: Category, title: string): number {
         const at = Date.now();
         const info = raw.prepare(
@@ -818,6 +870,55 @@ export const test = base.extend<{ harness: Harness }>({
         seedMediaItem,
         seedTvRelease,
         seedXxxScene,
+        async seedUnmatchedRelease({ filename, feedName, resolution, detail, lookupJson }) {
+          const feed = await host.addFeed({
+            // `tv`, and the category is deliberately not a parameter.
+            // `addFeed`'s own `isRegistered` check needs one of the three
+            // registered ids, and nothing downstream can tell which was
+            // used: `rss_item` carries no plugin id at all, which is
+            // why a row like this one can never appear on a category
+            // screen and needs `/unmatched` to exist (`Unmatched.tsx`'s
+            // own doc on `by_table_plugin_updated`).
+            pluginId: 'tv',
+            name: feedName,
+            // Unique per call, unlike `seedPickableRelease`'s one url per
+            // category: `feeds/add.ts` answers `duplicate-url` for a
+            // second feed at the same address, so a spec seeding two
+            // releases would otherwise get a refusal on the second.
+            // `.invalid` (RFC 2606) for the reason that method's url is
+            // -- a feed url can carry a private tracker's passkey, so
+            // this one is obviously nobody's.
+            url: `http://feeds.invalid/unmatched-${String((unmatchedFeeds += 1))}.xml`,
+            downloadType: 'torrent',
+            // Inside `feeds/add.ts`'s window, and nothing ever polls it:
+            // the poll this schedules is a `jobs` row an unstarted host
+            // never arms (this module's doc).
+            pollIntervalS: 3_600,
+          });
+          // A refusal is a mistake in this harness rather than an outcome
+          // a spec is meant to see, so it throws naming the code --
+          // `seedPickableRelease`'s own note on why.
+          if ('refusal' in feed) {
+            throw new Error(`the harness could not create a feed: ${feed.refusal}`);
+          }
+
+          const at = Date.now();
+          // **`media_item_id` is absent from the column list**, so it
+          // takes its `NULL` default -- the one property that puts this
+          // row on `/unmatched` (this method's own doc). `link` is `NOT
+          // NULL`, and nothing on that screen renders or follows it: an
+          // unmatched release has no `Pick` button, because `ReleaseList`
+          // only ever renders under a media item. So it reuses the pick
+          // path's magnet rather than minting a second placeholder.
+          const info = raw.prepare(`
+            INSERT INTO rss_item
+              (feed_id, filename, link, created_at, updated_at, download_type,
+               resolution, resolution_detail, lookup_json)
+            VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?, ?)
+          `).run(feed.id, filename, MAGNET, at, at, resolution, detail, lookupJson);
+
+          return Number(info.lastInsertRowid);
+        },
         async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
           if (withDownloadClient) {
             const client = await host.addDownloadClient({
