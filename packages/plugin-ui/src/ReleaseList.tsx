@@ -226,7 +226,22 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
 
   return (
     <li aria-labelledby={filenameId}>
-      <span id={filenameId}>{release.row.filename}</span> <span>{release.row.resolution}</span>
+      {/*
+        `title` so the full filename is reachable when the rendered one is
+        cut off. A release filename is the longest string on this screen
+        and the one an operator most needs to read exactly -- it is what
+        distinguishes two releases that are otherwise identical.
+
+        It does **not** change what this span announces, and that is worth
+        knowing rather than assuming: `title` is the last fallback in the
+        accessible-name algorithm, so an element with content is named by
+        its content. The button above points `aria-labelledby` here, so a
+        `title` that did win would have silently renamed every Pick button
+        on the card. `ReleaseList.test.tsx` pins the name against exactly
+        that.
+      */}
+      <span id={filenameId} title={release.row.filename}>{release.row.filename}</span>{' '}
+      <span>{release.row.resolution}</span>
       {score !== undefined && <span> {score}</span>}
       {release.downloads.map((download) => (
         <span key={downloadKey(download)}> {statusText(download)}</span>

@@ -117,6 +117,11 @@ function releasesFor(count: number): GatheredRelease[] {
   return releases;
 }
 
+/** Release 1, named `filename` and nothing else special -- for the two title-attribute tests. */
+function longRelease(filename: string): GatheredRelease {
+  return { id: 1, row: rssItem({ id: 1, filename, resolution: '2160p' }), downloads: [] };
+}
+
 /** One release row's Pick button, found through the row rather than by name, so these tests do not depend on how the button is announced. */
 function pickButton(filename: string): HTMLButtonElement {
   return within(screen.getByRole('listitem', { name: filename })).getByRole<HTMLButtonElement>('button');
@@ -256,6 +261,32 @@ test('a release with no download offers a Pick button, and one that has a downlo
   assert.ok(pickedRow.textContent?.includes('Status: downloading (7%)'), 'a picked release shows its status');
   assert.equal(within(pickedRow).queryAllByRole('button').length, 0,
     'and offers no way to pick it a second time');
+});
+
+test('the full filename is reachable as a title, even when the rendered one is cut off', () => {
+  // A release filename is the longest string on this screen and the one
+  // that distinguishes two otherwise-identical releases, so it has to be
+  // readable in full however narrowly the column renders. Asserted on the
+  // element the row is labelled by, which is the one holding the name.
+  const long = 'Some.Show.S01E01.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-GROUP.mkv';
+  render(<ReleaseList releases={[longRelease(long)]} submit={accepts} />);
+  const row = screen.getByRole('listitem', { name: long });
+  const named = row.querySelector('#release-1-filename');
+  assert.ok(named !== null, 'the filename span is the one the row is labelled by');
+  assert.equal(named.getAttribute('title'), long, 'and carries the whole name as its title');
+});
+
+test('the filename title does not rename anything it is attached to', () => {
+  // **`title` is the last fallback in the accessible-name algorithm**, so
+  // an element with content is named by its content and this attribute is
+  // inert for naming -- but the filename span is pointed at by *two*
+  // `aria-labelledby` references (the row's and the Pick button's), so a
+  // `title` that did win would silently rename every row and every button
+  // on the card. Asserted rather than reasoned about.
+  const long = 'Some.Show.S01E01.2160p.WEB-DL-GROUP.mkv';
+  render(<ReleaseList releases={[longRelease(long)]} submit={accepts} />);
+  assert.ok(screen.getByRole('listitem', { name: long }), 'the row is still named by the filename alone');
+  assert.ok(screen.getByRole('button', { name: `Pick ${long}` }), 'and the button by Pick plus the filename');
 });
 
 test('the Pick button is announced with the release it picks, from two strings that are both on screen', () => {
