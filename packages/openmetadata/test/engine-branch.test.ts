@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { drizzle } from 'drizzle-orm/node-sqlite';
+import { LOOKUP_JSON_CAP_BYTES, LOOKUP_JSON_TOO_LARGE } from '@pickarr/contract';
 import {
   MAX_POLLS,
   POLL_DELAY_MS,
@@ -9,6 +10,7 @@ import {
   describeUnresolved,
 } from '../src/engine.ts';
 import { lookupTable, lookupTableMigration } from '../src/table.ts';
+import { lookupJsonFor } from '../src/lookupJson.ts';
 import {
   createTestHarness,
   partialEnvelope,
@@ -63,6 +65,21 @@ test('a partial answer polls, and leaves the resolution alone', async () => {
   assert.equal(harness.media.resolutions.size, 0);
 });
 
+test('a lookup still pending stores nothing, because nothing is known yet', async () => {
+  // Pinned separately from the partial case above, and against
+  // `setResolution` directly rather than only the size of `resolutions`:
+  // a later change that starts writing a half-answer for every pending
+  // release would still leave `resolutions.size` at 0 today (nothing else
+  // populates it in this fixture), but it would show up here as a call
+  // this test does not expect.
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(pendingEnvelope({ lookupId: 'lookup-1b' }), { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
+
+  const setResolutionCalls = harness.media.calls.filter((call) => call.method === 'setResolution');
+  assert.deepEqual(setResolutionCalls, [], 'the poll branch returns before calling setResolution at all');
+});
+
 test('a pending state polls too -- the state, not only the flag', async () => {
   const { harness, deps, rssItemId } = fixture();
   await applyEnvelope(pendingEnvelope({ lookupId: 'lookup-2' }), { rssItemId, filename: 'item.mkv', polls: 3 }, deps);
@@ -70,19 +87,19 @@ test('a pending state polls too -- the state, not only the flag', async () => {
   assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-2', rssItemId, polls: 4 });
 });
 
-test('the last permitted poll gives up, naming the lookup id', async () => {
+test('the last permitted poll gives up, naming the lookup id, and stores the envelope behind it', async () => {
   const { harness, deps, rssItemId } = fixture();
+  const envelope = pendingEnvelope({ lookupId: 'lookup-3' });
 
-  await applyEnvelope(
-    pendingEnvelope({ lookupId: 'lookup-3' }),
-    { rssItemId, filename: 'item.mkv', polls: MAX_POLLS },
-    deps,
-  );
+  await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: MAX_POLLS }, deps);
 
   assert.equal(harness.enqueued.length, 0, 'no further poll is scheduled');
   const recorded = harness.media.resolutions.get(rssItemId);
   assert.equal(recorded?.resolution, 'unresolved');
   assert.match(recorded?.detail ?? '', /lookup-3/);
+  // The service never finished, so the last envelope it sent -- whatever it
+  // managed to fill in -- is the only record of how far it got.
+  assert.equal(recorded?.lookupJson, lookupJsonFor(envelope));
 });
 
 test('a refusal is terminal: the resolution says so and nothing else is written', async () => {
@@ -94,10 +111,41 @@ test('a refusal is terminal: the resolution says so and nothing else is written'
     deps,
   );
 
-  assert.deepEqual(harness.media.resolutions.get(rssItemId), { resolution: 'refused', detail: 'a subtitle' });
+  assert.deepEqual(harness.media.resolutions.get(rssItemId), {
+    resolution: 'refused',
+    detail: 'a subtitle',
+    lookupJson: lookupJsonFor(refusedEnvelope({ lookupId: 'lookup-4', refusal: 'a subtitle' })),
+  });
   assert.equal(harness.enqueued.length, 0);
   assert.equal(applied.length, 0);
   assert.equal(harness.media.items.size, 0, 'a refusal creates no media item to clean up');
+});
+
+test('an unresolved answer stores the envelope behind it', async () => {
+  const { harness, deps, rssItemId } = fixture('mystery2.mkv');
+  const envelope = unresolvedEnvelope({ lookupId: 'lookup-5b' });
+
+  await applyEnvelope(envelope, { rssItemId, filename: 'mystery2.mkv', polls: 0 }, deps);
+
+  const recorded = harness.media.resolutions.get(rssItemId);
+  assert.equal(recorded?.resolution, 'unresolved');
+  assert.equal(recorded?.lookupJson, lookupJsonFor(envelope));
+});
+
+test('an envelope over the cap is stored as the marker', async () => {
+  // Built the same way `lookupJson.test.ts` measures its own boundary: pad
+  // `parsed.blob` with enough plain ASCII to push the serialised envelope
+  // past `LOOKUP_JSON_CAP_BYTES`, so this reaches the cap through the real
+  // engine call site rather than only through `lookupJsonFor` directly.
+  const { harness, deps, rssItemId } = fixture('huge.mkv');
+  const envelope = {
+    ...unresolvedEnvelope({ lookupId: 'lookup-huge' }),
+    parsed: { blob: 'x'.repeat(LOOKUP_JSON_CAP_BYTES * 2) },
+  };
+
+  await applyEnvelope(envelope, { rssItemId, filename: 'huge.mkv', polls: 0 }, deps);
+
+  assert.equal(harness.media.resolutions.get(rssItemId)?.lookupJson, LOOKUP_JSON_TOO_LARGE);
 });
 
 test('an unrecognised name is unresolved, and says only that', async () => {

@@ -283,10 +283,17 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       `).run(mediaItemId, role.personId, role.role, role.name, role.billingOrder, at);
     },
 
-    async setResolution(rssItemId: number, resolution: Resolution, detail: string | null): Promise<void> {
+    async setResolution(
+      rssItemId: number,
+      resolution: Resolution,
+      detail: string | null,
+      lookupJson: string | null,
+    ): Promise<void> {
       const at = now();
-      raw.prepare('UPDATE rss_item SET resolution = ?, resolution_detail = ?, updated_at = ? WHERE id = ?')
-        .run(resolution, detail, at, rssItemId);
+      // `lookup_json` is written on every call, including with `null`,
+      // which is what clears an answer left by an earlier failure.
+      raw.prepare('UPDATE rss_item SET resolution = ?, resolution_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
+        .run(resolution, detail, lookupJson, at, rssItemId);
     },
   };
 }

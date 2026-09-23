@@ -70,6 +70,7 @@ function rssItem({ id, filename, resolution }: { id: number; filename: string; r
     rankingScore: null,
     resolution,
     resolutionDetail: null,
+    lookupJson: null,
     deliveredAt: null,
   };
 }

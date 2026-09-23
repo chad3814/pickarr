@@ -152,6 +152,9 @@ export const rssItem = sqliteTable('rss_item', {
   rankingScore: integer('ranking_score'),
   resolution: text('resolution').notNull(),
   resolutionDetail: text('resolution_detail'),
+  // Written only while a release is unmatched, cleared when it resolves --
+  // `@pickarr/contract`'s `RssItemSyncRead.lookupJson` carries why.
+  lookupJson: text('lookup_json'),
   // Nullable: the reader always writes one, falling back to the link when a
   // feed's item has none — a NULL means a row that predates this column.
   // SQLite treats NULLs as distinct in a unique index, so those rows do not

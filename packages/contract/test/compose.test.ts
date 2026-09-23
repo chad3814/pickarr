@@ -38,7 +38,9 @@ const lookup: JobHandler = async (job, ctx) => {
   });
   const personId = await ctx.media.upsertPerson({ name: 'Someone', providerRef: 'p1' });
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });
-  await ctx.media.setResolution(rssItemId, 'resolved', null);
+  // No envelope to store for a resolved answer -- and `null` clears any
+  // an earlier failed attempt at this item left behind.
+  await ctx.media.setResolution(rssItemId, 'resolved', null, null);
 };
 
 const fixture: MediaPlugin = {

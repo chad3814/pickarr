@@ -1795,3 +1795,24 @@ test('migration 20\'s triggers log a destination written, edited and removed aft
   raw.prepare('DELETE FROM plugin_destination WHERE id = 1').run();
   assert.deepEqual(opsLogged(raw, 'plugin_destination'), ['delete'], 'the delete trigger tombstones it');
 });
+
+test('migration 22 adds lookup_json without rebuilding rss_item, so its sync triggers survive', () => {
+  // The hazard `docs/database-migrations.md` exists for: a
+  // create-copy-drop-rename would take the table's three triggers with it
+  // and stop `rss_item` replicating to every client, silently -- the
+  // screen would simply never update again. Asserted on the triggers
+  // themselves, not on the column, because the column is the easy half.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const columns = raw.prepare("SELECT name FROM pragma_table_info('rss_item')").all()
+    .map((row) => String((row as { name: unknown }).name));
+  assert.ok(columns.includes('lookup_json'), 'the column is there');
+
+  const triggers = raw.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'rss_item' ORDER BY name",
+  ).all().map((row) => String((row as { name: unknown }).name));
+  assert.deepEqual(triggers, ['rss_item_sync_del', 'rss_item_sync_ins', 'rss_item_sync_upd'],
+    'all three sync triggers are still attached');
+  raw.close();
+});

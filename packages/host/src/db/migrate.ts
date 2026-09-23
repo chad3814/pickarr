@@ -1283,6 +1283,29 @@ ALTER TABLE rss_feed ADD COLUMN disabled_at INTEGER;
 `;
 
 /**
+ * `rss_item.lookup_json`: the lookup service's answer for a release that
+ * did not resolve, or `NULL`.
+ *
+ * `ALTER TABLE ... ADD COLUMN` and no rebuild, for the reason
+ * `MIGRATION_21` above gives and `docs/database-migrations.md` records: a
+ * create-copy-drop-rename would take `rss_item`'s three sync triggers with
+ * it and silently stop the table replicating.
+ *
+ * **No `seedSyncLog` and no `installSyncTriggers`.** `rss_item` predates its
+ * own replication: `INITIAL_SCHEMA` creates it with no triggers at all, and
+ * it only joins the synced set at `migration15`, via `MIGRATION_15_TABLES`.
+ * That migration necessarily runs before this one -- the runner applies
+ * versions in order -- so by the time 22 runs, `rss_item`'s triggers are
+ * already attached and every existing row is already indexed in
+ * `sync_log`. Adding a column does not change which rows exist -- and the
+ * `UPDATE` that first writes this column fires the existing update trigger,
+ * which is what carries the new value to clients.
+ */
+const MIGRATION_22 = `
+ALTER TABLE rss_item ADD COLUMN lookup_json TEXT;
+`;
+
+/**
  * The DDL above, then the one call replication needs.
  *
  * **`installSyncTriggers` and no `seedSyncLog`**, where migrations 16, 17 and
@@ -1327,6 +1350,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 19, up: (db) => migration19(db) },
   { version: 20, up: (db) => migration20(db) },
   { version: 21, up: (db) => db.exec(MIGRATION_21) },
+  { version: 22, up: (db) => db.exec(MIGRATION_22) },
 ];
 
 /**

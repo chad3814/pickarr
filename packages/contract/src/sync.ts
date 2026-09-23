@@ -241,8 +241,66 @@ export interface RssItemSyncRead {
    */
   resolution: string;
   resolutionDetail: string | null;
+  /**
+   * The lookup service's own answer for this release, as JSON, or `null`.
+   *
+   * **Only present while a release is unmatched.** Written wherever the
+   * engine reaches a terminal resolution that is not `resolved` -- the
+   * two such resolutions are `refused` and `unresolved`, across **three**
+   * call sites in `packages/openmetadata/src/engine.ts`, because
+   * `unresolved` is reached both when the service says so and when it
+   * never finishes inside `MAX_POLLS`. (This sentence said "the two
+   * terminal branches" and was miscounting branches as resolutions.)
+   * Cleared by the `UPDATE` that resolves one, so a matched release
+   * carries no copy of the answer that matched it. That
+   * bound is the whole reason this column is affordable: without it, every
+   * client's replica would grow by one lookup response per release for
+   * ever.
+   *
+   * Serialised from the validated `LookupEnvelope`, never from the
+   * response bytes -- `media` included. It was omitted in an earlier
+   * revision on the assumption that a non-resolved envelope always carries
+   * a null `media`; `packages/openmetadata/src/validate.ts`'s
+   * `readEnvelope` parses `media` unconditionally, with no gate on `state`
+   * or `refusal`, so that assumption was false, and dropping it would have
+   * discarded the most direct evidence of *why* a half-identified release
+   * was not confirmed -- the whole question this column exists to answer.
+   * Capped: over the cap the column holds a short marker instead, which
+   * the unmatched screen renders in place of the answer.
+   */
+  lookupJson: string | null;
   deliveredAt: number | null;
 }
+
+/**
+ * The most `RssItemSyncRead.lookupJson` may hold, in bytes on the wire.
+ *
+ * Lives here, in `@pickarr/contract`, rather than beside the code that
+ * writes or renders it, because both sides need it and neither may depend
+ * on the other: the host side that writes this column lives behind
+ * `@pickarr/openmetadata`, and `packages/web` must never depend on that
+ * package -- it reaches `node:sqlite` through drizzle, which has no browser
+ * build. `@pickarr/contract` is the one package both already depend on.
+ *
+ * 32768, not 8192: `Media` carries a synopsis, an arbitrary `details`
+ * object, its `parents` chain and a full cast, and fifty people is roughly
+ * 6 KB on its own now that `media` is part of what this column stores. At
+ * the smaller cap the richest answers -- the ones with the most cast and
+ * detail to show -- would all become the marker and only the thin ones
+ * would stay readable, which is backwards: the bound should cost the
+ * unmatched set as a whole, not punish the answers most worth reading. It
+ * is still a real bound, because only non-resolved releases store
+ * anything here and the unmatched set is normally a short tail.
+ */
+export const LOOKUP_JSON_CAP_BYTES = 32768;
+
+/**
+ * What `lookupJson` holds instead of an answer too large to keep. Valid
+ * JSON, so a client can parse it and recognise it rather than render
+ * wreckage. See `LOOKUP_JSON_CAP_BYTES` immediately above for why both
+ * constants live here rather than beside the code that uses them.
+ */
+export const LOOKUP_JSON_TOO_LARGE = '{"pickarr":"lookup-answer-too-large"}';
 
 /**
  * A pick submitted to a torrent client, as the replica holds it.
