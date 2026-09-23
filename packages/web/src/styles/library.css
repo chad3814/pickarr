@@ -5,22 +5,33 @@
  * a type, an ARIA attribute already load-bearing for accessibility, or a
  * parent/child relationship -- because no component this stylesheet reaches
  * sets a class, and this file does not become the first exception. Verified
- * against the actual 2.0 markup, not assumed: `<article>`, `<img>` and
- * `ul[aria-label='releases']` each appear exactly once in the browse markup,
- * outside `styles/` and `test/`. **Some of that markup is no longer in
- * `packages/web/src`**, and this file reaches it anyway because a stylesheet
- * is matched against the rendered document rather than against a package.
- * Counted on the tree as it stands:
+ * against the actual 2.0 markup, not assumed: every element type keyed on
+ * below is accounted for by site, outside `styles/` and `test/`. **Some of
+ * that markup is no longer in `packages/web/src`**, and this file reaches
+ * it anyway because a stylesheet is matched against the rendered document
+ * rather than against a package. Counted on the tree as it stands:
  *
- * - `<article>` and `<img>`: `library/MediaItemCard.tsx`, one each, and web
- *   still owns both.
+ * - `<img>`: `library/MediaItemCard.tsx`, once, and web still owns it.
+ * - `<article>`: **two sites now, both web's.** `MediaItemCard.tsx` opens
+ *   one per browse row, and `library/Unmatched.tsx` opens one per
+ *   unmatched release -- the card the `article dl` rules below style. That is
+ *   deliberate sharing rather than drift: an unmatched release has no
+ *   plugin card, and reusing the element is what makes the two screens one
+ *   application. `packages/e2e/tests/shell.spec.ts`'s `getByRole('article')`
+ *   is unaffected, because it runs on a category route and the second site
+ *   only ever renders on `/unmatched`.
+ * - `<dl>`, `<dt>`, `<dd>` and `<pre>`: `library/Unmatched.tsx`, and
+ *   nowhere else in the rendered app -- counted across `packages/web/src`
+ *   and all three plugins' `browser.tsx` before the rules below were
+ *   keyed on them.
  * - `ul[aria-label='releases']`: `@pickarr/plugin-ui`'s `ReleaseList.tsx`.
- * - `<h2>`: **two shapes, across four sites.** Each of the three plugins'
- *   `browser.tsx` renders one holding the expander button, and
- *   `MediaItemCard.tsx` renders a plain one on its unknown-plugin fallback
- *   path -- an item whose `pluginId` the registry has no card for gets a
- *   title and no expander. So `article h2` below styles both shapes, and
- *   `article h2 button` reaches only the first.
+ * - `<h2>`: **two shapes, across five sites.** Each of the three plugins'
+ *   `browser.tsx` renders one holding the expander button, `Unmatched.tsx`
+ *   renders a fifth of that same shape through the same shared
+ *   `CardHeading`, and `MediaItemCard.tsx` renders a plain one on its
+ *   unknown-plugin fallback path -- an item whose `pluginId` the registry
+ *   has no card for gets a title and no expander. So `article h2` below
+ *   styles both shapes, and `article h2 button` reaches only the first.
  *
  * That is the coupling to know about before editing either side: a plugin
  * renaming its heading element silently drops `article h2 button`, and the
@@ -64,11 +75,18 @@
  */
 
 /*
- * One media item: the poster, and beneath it whatever its plugin's card
- * renders (`MediaItemCard.tsx`'s own doc). `<article>` is the only one in
- * this app -- one per row, held by web rather than by the plugin for
- * exactly that reason -- so this reaches it without a class this task
- * would be the first to add.
+ * One card: a media item on a category screen (the poster, and beneath it
+ * whatever its plugin's card renders -- `MediaItemCard.tsx`'s own doc), or
+ * an unmatched release on `/unmatched` (`Unmatched.tsx`'s own doc). Web
+ * opens the `<article>` on both, never the plugin, which is what keeps one
+ * card to one element -- so this reaches every card without a class this
+ * file would be the first to add.
+ *
+ * **This comment used to say `<article>` was the only one in the app, and
+ * the unmatched card is the second.** That is the shared treatment working
+ * as intended rather than a collision: the two screens are meant to look
+ * like one application, and every declaration below is as true of a
+ * release as it is of a media item. The header lists both sites.
  */
 article {
   border: 1px solid var(--color-line);
@@ -97,10 +115,12 @@ article img {
 
 article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
 
-/* The disclosure control that expands a card into its releases (the
-   `aria-expanded` button in the rendering plugin's own `browser.tsx`; web
-   holds the `<article>` around it) reads as the card's own
-   title, not as a bordered form control: `base.css`'s `button` rule is in
+/* The disclosure control that expands a card -- into its releases on a
+   category screen, into why the lookup failed on `/unmatched`. It is the
+   `aria-expanded` button `@pickarr/plugin-ui`'s `CardHeading` renders,
+   whichever component composed it; web holds the `<article>` around it in
+   both cases. It reads as the card's own title, not as a bordered form
+   control: `base.css`'s `button` rule is in
    the `base` layer, so this rule beats it regardless of specificity
    (`styles/index.css`'s own doc on why that bet is off the table).
 
@@ -160,6 +180,120 @@ article h2 button small {
   font-size: var(--text-body);
   font-weight: 400;
   white-space: nowrap;
+}
+
+/*
+ * An unmatched release's headline is a *filename*, which is the one thing
+ * a card title can be that has no spaces in it. `Some.Release.2024.1080p.
+ * WEB-DL-GROUP.mkv` has no break opportunity at all under the default
+ * `overflow-wrap: normal`, so it runs straight out of the bordered card
+ * rather than wrapping inside it. `anywhere` rather than `break-word`
+ * because the two differ on min-content sizing, and this headline is a
+ * flex item beside a trailing label that must keep its own width.
+ *
+ * Scoped to this screen, not applied to `article h2 button span`
+ * generally: the three browse cards' headlines are human titles with
+ * spaces in them, they wrap fine already, and changing how they size is
+ * not this rule's business. `aria-labelledby` is the hook because it is
+ * already load-bearing for accessibility -- the same justification
+ * `ul[aria-label='releases']` above is keyed on, and the same one
+ * `settings.css` uses for `ul[aria-labelledby='destinations-heading']`.
+ * A `data-testid` would not do: that attribute exists for tests and
+ * styling it would make deleting a test hook a visual regression.
+ *
+ * The old `<ul>` this screen rendered before it had cards took the same
+ * call for the same reason, in a rule deleted with it: a filename here is
+ * exactly what the screen exists to show in full, so it wraps rather than
+ * being ellipsised, the same call 1.x's `dialog.css` made for `.confirm`'s
+ * own file lists.
+ */
+section[aria-labelledby='unmatched-heading'] article h2 button span {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The body behind an unmatched card's disclosure: `State`, `Detail` and
+ * `Lookup answer`, as a `<dl>` (`Unmatched.tsx`'s own doc on why a
+ * definition list and not prose). These four element types appear nowhere
+ * else in the rendered app -- counted across `packages/web/src` and all
+ * three plugins' `browser.tsx`, and recorded in this file's header -- so
+ * they are keyed bare, and a future card wanting the same shape -- a short
+ * column of labelled values -- gets this treatment for free. Naming the
+ * screen instead would be the mistake `article h2 button small`'s own
+ * comment describes:
+ * a rule that knows which screen it is styling is a rule the next one
+ * cannot reuse.
+ *
+ * The rule above is scoped and this one is not, and the difference is
+ * real: `overflow-wrap: anywhere` is a consequence of the *content* being
+ * a filename, which is true only here, while a labelled-value list looks
+ * the same wherever it appears.
+ */
+article dl {
+  margin: var(--space-3) 0 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-body);
+}
+
+/* The label. `--color-text-dim` on `--color-surface` is the pairing the
+   rest of this file's secondary detail already uses, measured at 6.23:1
+   dark / 5.85:1 light by the `li > button:disabled` comment further down
+   -- so a label that is genuinely secondary still clears the 4.5:1
+   floor. */
+article dt {
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/* The value. `<dd>`'s UA `margin-inline-start: 40px` is what makes an
+   unstyled definition list read as an outline rather than as a caption
+   over its value, which is the shape wanted here; it is reset and the
+   spacing put below the pair instead. `overflow-wrap: anywhere` for the
+   same reason the headline needs it -- a `resolutionDetail` may quote a
+   filename back. */
+article dd {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* No trailing gap under the last pair: the `<article>`'s own padding is
+   already there, and doubling it would make the card look unbalanced
+   against its top edge. */
+article dd:last-child {
+  margin-bottom: 0;
+}
+
+/*
+ * The lookup service's own answer, verbatim.
+ *
+ * `--color-text` on `--color-surface-2`, not the dimmed treatment the rest
+ * of a card's detail takes: this is the content an operator opened the
+ * card for, so it is primary text that happens to sit in a well. The well
+ * is what says "this string is not ours" -- the words around it are this
+ * client's and this one is the service's.
+ *
+ * `white-space: pre-wrap`, so a `<pre>` that would otherwise scroll
+ * sideways for the width of a JSON object wraps inside the card instead;
+ * `overflow-wrap: anywhere` because the stored string is compact JSON with
+ * no spaces to wrap at. `max-height` with `overflow: auto` bounds it: the
+ * answer may be anything up to `LOOKUP_JSON_CAP_BYTES` (8KB), which is
+ * several screens of text and would bury every card below it.
+ */
+article dd pre {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: var(--text-meta);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -316,31 +450,6 @@ ul[aria-label='releases'] li > [role='alert'] {
   flex-basis: 100%;
   color: var(--color-error);
   font-size: var(--text-meta);
-}
-
-/*
- * `Unmatched`'s own list of filenames -- a release a feed delivered that no
- * lookup has attached to a media item yet (`Unmatched.tsx`'s own doc).
- * `aria-label='unmatched releases'` distinguishes it from `ReleaseList`'s
- * `aria-label='releases'` above, and both are already load-bearing for
- * accessibility rather than added for this rule's sake. `overflow-wrap:
- * anywhere` rather than an ellipsis: a filename here is exactly what the
- * screen exists to show in full, the same call 1.x's `dialog.css` made for
- * `.confirm`'s own file lists.
- */
-ul[aria-label='unmatched releases'] {
-  list-style: none;
-  margin: var(--space-2) 0 0;
-  padding: 0;
-}
-
-ul[aria-label='unmatched releases'] li {
-  padding: var(--space-1) 0;
-  border-top: 1px solid var(--color-line);
-  font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: var(--text-body);
-  color: var(--color-text-dim);
-  overflow-wrap: anywhere;
 }
 
 /*

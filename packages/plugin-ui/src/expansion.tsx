@@ -23,6 +23,29 @@
  * What stays duplicated, deliberately: one `{expanded && …}` line per card.
  * That is body composition, not an accessibility obligation, and it is the
  * line §7.2's content will grow out of.
+ *
+ * **There is a fourth consumer now, and it is not a plugin.**
+ * `packages/web`'s own `library/Unmatched.tsx` composes these two for a
+ * release no lookup matched -- a row with no `media_item` and therefore no
+ * plugin card at all, which still has to look like the rest of the
+ * application rather than like a different one. So the argument above is
+ * narrower than the reason this package earns its place: sharing the
+ * expander stops a *fourth* `aria-expanded` being written whether the
+ * writer is a plugin or web itself, and the `<small>` and `<h2>` this file
+ * emits are the elements `web/src/styles/library.css` selects on both
+ * screens. `@pickarr/plugin-ui` is the shared card seam; the plugin
+ * boundary is the reason it exists, not the limit of what may use it.
+ *
+ * `test/expansion.test.tsx`'s scan is still scoped to `packages/plugin-*`
+ * and is unchanged by this: web's compliance is not something a plugin
+ * could break, and `packages/web/test/library/Unmatched.test.tsx` asserts
+ * the composed heading directly.
+ *
+ * That consumer also exercises a case no plugin does: it passes a reporter
+ * that does nothing, because it gathers nothing and so has nothing to
+ * start or stop. See {@link useExpansion} on why closing is reported at
+ * all, and `Unmatched.tsx`'s `REPORTS_NOTHING` on why a no-op there is a
+ * hoisted constant rather than an inline arrow.
  */
 import { useCallback, useState, type ReactElement } from 'react';
 
@@ -47,8 +70,13 @@ export interface Expansion {
  * other cards.
  *
  * `useCallback` because `toggle` is handed to a `<button>`'s `onClick` in
- * three cards; a fresh identity per render is a new prop per render for
- * every card on a paged list.
+ * four cards now; a fresh identity per render is a new prop per render for
+ * every card on a paged list. **The memo is only as good as the callback
+ * handed in**, which is a real constraint on a caller rather than a note:
+ * a card that passes a freshly built arrow gets a freshly built `toggle`
+ * every render and none of this. The three plugin cards pass the
+ * `onExpandedChange` prop they were given, and web's unmatched screen
+ * passes a module-level constant for the same reason.
  */
 export function useExpansion(onExpandedChange: (expanded: boolean) => void): Expansion {
   const [expanded, setExpanded] = useState(false);

@@ -8,10 +8,18 @@
  * `rss_item` in modification order through `Store['listByTable']` instead
  * (`by_table_updated`), and does the "`mediaItemId` is null" filtering
  * itself, in memory, over each raw page that index hands back. It is the
- * only production reader of `listByTable` and so of `by_table_updated`
- * anywhere in `packages/web/src`: `useCounts.ts` moved to
- * `by_table_plugin_updated` when counts stopped reading rows, and the
- * category screens page against that index too.
+ * only production reader in `packages/web/src` that *pages* `listByTable`,
+ * and so the only one that pages `by_table_updated`: `useCounts.ts` moved
+ * to `by_table_plugin_updated` when counts stopped reading rows, and the
+ * category screens page against that index too. **This paragraph used to
+ * say "the only production reader of `listByTable`" full stop, and that
+ * has not been true for some time** -- `./useFeedNames.ts` and the four
+ * settings hooks (`useFeeds`, `useDownloadClients`, `useDestinations`,
+ * `useClientMappings`) all call it. Every one of them takes a single
+ * bounded page and passes no `from`, which is the distinction that
+ * actually matters here and is the one now written down: this screen is
+ * the only place a cursor is resumed, and so the only place the walk below
+ * costs more than one read.
  *
  * **There is no index on "`mediaItemId` is null", and that is a deliberate
  * choice, not an oversight** (design spec §3.1 weighs the same three options
@@ -69,22 +77,44 @@
  * branch creates: `SCHEMA_VERSION`'s 1->2 bump forces every client through a
  * bootstrap and backfill of `rss_item`, a continuous stream of batches into
  * the one table this screen walks.
+ *
+ * **Each release renders as a card, not as a line of a list.** A release
+ * here has no `media_item` and so no plugin card of its own, but it should
+ * not look like a different application: the `<article>` and the
+ * {@link CardHeading} below are the same two pieces a browse card
+ * composes, so `styles/library.css`'s `article`, `article h2 button` and
+ * `article h2 button small` rules reach this screen with nothing added for
+ * it. The trailing label is the feed's name, resolved through
+ * {@link useFeedNames}; the body -- behind the same disclosure a browse
+ * card uses -- is why the lookup did not match and what the service
+ * actually answered, both of which the host has been sending and nothing
+ * has been showing.
  */
 import { useEffect, useRef, useState, type ReactElement } from 'react';
-import type { RssItemSyncRead } from '@pickarr/contract';
+import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
+import { CardHeading, useExpansion } from '@pickarr/plugin-ui';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
+import { useFeedNames } from './useFeedNames.ts';
 
 /**
- * The three `Store` members this screen needs, and nothing else -- so a
- * test can hand it a bare database's `listByTable`, `subscribeInserts` and
- * `subscribe` directly, the way `useCounts.test.tsx`'s `sourceFor` does. A
- * real `Store` satisfies this by structural assignment.
+ * The four `Store` members this screen needs, and nothing else -- so a
+ * test can hand it a bare database's `listByTable`, `subscribeInserts`,
+ * `subscribe` and `subscribeTable` directly, the way `useCounts.test.tsx`'s
+ * `sourceFor` does. A real `Store` satisfies this by structural assignment.
+ *
+ * `subscribeTable` is here for {@link useFeedNames}'s sake rather than this
+ * screen's own reads, and this interface is deliberately a superset of that
+ * hook's `FeedNamesSource` rather than a second prop: one `source` means
+ * one object identity, and both hooks key their effects on `[source]`, so
+ * splitting them would give the caller two things to keep stable instead of
+ * one.
  */
 export interface UnmatchedSource {
   listByTable: Store['listByTable'];
   subscribeInserts: Store['subscribeInserts'];
   subscribe: Store['subscribe'];
+  subscribeTable: Store['subscribeTable'];
 }
 
 export interface UnmatchedProps {
@@ -113,6 +143,41 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
 }
 
 /**
+ * A string field of a stored row, or `undefined` when there is nothing to
+ * show for it.
+ *
+ * **Read off the record rather than off the narrowed type, and that is the
+ * point of this function existing.** {@link isRssItem} above answers
+ * `value is RssItemSyncRead`, and that interface declares `resolution:
+ * string` and `lookupJson: string | null` -- but it checks neither, so
+ * after the narrowing those two fields are *typed* present and may be
+ * absent at run time. That is not hypothetical here: `store/gather.ts`'s
+ * own doc states the rule ("a replica *persists across client builds* ...
+ * `SCHEMA_VERSION` rebuilds it when the store's own schema changes and the
+ * generation token rebuilds it when the server's database changes, but
+ * neither fires when a **wire shape** changes"), and `lookupJson` is a
+ * field this very branch added. A client that was running before it
+ * existed holds `rss_item` rows without it, and the host only rewrites a
+ * row when something about it changes, so those rows are not refreshed by
+ * the upgrade either.
+ *
+ * Widening {@link isRssItem} to demand the new fields was the alternative
+ * and is worse: a row missing one would stop being an unmatched release at
+ * all and vanish from the screen, and a release disappearing is the exact
+ * failure this screen exists to prevent. Declining to render one *line of
+ * a card* is the proportionate loss.
+ *
+ * The empty string answers `undefined` too. It is not a value worth a
+ * label, and rendering it would leave a `<dt>` standing over an empty
+ * `<dd>` -- the same call `CardHeading`'s `trailing` makes for an empty
+ * `<small>`.
+ */
+function textOf(value: Record<string, unknown>, field: string): string | undefined {
+  const held = value[field];
+  return typeof held === 'string' && held !== '' ? held : undefined;
+}
+
+/**
  * The `updatedAt` `by_table_updated` sorted `row` by. Every row `listByTable`
  * can return necessarily has a numeric `value.updatedAt` -- that index's own
  * key path is `['table', 'value.updatedAt', 'id']`, and IndexedDB omits any
@@ -132,9 +197,27 @@ function isStoreClosed(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
 }
 
+/**
+ * One unmatched release, as this screen's card renders it.
+ *
+ * Every field but `id` and `filename` is `string | number | undefined`
+ * where the wire's is nullable or newer than some replica: `undefined`
+ * means "nothing to show here", and the wire's `null`, an absent field and
+ * an empty string all collapse into it because the body renders all three
+ * as the same nothing. {@link textOf} has why that tolerance is needed at
+ * all.
+ */
 interface UnmatchedRow {
   readonly id: number;
   readonly filename: string;
+  /** Which feed delivered it, for {@link useFeedNames} to name. */
+  readonly feedId: number | undefined;
+  /** `@pickarr/contract`'s `Resolution` vocabulary: what became of this release's identification. */
+  readonly resolution: string | undefined;
+  /** The host's own sentence about that outcome. */
+  readonly resolutionDetail: string | undefined;
+  /** The lookup service's answer, as stored -- or the `LOOKUP_JSON_TOO_LARGE` marker in place of one too big to keep. */
+  readonly lookupJson: string | undefined;
 }
 
 /**
@@ -156,9 +239,20 @@ async function readUnmatched(source: UnmatchedSource): Promise<readonly Unmatche
     });
 
     for (const row of page) {
-      if (isRssItem(row.value) && row.value.mediaItemId === null) {
-        collected.push({ id: row.id, filename: row.value.filename });
-      }
+      // `isRecord` before `isRssItem`, so the narrowed value keeps its
+      // index signature and {@link textOf} can reach fields that guard
+      // does not check. `isRssItem` alone narrows to an interface, which
+      // has none.
+      const value: unknown = row.value;
+      if (!isRecord(value) || !isRssItem(value) || value.mediaItemId !== null) continue;
+      collected.push({
+        id: row.id,
+        filename: value.filename,
+        feedId: typeof value.feedId === 'number' ? value.feedId : undefined,
+        resolution: textOf(value, 'resolution'),
+        resolutionDetail: textOf(value, 'resolutionDetail'),
+        lookupJson: textOf(value, 'lookupJson'),
+      });
     }
 
     if (page.length < PAGE_SIZE) break; // the table's earliest row was reached
@@ -232,11 +326,149 @@ function makeRefresh(
   };
 }
 
+/**
+ * What every card on this screen hands {@link useExpansion}, hoisted to
+ * module scope rather than written inline.
+ *
+ * **Why this screen reports nothing.** That callback exists so web can
+ * start and stop *gathering* for a browse card -- `MediaItemCard` turns a
+ * `useGatheredItem` subscription on when a card opens and off when it
+ * closes, which is what keeps a page of 24 collapsed cards from holding
+ * subscriptions nobody asked for (`plugin-ui/src/expansion.tsx`'s own
+ * measurement: 72 live subscriptions for 24 closed cards). This screen
+ * gathers nothing. Everything {@link UnmatchedDetail} renders is already
+ * in the {@link UnmatchedRow} the card was handed, so opening one costs no
+ * read and closing one has nothing to release.
+ *
+ * **Hoisted, and that is not style.** `useExpansion` memoises `toggle` on
+ * this callback (`useCallback(..., [onExpandedChange])`), so an inline
+ * `() => {}` would be a fresh identity per render and hand every card on
+ * the page a new `onClick` prop every time the list re-rendered -- which
+ * on this screen is once per wake, and this screen is woken by every row
+ * it lists. One shared constant makes `toggle` stable for a card's whole
+ * life.
+ */
+const REPORTS_NOTHING = (): void => {};
+
+/**
+ * The body behind a card's disclosure: why the lookup did not match this
+ * release, and what the service said.
+ *
+ * A `<dl>` because that is what this is -- three labelled values, not
+ * prose and not a table. `styles/library.css` styles it structurally;
+ * these four element types appear nowhere else in the rendered app, so no
+ * class is needed and none is added (web's stylesheets set none anywhere).
+ *
+ * **`resolution` is rendered as the word the host recorded, not mapped to
+ * a sentence.** The column is unconstrained TEXT and nothing narrows it on
+ * the way here (`RssItemSyncRead.resolution`'s own doc), so any mapping
+ * would need a fallback for a word this build does not know -- and the
+ * vocabulary is already plain English: `pending`, `refused`, `unresolved`.
+ * The sentence an operator actually wants is `resolutionDetail`, which the
+ * host writes for exactly that purpose. The `<dt>` reads `State` rather
+ * than `Resolution` because `ReleaseList` shows a *video* resolution under
+ * that word, and the two are unrelated columns.
+ *
+ * **A pair whose value is absent renders neither half.** There is no
+ * empty `<pre>` for a release whose lookup never ran, and no `Lookup
+ * answer` label standing over nothing: a bordered box containing nothing
+ * reads as a bug, and the state line above it already says `pending`.
+ */
+function UnmatchedDetail({ row }: { row: UnmatchedRow }): ReactElement {
+  return (
+    <dl>
+      {/*
+        `not recorded` rather than omitting the pair, because unlike the
+        other two this one is never legitimately absent: the host has
+        written `resolution` for every release since the column existed.
+        Absent here means a replica row older than this build understands
+        ({@link textOf}), and saying so is more use than a card that
+        quietly opens onto less than the next one.
+      */}
+      <dt>State</dt>
+      <dd>{row.resolution ?? 'not recorded'}</dd>
+      {row.resolutionDetail !== undefined && (
+        <>
+          <dt>Detail</dt>
+          <dd>{row.resolutionDetail}</dd>
+        </>
+      )}
+      {row.lookupJson !== undefined && (
+        <>
+          <dt>Lookup answer</dt>
+          {row.lookupJson === LOOKUP_JSON_TOO_LARGE ? (
+            /*
+              The marker is an implementation detail of the column -- what
+              the host stores *instead of* an answer over
+              `LOOKUP_JSON_CAP_BYTES` -- and it is valid JSON precisely so
+              that a client can recognise it rather than render wreckage
+              (its own doc in `@pickarr/contract`). Recognising it and then
+              printing it would waste that: `{"pickarr":"lookup-answer-too-
+              large"}` in a code block reads as the service's answer, which
+              is the one thing it is not.
+            */
+            <dd>The service answered, but the answer was too large to keep.</dd>
+          ) : (
+            <dd>
+              {/*
+                Verbatim, and not re-serialised for looks. This is the
+                string the replica holds; a `JSON.parse` / `stringify`
+                round trip to pretty-print it would throw on anything this
+                build cannot parse -- and "what the service actually said"
+                stops being true the moment something reformats it.
+              */}
+              <pre>{row.lookupJson}</pre>
+            </dd>
+          )}
+        </>
+      )}
+    </dl>
+  );
+}
+
+/**
+ * One unmatched release.
+ *
+ * The same two pieces a browse card composes, so this screen's title line
+ * *is* the browse card's title line -- `article h2 button` and `article h2
+ * button small` already style it and no rule of its own is added. An
+ * unmatched release has no `media_item` and so no plugin card, but it
+ * should not look like a different application.
+ *
+ * `trailing` is spread in conditionally rather than passed as
+ * `trailing={feedName}`: `exactOptionalPropertyTypes` distinguishes an
+ * absent key from an explicit `undefined`, and `CardHeading` renders no
+ * `<small>` at all only for the absent one.
+ */
+function UnmatchedCard({ row, feedName }: { row: UnmatchedRow; feedName: string | undefined }): ReactElement {
+  const { expanded, toggle } = useExpansion(REPORTS_NOTHING);
+
+  return (
+    <article>
+      <CardHeading
+        headline={row.filename}
+        {...(feedName === undefined ? {} : { trailing: feedName })}
+        expanded={expanded}
+        onToggle={toggle}
+      />
+      {expanded && <UnmatchedDetail row={row} />}
+    </article>
+  );
+}
+
 export function Unmatched({ source }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
   const [rows, setRows] = useState<readonly UnmatchedRow[] | undefined>(undefined);
+
+  // `feedId -> name`, for the trailing label on each card's title line.
+  // Kept current by its own `subscribeTable` subscription, so a feed
+  // renamed on the settings screen relabels these cards without a reload;
+  // an id no feed claims is simply absent from the map, which is exactly
+  // the `undefined` `CardHeading`'s optional `trailing` wants
+  // (`useFeedNames.ts`'s own doc).
+  const feedNames = useFeedNames(source);
 
   // The one refresher, held across the row-subscription effect's many
   // re-runs -- coalescing is worthless if each re-run builds its own, since
@@ -292,11 +524,13 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
         (rows.length === 0 ? (
           <p>Everything has been matched.</p>
         ) : (
-          <ul aria-label="unmatched releases">
-            {rows.map((row) => (
-              <li key={row.id}>{row.filename}</li>
-            ))}
-          </ul>
+          rows.map((row) => (
+            <UnmatchedCard
+              key={row.id}
+              row={row}
+              feedName={row.feedId === undefined ? undefined : feedNames.get(row.feedId)}
+            />
+          ))
         ))}
     </section>
   );
