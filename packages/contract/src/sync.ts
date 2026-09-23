@@ -241,8 +241,45 @@ export interface RssItemSyncRead {
    */
   resolution: string;
   resolutionDetail: string | null;
+  /**
+   * The lookup service's own answer for this release, as JSON, or `null`.
+   *
+   * **Only present while a release is unmatched.** Written on the two
+   * terminal branches that leave a release unidentified -- `refused` and
+   * `unresolved` -- and cleared by the `UPDATE` that resolves one, so a
+   * matched release carries no copy of the answer that matched it. That
+   * bound is the whole reason this column is affordable: without it, every
+   * client's replica would grow by one lookup response per release for
+   * ever.
+   *
+   * Serialised from the validated `LookupEnvelope`, never from the
+   * response bytes, and with `media` omitted. Capped: over the cap the
+   * column holds a short marker instead, which the unmatched screen
+   * renders in place of the answer.
+   */
+  lookupJson: string | null;
   deliveredAt: number | null;
 }
+
+/**
+ * The most `RssItemSyncRead.lookupJson` may hold, in bytes on the wire.
+ *
+ * Lives here, in `@pickarr/contract`, rather than beside the code that
+ * writes or renders it, because both sides need it and neither may depend
+ * on the other: the host side that writes this column lives behind
+ * `@pickarr/openmetadata`, and `packages/web` must never depend on that
+ * package -- it reaches `node:sqlite` through drizzle, which has no browser
+ * build. `@pickarr/contract` is the one package both already depend on.
+ */
+export const LOOKUP_JSON_CAP_BYTES = 8192;
+
+/**
+ * What `lookupJson` holds instead of an answer too large to keep. Valid
+ * JSON, so a client can parse it and recognise it rather than render
+ * wreckage. See `LOOKUP_JSON_CAP_BYTES` immediately above for why both
+ * constants live here rather than beside the code that uses them.
+ */
+export const LOOKUP_JSON_TOO_LARGE = '{"pickarr":"lookup-answer-too-large"}';
 
 /**
  * A pick submitted to a torrent client, as the replica holds it.

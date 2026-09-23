@@ -46,6 +46,7 @@ function rssItem(id: number): RssItemSyncRead {
     rankingScore: null,
     resolution: '1080p',
     resolutionDetail: null,
+    lookupJson: null,
     deliveredAt: null,
   };
 }

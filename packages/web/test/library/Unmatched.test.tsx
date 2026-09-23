@@ -56,6 +56,7 @@ function rssOp({
     rankingScore: null,
     resolution: '1080p',
     resolutionDetail: null,
+    lookupJson: null,
     deliveredAt: null,
   };
   return { op: 'upsert', table: 'rss_item', id, value };
