@@ -120,13 +120,28 @@ Neither has to say which.
 
 ### Secret names
 
-`resolveSecret('TMDB_READ_ACCESS_TOKEN')` and
-`resolveSecret('TPDB_API_KEY')`, through the same chain the lookup key
-uses — so an operator sets `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN` and
-`PICKARR_SECRET_TPDB_API_KEY`. **The `PICKARR_SECRET_` prefix is
-required**: `secrets/names.ts` builds the environment name from it, so a
-bare `TMDB_READ_ACCESS_TOKEN` in a `.env.local` is loaded into
-`process.env` by `--env-file-if-exists` and then never found.
+`resolveSecret('tmdb-read-access-token')` and
+`resolveSecret('tpdb-api-key')`, through the same chain the lookup key
+uses — whose own name is `openmetadata-api-key`, the form these follow.
+
+**A secret's name is lowercase and hyphenated, and that is enforced.**
+`assertSecretName` refuses anything else, so an earlier draft of this
+spec naming `TMDB_READ_ACCESS_TOKEN` would have thrown before reaching
+the chain at all — caught while implementing the provider, not by
+reading. `envNameFor` is what uppercases a name onto a variable, so the
+operator still sets:
+
+```
+PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN
+PICKARR_SECRET_TPDB_API_KEY
+```
+
+**The `PICKARR_SECRET_` prefix is required**, and its own docblock
+records why in a way worth reading before touching this: without it,
+`envNameFor('path')` is `PATH`, and a secret named `path` resolved to the
+container's `PATH` — which would then have been sent to a third party as
+an api key. A bare `TMDB_READ_ACCESS_TOKEN` in a `.env.local` is loaded
+into `process.env` by `--env-file-if-exists` and then never found.
 
 **Absent is not an error.** A host with no key for a provider logs once
 and fetches no artwork for it, exactly as a host with no openmetadata key
