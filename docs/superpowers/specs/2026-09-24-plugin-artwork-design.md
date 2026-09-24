@@ -50,34 +50,87 @@ resolved lookup ─┬─> media_item, people            (today)
                  └─> enqueue artwork job            (new)
                           │
                           ├─ ArtworkSource for `media.provider`
-                          │     tmdb ──> /3/{kind}/{ref}/images
-                          │     tpdb ──> not registered yet (below)
+                          │     tmdb ──> /3/configuration + /3/{kind}/{ref}/images
+                          │     tpdb ──> /scenes/{ref}, cast embedded
                           │
                           ├─ pick one poster, one background, one logo
                           ├─ pick one image per person
                           └─ fetch bytes ──> MediaWriter.attach*  ──> ArtworkStore
 ```
 
-### Only TMDB, and why the other provider waits
+### Both providers, and what probing them changed
 
 Two providers appear in this codebase: `tmdb` (television and film) and
-`tpdb` (adult). **This slice registers TMDB only.**
+`tpdb` (adult). **Both are in scope.** An earlier draft of this spec
+scoped `tpdb` out because its contract needed a key to read; the repo
+owner supplied keys, so both were verified against the live APIs before
+this section was rewritten. Nothing below is remembered.
 
-That is a deliberate stop, not an oversight. TMDB's contract is public and
-was read before this spec was written — `/3/movie/{id}/images` returns
-`posters`, `backdrops` and `logos`, each entry carrying `file_path`,
-`width`, `height`, `iso_639_1`, `aspect_ratio`, `vote_average` and
-`vote_count`; `/3/configuration` returns `images.secure_base_url` and the
-size lists; authentication is a bearer token. Every claim this design
-makes about TMDB is checkable against those two documents.
+**TMDB**, confirmed with a real token: `/3/configuration` answers
+`images.secure_base_url` = `https://image.tmdb.org/t/p/` with
+`poster_sizes` through `w780`/`original` and `profile_sizes` through
+`h632`/`original`; `/3/movie/{id}/images` answers `posters`, `backdrops`
+and `logos`, each entry carrying `file_path`, `width`, `height`,
+`iso_639_1`, `iso_3166_1`, `aspect_ratio`, `vote_average`, `vote_count`.
+A url is `secure_base_url + size + file_path`. Auth is a bearer header.
 
-ThePornDB's is not checkable the same way: reading it needs a key, and
-going looking for the operator's credential to satisfy my own curiosity is
-not a thing to do. Specifying a client from memory is how this repo's
-worst defects have started, so `tpdb` is left **unregistered and loud** —
-the job records `no artwork source for provider "tpdb"` once per provider,
-not per item, and does nothing. Adding it later is one `ArtworkSource`
-implementation and its registration.
+**ThePornDB**, confirmed the same way, and it is the one that reshaped
+the design. A real release was run through openmetadata end to end:
+
+| openmetadata answers | ThePornDB reality |
+|---|---|
+| `provider: tpdb`, `providerRef: e0885f19-…` | `GET /scenes/{uuid}` → **200** |
+| `people[0].providerRef: db2a49dc-…` | `GET /performers/{uuid}` → **404** |
+
+The person ref openmetadata emits is a **scene-specific performer
+record**, not a canonical performer, and it is not fetchable on its own.
+But the scene payload **embeds each performer under exactly that uuid,
+with `image`, `thumbnail` and `face` populated** — so one `/scenes/{uuid}`
+call yields the scene's artwork and its whole cast's.
+
+This is 1.x's trap resurfacing. That era's design doc records it as "the
+images and the canonical identity live on `performers[].parent`, not on
+the performer", with the outer fields all null. On the record sampled
+here the opposite held — outer fields populated, `parent` null — so a
+reader must tolerate **both** shapes rather than picking the one it
+happened to see.
+
+A scene's own artwork arrives as `posters` and `background`, each an
+object of `full`/`large`/`medium`/`small` — sized variants, like TMDB's.
+
+### The seam is one call, because of that
+
+```ts
+interface ArtworkSource {
+  imagesFor(kind: string, providerRef: string, personRefs: readonly string[]):
+    Promise<{ media: MediaImages; people: ReadonlyMap<string, readonly ProviderImage[]> }>;
+}
+```
+
+The obvious seam is two methods — `mediaImages` and `personImages`. It
+cannot be: a provider whose person images exist only inside the media
+payload cannot implement a standalone `personImages` at all, and a seam
+demanding one would force every provider into the shape of the one that
+happens to have it. One call, both answers, and a source with nothing for
+a person omits the key.
+
+TMDB satisfies `personRefs` with its own `/3/person/{id}/images` calls;
+ThePornDB satisfies them for free from the scene it already fetched.
+Neither has to say which.
+
+### Secret names
+
+`resolveSecret('TMDB_READ_ACCESS_TOKEN')` and
+`resolveSecret('TPDB_API_KEY')`, through the same chain the lookup key
+uses — so an operator sets `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN` and
+`PICKARR_SECRET_TPDB_API_KEY`. **The `PICKARR_SECRET_` prefix is
+required**: `secrets/names.ts` builds the environment name from it, so a
+bare `TMDB_READ_ACCESS_TOKEN` in a `.env.local` is loaded into
+`process.env` by `--env-file-if-exists` and then never found.
+
+**Absent is not an error.** A host with no key for a provider logs once
+and fetches no artwork for it, exactly as a host with no openmetadata key
+declines to look anything up. Artwork should cost nothing to opt out of.
 
 ### A job, not the resolved branch
 
@@ -181,8 +234,6 @@ does not want artwork should not have to configure anything to avoid it.
 
 ## Out of scope
 
-- **ThePornDB.** See above. One `ArtworkSource` and one registration when
-  its contract can be read.
 - **A cast on the card.** Person artwork is stored and served; rendering
   it is a UI change with its own design.
 - **Serving more than one image per kind** (#79). Unchanged by this.
