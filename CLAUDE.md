@@ -151,6 +151,34 @@ confirmation, an error, a warning — assert the visible affordance too: a real 
 the visible one cannot drift apart. Playwright's `toBeVisible()` does not close this gap
 either: an unstyled `<div>` full of text is genuinely visible.
 
+**A browser spec can declare more step timeout than its whole-test timeout allows, and
+it passes until the machine is slow.** Playwright has two independent clocks: the
+per-assertion `{ timeout }` and a whole-test timeout that defaults to 30s. A spec that
+waits on real replication more than once — seed rows, wait for a count, navigate, wait
+for cards, act, wait again — naturally spells 15s or 20s at each wait, and four of this
+suite's specs summed to 45s, 50s, 50s and 60s. Not one of those per-step bounds was
+reachable: the test died at 30s first.
+
+It presents as the wrong thing entirely. Every one passed locally, repeatedly, because
+each step takes a second or two here; the first CI run after the suite grew to 23 specs
+killed one mid-click and reported `locator.click: Target page, context or browser has
+been closed` — which reads as a browser crash rather than a clock, and names whichever
+step happened to be running instead of the spec's budget.
+
+`scripts/check-e2e-timeout-budget.test.ts` sums each `test(...)` block's declared step
+timeouts and fails `npm run check` if any exceeds `playwright.config.ts`'s `timeout`, so
+this is a build error rather than something to remember. It reads the allowance out of
+the config rather than carrying a copy, and asserts it found a plausible number of specs
+— a scan that silently matched nothing would pass forever.
+
+Two smaller things worth knowing from the same incident. Piping `npm run e2e` into `tail`
+or `head` makes npm report a failed lifecycle script: the early pipe close SIGPIPEs the
+run, so the exit code is the pipeline's and not the suite's. Redirect to a file and read
+`$?`. And Playwright's `getByRole(role, { name })` matches a **substring** by default, so
+a card titled `<filename> <feed label>` matched a query for the `Retry` button when the
+fixture's feed was named "Retry feed" — pass `exact: true` for a control whose name is a
+common word.
+
 **Before accepting a coverage loss, enumerate what does still differ.** `MediaCard`'s
 scene panel was a `section.metadata`, and a test could assert its presence to prove a
 group's answer was `confirmed` even when the answer carried no poster, no synopsis and no

@@ -24,6 +24,24 @@ export default defineConfig({
   // instead of reporting it, and this suite was measured stable across 104
   // executions including deliberate CPU contention.
   retries: 0,
+  // **Playwright's default whole-test timeout is 30s, which was less than
+  // some specs in this suite declare for their own steps.** Three of them
+  // wait on real replication through the sync tail more than once -- seed
+  // rows, wait for a count, navigate, wait for cards, act, wait again --
+  // and spell 15s or 20s at each wait. Summed, `the Load more button still
+  // loads a page without any scrolling` budgets 50s and `a feed that
+  // produced nothing is removed outright` budgets 60s. Under a 30s test
+  // timeout none of those step bounds was reachable: the test died first,
+  // reporting `Target page, context or browser has been closed` from
+  // whichever step happened to be running -- which reads like a browser
+  // crash rather than a clock.
+  //
+  // That is exactly how it presented. Every one of them passed locally,
+  // where each step takes a second or two, and the first CI run after the
+  // suite grew to 23 specs killed one of them mid-click. Raising this is
+  // what makes the per-step numbers mean what they say; it is not slack
+  // for a slow spec, because no spec here is expected to approach it.
+  timeout: 90_000,
   // In CI, `line` keeps the log readable while `html` writes the report that
   // the workflow uploads on failure — without it there is nothing to upload
   // and the trace below can only be read by unzipping it by hand.
