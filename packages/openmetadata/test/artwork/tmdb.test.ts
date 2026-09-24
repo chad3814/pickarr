@@ -131,6 +131,31 @@ test('a kind TMDB has no images endpoint for asks nothing at all', async () => {
   assert.equal(answer.people.size, 0);
 });
 
+test('a kind with no media endpoint still answers its people', async () => {
+  // Pins the module docblock's ruling: `MEDIA_KIND_PATH` gates only the
+  // media fetch, not the person fetches. Without this test, a reader
+  // meeting an unmapped kind could "simplify" `imagesFor` into an early
+  // return that skips person fetches too -- dropping every season's and
+  // episode's cast pictures -- and nothing would redden, because the
+  // previous test passes `personRefs: []` and can't see the difference.
+  const { fetch, calls } = fakeFetch({
+    [CONFIGURATION_URL]: CONFIGURATION_BODY,
+    'https://api.themoviedb.org/3/person/500/images': {
+      id: 500,
+      profiles: [image('/face.jpg', null, 4.2)],
+    },
+  });
+  const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
+
+  const answer = await source.imagesFor('season', 'whatever', ['500']);
+
+  assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
+  assert.ok(!calls.some((call) => /\/3\/[a-z]+\/whatever\/images$/.test(call.url)), 'no media images call for an unmapped kind');
+  assert.deepEqual(answer.people.get('500'), [
+    { url: 'https://image.tmdb.org/t/p/w185/face.jpg', language: null, score: 4.2 },
+  ]);
+});
+
 test('the image url is secure_base_url + size + file_path', async () => {
   // Spelled literally, per the brief: a url built by concatenating the same
   // three pieces the implementation concatenates would still pass if the
