@@ -37,6 +37,26 @@ function seedArtwork(
   return Number(info.lastInsertRowid);
 }
 
+function seedPerson(raw: DatabaseSync): number {
+  const info = raw.prepare(
+    'INSERT INTO person (name, provider_ref, created_at, updated_at) VALUES (?, ?, ?, ?)',
+  ).run('An Actor', `person-ref-${Math.random()}`, 1, 1);
+  return Number(info.lastInsertRowid);
+}
+
+/**
+ * `person_image`'s own seed, kept separate from `seedArtwork` rather than
+ * widened into it: its owner column is `person_id`, not `media_item_id`, so
+ * a shared helper would need a column-name parameter for one caller out of
+ * four -- more indirection than the one extra function costs.
+ */
+function seedPersonImage(raw: DatabaseSync, personId: number, url: string, path: string | null): number {
+  const info = raw.prepare(
+    'INSERT INTO person_image (person_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)',
+  ).run(personId, url, path);
+  return Number(info.lastInsertRowid);
+}
+
 /**
  * Records every path `readFile`/`stat` were asked for, and answers from a
  * map keyed on that path -- never a real filesystem. Both are async, per the
@@ -108,6 +128,31 @@ test('an unrecognised body is served as application/octet-stream, not refused', 
   assert.equal(response.status, 200);
   assert.equal(response.headers['Content-Type'], 'application/octet-stream');
   assert.deepEqual(response.body, odd);
+});
+
+test('a person\'s picture is served from person_image, keyed by person_id and not media_item_id', async () => {
+  const raw = setup();
+  // A media item and a person that happen to share an id: `person.id` and
+  // `media_item.id` are two different tables' primary keys, so nothing
+  // stops this, and the route must not confuse the two. A poster row is
+  // seeded on the media item alone; asking for the *person*'s picture must
+  // reach person_image and never fall through to the poster row that
+  // happens to share the same numeric id.
+  const mediaItemId = seedMediaItem(raw);
+  seedArtwork(raw, 'poster', mediaItemId, 'https://example.com/poster.png', '/artwork/poster.bin');
+  const personId = seedPerson(raw);
+  assert.equal(personId, mediaItemId, 'the fixture only proves the point if the two ids coincide');
+  seedPersonImage(raw, personId, 'https://example.com/headshot.png', '/artwork/headshot.bin');
+
+  const { deps, readFileCalls } = fakeDeps({
+    '/artwork/headshot.bin': { bytes: PNG_BYTES, mtimeMs: 7000, size: PNG_BYTES.length },
+    '/artwork/poster.bin': { bytes: JPEG_BYTES, mtimeMs: 8000, size: JPEG_BYTES.length },
+  });
+
+  const response = await readArtwork(raw, 'person', personId, deps);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, PNG_BYTES, 'the person\'s own picture, not the same-id media item\'s poster');
+  assert.deepEqual(readFileCalls, ['/artwork/headshot.bin']);
 });
 
 test('a media item with no artwork of that kind is 404', async () => {
@@ -259,28 +304,30 @@ test('sniffImageType recognises gif, webp and avif, and falls through short file
 });
 
 /**
- * The plan assertion `SYNC_QUERIES` gets, for the three queries that sat
+ * The plan assertion `SYNC_QUERIES` gets, for the four queries that sat
  * outside it.
  *
- * Nothing measured these before: all three are bounded by one media item's
- * rows, so nothing was wrong -- but "nothing is wrong" was a reading of the
- * SQL, not a measurement of it, and the whole reason `reads.ts` exports its
- * query text is that reading SQL is how slice D shipped two indexes no query
- * used. The same rule applies here: the seek is asserted **by the column it
+ * Nothing measured these before: all four are bounded by one owner's rows,
+ * so nothing was wrong -- but "nothing is wrong" was a reading of the SQL,
+ * not a measurement of it, and the whole reason `reads.ts` exports its query
+ * text is that reading SQL is how slice D shipped two indexes no query used.
+ * The same rule applies here: the seek is asserted **by the column it
  * names**, not by the word `SEARCH` and not by the index's name, because
  * `SCAN <table> USING INDEX <index>` satisfies both of the weaker forms
  * while reading the table's index end to end.
  *
  * The `tempBTrees` count is part of the assertion rather than a detail: the
- * three kinds genuinely differ, and the difference is which index each has.
+ * four kinds do not all agree, and the difference is which index each has.
  * `logo` carries `logo_media_item` on `(media_item_id)` alone, whose entries
- * end in the rowid, so `ORDER BY id` is free; `poster` and `background` have
- * only `UNIQUE (media_item_id, url)`, whose entries come back in url order,
- * so each sorts one item's rows. Pinning that is what stops
- * `logo_media_item` from looking like a redundant prefix of the unique index
- * and being dropped.
+ * end in the rowid, so `ORDER BY id` is free; `poster`, `background` and
+ * `person` have only a `UNIQUE (owner, url)` index, whose entries come back
+ * in url order, so each sorts one owner's rows. `person_image` never gained
+ * a `logo_media_item`-shaped plain index -- migration 23 wrote only
+ * `person_image_person_url` -- so it sorts, same as `poster`/`background`.
+ * Pinning that is what stops `logo_media_item` from looking like a redundant
+ * prefix of the unique index and being dropped.
  */
-test('every artwork query seeks its media item by id, and only the two without a rowid-tailed index sort', () => {
+test('every artwork query seeks its owner by id, and only the one without a rowid-tailed index sorts', () => {
   const raw = setup();
 
   const checks: Record<keyof typeof ARTWORK_QUERY, { seek: string; tempBTrees: number }> = {
@@ -297,6 +344,10 @@ test('every artwork query seeks its media item by id, and only the two without a
       // entries are `(media_item_id, rowid)`, which is this query's order.
       seek: 'SEARCH logo USING INDEX logo_media_item (media_item_id=?)',
       tempBTrees: 0,
+    },
+    person: {
+      seek: 'SEARCH person_image USING INDEX person_image_person_url (person_id=?)',
+      tempBTrees: 1,
     },
   };
 

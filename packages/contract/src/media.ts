@@ -35,7 +35,8 @@ export interface MediaItemUpdate {
 }
 
 /**
- * What a caller hands `attachPoster`, `attachBackground` and `attachLogo`.
+ * What a caller hands `attachPoster`, `attachBackground`, `attachLogo` and
+ * `attachPersonImage`.
  *
  * `width` and `height` are not here: `MediaWriter` measures the bytes itself
  * and caches them beside the row (see `createArtworkStore` in
@@ -165,6 +166,19 @@ export interface MediaWriter {
   attachBackground(mediaItemId: number, background: ImageInit): Promise<void>;
   /** As `attachPoster`, for a logo -- the artwork slot slice A left with no writer. */
   attachLogo(mediaItemId: number, logo: ImageInit): Promise<void>;
+  /**
+   * As `attachPoster`, for a person's picture rather than a media item's --
+   * keyed on `(personId, url)` on `person_image`, which is not one of the
+   * three tables `attachPoster`/`attachBackground`/`attachLogo` write.
+   *
+   * `person.id` and `media_item.id` are two different tables' `INTEGER
+   * PRIMARY KEY`s, so the same integer can name an unrelated row in each --
+   * see `ArtworkStore.putPerson` (`@pickarr/host`) for why that means this
+   * cannot simply call `attachPoster`'s underlying `artwork.put` with a
+   * `personId` in `mediaItemId`'s place, and why it calls `artwork.putPerson`
+   * instead.
+   */
+  attachPersonImage(personId: number, image: ImageInit): Promise<void>;
   upsertPerson(person: PersonInit): Promise<number>;
   /**
    * Attaches one person's part in one item, keyed on

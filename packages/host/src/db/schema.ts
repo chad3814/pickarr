@@ -468,6 +468,37 @@ export const logo = sqliteTable('logo', {
   uniqueIndex('logo_media_item_url').on(t.mediaItemId, t.url),
 ]);
 
+/**
+ * A cached picture of a person -- same columns as `poster`/`background`/
+ * `logo`, keyed on `person_id` instead of `media_item_id` because a person
+ * is not a media item and the two id spaces are separate `INTEGER PRIMARY
+ * KEY`s that can name the same integer for unrelated rows. Migration 23.
+ *
+ * Unlike every table added since migration 15, this one carries no sync
+ * triggers and is not in `HOST_SYNCED_TABLES`: artwork is not replicated --
+ * a client fetches it by url through `/api/artwork/...` and holds no
+ * artwork row at all (`web/src/store/gather.ts`, #79) -- and it joins
+ * `poster`/`background`/`logo` in staying outside that set rather than the
+ * tables added around it in time.
+ */
+export const personImage = sqliteTable('person_image', {
+  id: integer('id').primaryKey(),
+  personId: integer('person_id').notNull().references(() => person.id),
+  title: text('title'),
+  language: text('language'),
+  url: text('url').notNull(),
+  width: integer('width').notNull(),
+  height: integer('height').notNull(),
+  createdAt: integer('created_at').notNull(),
+  // Nullable: set once the artwork writer has fetched the file to disk --
+  // matches `poster.path`'s reasoning exactly.
+  path: text('path'),
+}, (t) => [
+  // Unique on the url for the same reason as `poster_media_item_url`: one
+  // image is one row however many times a handler re-runs.
+  uniqueIndex('person_image_person_url').on(t.personId, t.url),
+]);
+
 export const jobs = sqliteTable('jobs', {
   id: integer('id').primaryKey(),
   pluginId: text('plugin_id').notNull(),

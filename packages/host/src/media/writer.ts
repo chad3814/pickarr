@@ -50,11 +50,11 @@ function isUniqueConstraintViolation(err: unknown): boolean {
  * own error, unwrapped, to tell a UNIQUE violation from anything else.
  *
  * Takes an `ArtworkStore` because `attachPoster`/`attachBackground`/
- * `attachLogo` now measure and cache the bytes they are handed, not just
- * write a row: one writer for the row and the file is what keeps the two
- * from disagreeing the way 1.x's row and cached file could. That makes this
- * writer perform filesystem I/O it did not before -- the cost of that one
- * writer.
+ * `attachLogo`/`attachPersonImage` now measure and cache the bytes they are
+ * handed, not just write a row: one writer for the row and the file is what
+ * keeps the two from disagreeing the way 1.x's row and cached file could.
+ * That makes this writer perform filesystem I/O it did not before -- the
+ * cost of that one writer.
  */
 export function createMediaWriter(db: HostDb, now: () => number, artwork: ArtworkStore): MediaWriter {
   const raw = db.$client;
@@ -273,6 +273,30 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
           SET title = excluded.title, language = excluded.language,
               width = excluded.width, height = excluded.height, path = excluded.path
       `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, at);
+    },
+
+    async attachPersonImage(personId: number, image: ImageInit): Promise<void> {
+      const at = now();
+      // `artwork.putPerson`, not `artwork.put` -- see that method's own
+      // docblock. A person and a media item are different tables' rows, and
+      // `put` is keyed on `(mediaItemId, url)`; calling it with `personId`
+      // in that slot would collide person 7's picture with media item 7's
+      // poster the moment the two also shared a url. `putPerson` hashes in
+      // a namespace `put` can never produce, so the two can never resolve
+      // to the same path regardless of what either id or url turns out to
+      // be.
+      const { path, width, height } = await artwork.putPerson(personId, image.url, image.bytes);
+      // Idempotent for the same reason as `attachPoster`: upsert on
+      // `(person_id, url)`, matching `person_image_person_url` exactly, so a
+      // handler re-run by crash recovery is the same row and the same file,
+      // not a second of either.
+      raw.prepare(`
+        INSERT INTO person_image (person_id, title, language, url, width, height, path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (person_id, url) DO UPDATE
+          SET title = excluded.title, language = excluded.language,
+              width = excluded.width, height = excluded.height, path = excluded.path
+      `).run(personId, image.title, image.language, image.url, width, height, path, at);
     },
 
     async upsertPerson(person: PersonInit): Promise<number> {

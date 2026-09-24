@@ -30,6 +30,32 @@ export interface ArtworkStore {
    */
   put(mediaItemId: number, url: string, bytes: Uint8Array): Promise<{ path: string; width: number; height: number }>;
   /**
+   * As `put`, for a person's picture rather than a media item's -- and
+   * deliberately keyed in a namespace `put` can never reach, not merely one
+   * that happens not to collide with it today.
+   *
+   * `person.id` and `media_item.id` are two different tables' `INTEGER
+   * PRIMARY KEY`s, so the same integer is a coincidence, not a relationship
+   * -- person 7 and media item 7 have nothing to do with each other. Handing
+   * a `personId` to `put` in `mediaItemId`'s place would key on exactly the
+   * same `(id, url)` pair `put` already uses for media items, so a person
+   * and a media item that share an id *and* happen to share a url (a
+   * provider reusing one CDN url for a headshot and a poster is not
+   * far-fetched) would hash to the same path -- and whichever call landed
+   * second would silently overwrite the file the other's row still names.
+   *
+   * The fix is a key `put`'s can never produce, not one that only tends not
+   * to collide with it: this method hashes `person:${personId}:${url}`,
+   * where `put` hashes `${mediaItemId}:${url}` with no prefix at all. Every
+   * input `put` builds starts with a decimal digit (`String(mediaItemId)`);
+   * every input this method builds starts with the literal `p` of `person:`
+   * -- so the two input strings can never be equal, whatever `personId`,
+   * `mediaItemId` and `url` turn out to be. Provable rather than merely
+   * unobserved, which is the standard `put`'s own docblock sets for why it
+   * keys on the pair instead of the url alone.
+   */
+  putPerson(personId: number, url: string, bytes: Uint8Array): Promise<{ path: string; width: number; height: number }>;
+  /**
    * Best-effort in the sense that it never throws: `dropMediaItem` calls
    * this only after the row it belonged to is already deleted, so raising
    * here would have nothing left to roll back to, and a caller that stopped
@@ -62,6 +88,18 @@ async function hashKey(mediaItemId: number, url: string): Promise<string> {
 }
 
 /**
+ * As `hashKey`, for `ArtworkStore.putPerson` -- see that method's docblock
+ * for why this namespace has to be disjoint from `hashKey`'s rather than
+ * merely different in practice. The `person:` prefix is the whole of that
+ * guarantee: `hashKey`'s input always starts with a decimal digit, and this
+ * function's never does.
+ */
+async function hashKeyForPerson(personId: number, url: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`person:${personId}:${url}`));
+  return [...new Uint8Array(digest)].slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * Caches artwork bytes on disk, named and measured so the file and the row
  * that points at it can never disagree -- see `MediaWriter`, the only
  * caller. `dir` defaults to `artwork/` beside the database file in whatever
@@ -82,28 +120,44 @@ export function createArtworkStore(
     return dirReady;
   }
 
+  // Shared by `put` and `putPerson`: both measure the same way and write to
+  // the same directory, and differ only in which hash namespace named
+  // `name`. Keeping the measure-or-refuse logic in one place is what makes
+  // the two callers' behaviour provably identical rather than merely
+  // written to look alike.
+  async function measureAndWrite(
+    name: string,
+    url: string,
+    bytes: Uint8Array,
+  ): Promise<{ path: string; width: number; height: number }> {
+    let width: number | undefined;
+    let height: number | undefined;
+    try {
+      ({ width, height } = imageSize(bytes));
+    } catch (err) {
+      throw new Error(`artwork store: bytes for ${url} could not be measured as an image`, { cause: err });
+    }
+    // `image-size` reports width/height as possibly `undefined` even when
+    // it does not throw -- treated as a refusal too, exactly as 1.x's
+    // `classifyArtwork` does (packages/core/src/media/classify.ts).
+    if (width === undefined || height === undefined || width <= 0 || height <= 0) {
+      throw new Error(`artwork store: bytes for ${url} have no measurable dimensions`);
+    }
+    // A fixed suffix, not the measured type: see the interface doc on why
+    // the path must depend on nothing but the key `name` already encodes.
+    const path = join(dir, `${name}.bin`);
+    await ensureDir();
+    await writeFile(path, bytes);
+    return { path, width, height };
+  }
+
   return {
     async put(mediaItemId, url, bytes) {
-      let width: number | undefined;
-      let height: number | undefined;
-      try {
-        ({ width, height } = imageSize(bytes));
-      } catch (err) {
-        throw new Error(`artwork store: bytes for ${url} could not be measured as an image`, { cause: err });
-      }
-      // `image-size` reports width/height as possibly `undefined` even when
-      // it does not throw -- treated as a refusal too, exactly as 1.x's
-      // `classifyArtwork` does (packages/core/src/media/classify.ts).
-      if (width === undefined || height === undefined || width <= 0 || height <= 0) {
-        throw new Error(`artwork store: bytes for ${url} have no measurable dimensions`);
-      }
-      const name = await hashKey(mediaItemId, url);
-      // A fixed suffix, not the measured type: see the interface doc on why
-      // the path must depend on nothing but (mediaItemId, url).
-      const path = join(dir, `${name}.bin`);
-      await ensureDir();
-      await writeFile(path, bytes);
-      return { path, width, height };
+      return measureAndWrite(await hashKey(mediaItemId, url), url, bytes);
+    },
+
+    async putPerson(personId, url, bytes) {
+      return measureAndWrite(await hashKeyForPerson(personId, url), url, bytes);
     },
 
     async remove(path) {
