@@ -961,6 +961,7 @@ export async function main(
     // the other would turn every refusal into a 500 -- see
     // `ReadServerDeps.requestPick`.
     requestPick: (rssItemId) => host.requestPick(rssItemId),
+    retryLookup: (rssItemId) => host.retryLookup(rssItemId),
     // The three `/api/mappings` operations, wired the same way again --
     // one function each, never the `Host` itself. None of the three
     // schedules anything: `clients/deliver.ts` re-reads `filepath_mapping`

@@ -25,6 +25,7 @@ import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
 import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
+import { retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
 import {
   addMapping as addMappingRule,
@@ -163,6 +164,17 @@ export interface Host {
    * owning plugin's `onDownloadRequest` resolved.
    */
   requestPick(rssItemId: number): Promise<PickAccepted | PickRefusal>;
+
+  /**
+   * Asks for an unmatched release to be identified again.
+   *
+   * The lookup engine leaves a name it did not recognise `unresolved` and
+   * enqueues nothing, on the reasoning that it is "the state a human might
+   * fix" -- so this is the path by which a human says they have. See
+   * `media/retry.ts` for why it needs no new plugin contract and which of
+   * its three refusals it decides itself.
+   */
+  retryLookup(rssItemId: number): Promise<RetryLookupOutcome>;
   /**
    * Validates and writes a new `rss_feed` row, then schedules its first poll
    * immediately -- the same call `main.ts` already makes at boot for every
@@ -815,6 +827,14 @@ export function createHost(deps: {
         throw new PluginNotRegisteredError(pluginId);
       }
       await plugin.onDownloadRequest(rssItemId, ctxFor(plugin.id));
+    },
+
+    async retryLookup(rssItemId) {
+      // `notifyNewRssItems` rather than a second dispatch of its own: that
+      // function owns grouping a batch by owning plugin and reporting the
+      // ids nothing claims, and a retry that re-implemented either would be
+      // a second copy free to drift.
+      return retryLookupRule({ raw: deps.raw, notify: notifyNewRssItems }, rssItemId);
     },
 
     async requestPick(rssItemId) {

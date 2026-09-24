@@ -931,6 +931,68 @@ const ANSWER_MAX_HEIGHT_PX = 256 + 16 + 2;
  * deliberately left unpinned: a pin written for the sake of coverage is
  * a rule nobody may adjust afterwards.
  */
+test('the retry button on an unmatched card really reaches the host', async ({ page, harness }) => {
+  // **What only a browser can show here: that the route exists and is
+  // reachable.** The unit tests drive `postRetry` against a stub and the
+  // host tests drive `retryLookup` against a fake -- neither can see the
+  // path parse, the session guard, the router's `:id` match, or the
+  // wiring from `main.ts` through to `Host`. A typo in the path would
+  // leave every one of them green and answer 404 here.
+  //
+  // **The assertion is that the button stays pending**, and that is the
+  // correct outcome rather than a weak one. The host accepts with 202 the
+  // moment it has enqueued; this harness's stub plugin does nothing with
+  // the notification and no dispatcher is running, so nothing will ever
+  // write the row. `RetryButton` clears only when `updatedAt` advances,
+  // so it stays `Retrying...` -- which is exactly the hang its own
+  // docblock accepts on purpose, observed end to end. A button that
+  // cleared on the response would read `Retry` here, and that is the
+  // defect this pins.
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  const filename = 'Never.Recognised.2024.1080p-GROUP.mkv';
+  await harness.seedUnmatchedRelease({
+    filename,
+    // Deliberately not named anything containing "Retry": a card's
+    // heading button is named `<filename> <feed label>`, and Playwright's
+    // `name` option matches a substring by default, so a feed called
+    // "Retry feed" makes the *title* match `getByRole('button', { name:
+    // 'Retry' })`. The first draft of this spec did exactly that and its
+    // collapsed-state assertion failed against correct code.
+    feedName: 'Nightly indexer',
+    resolution: 'unresolved',
+    detail: `the lookup service did not recognise "${filename}"`,
+    lookupJson: null,
+  });
+
+  await page.goto(`${harness.origin}/unmatched`);
+  const card = page.getByRole('article');
+  await expect(card).toHaveCount(1, { timeout: 15_000 });
+
+  // Collapsed, the control does not exist at all.
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
+
+  await card.getByRole('heading').getByRole('button').click();
+  const retry = page.getByRole('button', { name: 'Retry', exact: true });
+  await expect(retry).toBeEnabled();
+
+  // Fails the spec if the host answers anything but 202 -- otherwise a
+  // 404 from a mistyped path would surface only as the button re-enabling
+  // with a refusal sentence, which reads like a product decision.
+  const [response] = await Promise.all([
+    page.waitForResponse((res) => res.url().includes('/api/unmatched/') && res.url().endsWith('/retry')),
+    retry.click(),
+  ]);
+  expect(response.status(), 'the route exists, the session is accepted, and the id parsed').toBe(202);
+
+  await expect(page.getByRole('button', { name: 'Retrying\u2026' })).toBeDisabled();
+  // And no refusal was shown: an accepted retry has nothing to say that
+  // the disabled button does not already say.
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
 test('an unmatched release reads as a card, and opens to show why it is unmatched', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
@@ -1144,10 +1206,15 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
 
   await headline.click();
 
-  // All three labelled values, in the order `UnmatchedDetail` renders
-  // them. The state is the word the host recorded, not a sentence mapped
-  // from it, and `Detail` is the sentence.
-  await expect(card.locator('dt')).toHaveText(['State', 'Detail', 'Lookup answer']);
+  // Every labelled value, in the order `UnmatchedDetail` renders them.
+  // The state is the word the host recorded, not a sentence mapped from
+  // it, and `Detail` is the sentence. `Actions` holds the retry control:
+  // it is a term in this list rather than a loose control beside it,
+  // because the body is a description list and a button with nothing
+  // above it would be its one child that is not part of a pair. Pinned as
+  // the whole list, so adding a fourth term is a decision someone makes
+  // here rather than something that appears.
+  await expect(card.locator('dt')).toHaveText(['State', 'Detail', 'Lookup answer', 'Actions']);
   await expect(card.locator('dd').nth(0)).toHaveText('unresolved');
   await expect(card.locator('dd').nth(1)).toHaveText(UNMATCHED_DETAIL);
 

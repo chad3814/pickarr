@@ -681,6 +681,16 @@ async function boot(): Promise<Booted> {
     // same reason: what a spec observes is the row that was created, not
     // the job.
     addDownloadClient: (input) => host.addDownloadClient(input),
+    // `Host.retryLookup`, wired exactly as `main.ts` wires it. What a spec
+    // observes through it is the *refusal* side and the 202 -- not an
+    // identification. The dispatch it makes reaches `stubPlugin`'s
+    // `onNewRssItems`, which does nothing here, and the job it would
+    // otherwise enqueue would wait on a dispatcher this harness never
+    // starts (see this module's own doc on the never-started host). So a
+    // browser spec can drive the button and read what comes back; what it
+    // cannot see is a release becoming matched, which needs a real lookup
+    // service and is not something this suite has.
+    retryLookup: (rssItemId) => host.retryLookup(rssItemId),
     // `Host.requestPick`, wired exactly as `main.ts` wires it. What a spec
     // can observe through it is *wider* than through the two above, which
     // is the opposite of what this comment said while `stubPlugin`'s

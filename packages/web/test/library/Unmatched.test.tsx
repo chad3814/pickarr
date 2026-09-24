@@ -1,7 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { freshDb } from '../store/harness.ts';
 import { gone } from '../dom.ts';
@@ -10,6 +10,7 @@ import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts, subscribeTable } from '../../src/store/notify.ts';
 import { Unmatched, type UnmatchedSource } from '../../src/library/Unmatched.tsx';
+import type { RetrySubmit } from '../../src/library/postRetry.ts';
 import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
 
 /**
@@ -18,6 +19,18 @@ import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
  * subscribed through `notify.ts`'s module-level registry.
  */
 afterEach(cleanup);
+
+/**
+ * A `retry` that fails the test if it is ever called. Spelled out at every
+ * render rather than defaulted inside the component, which is the whole
+ * reason the prop is required: a default that performed network I/O would
+ * give a test that forgot it a real `fetch` under happy-dom, which hangs
+ * rather than failing. The retry tests at the end of this file pass their
+ * own.
+ */
+const neverRetries: RetrySubmit = () => {
+  assert.fail('this test must not retry');
+};
 
 /** Seeds `ops` into `db` in one batch, the way `applyBatch`'s own tests do -- the cursor value has no bearing on these tests. */
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
@@ -141,7 +154,7 @@ test('lists releases whose mediaItemId is null, newest first', async () => {
     rssOp({ id: 3, filename: 'newer.mkv', mediaItemId: null, updatedAt: 30 }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['newer.mkv', 'older.mkv'], 'matched.mkv is not here');
@@ -157,7 +170,7 @@ test('a release renders as a card, with its filename as the title', async () => 
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'lonely.mkv', mediaItemId: null, updatedAt: 10 })]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.equal(screen.queryAllByRole('article').length, 1, 'one release, one card');
@@ -180,7 +193,7 @@ test('the feed that produced it is named at the right of the title', async () =>
     rssOp({ id: 1, filename: 'from-a-feed.mkv', mediaItemId: null, updatedAt: 10, feedId: 7 }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['from-a-feed.mkv'], 'the card rendered');
@@ -206,7 +219,7 @@ test('a release whose feed the replica has not got renders no trailing label', a
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'orphan.mkv', mediaItemId: null, updatedAt: 10, feedId: 404 })]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['orphan.mkv']);
@@ -235,7 +248,7 @@ test('a feed named with the empty string renders no trailing label', async () =>
     rssOp({ id: 1, filename: 'nameless-feed.mkv', mediaItemId: null, updatedAt: 10, feedId: 7 }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['nameless-feed.mkv']);
@@ -258,7 +271,7 @@ test('an empty detail sentence renders no label standing over nothing', async ()
     rssOp({ id: 1, filename: 'blank-detail.mkv', mediaItemId: null, updatedAt: 10, resolutionDetail: '' }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['blank-detail.mkv']);
   });
@@ -285,7 +298,7 @@ test('collapsed, a card shows no detail and no JSON', async () => {
     }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['closed.mkv']);
@@ -309,7 +322,7 @@ test('expanded, a card says why the release is unmatched', async () => {
     }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['why.mkv']);
   });
@@ -327,7 +340,7 @@ test('expanded, a card shows the lookup answer', async () => {
     rssOp({ id: 1, filename: 'answered.mkv', mediaItemId: null, updatedAt: 10, lookupJson: answer }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['answered.mkv']);
   });
@@ -347,7 +360,7 @@ test('a release with no stored answer expands without an empty block', async () 
     rssOp({ id: 1, filename: 'unasked.mkv', mediaItemId: null, updatedAt: 10, resolution: 'pending' }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['unasked.mkv']);
   });
@@ -421,7 +434,7 @@ test('a release stored before the lookup answer existed still lists, and still o
   const db = await freshDb();
   await seed(db, [legacyRssOp({ id: 1, filename: 'from-an-older-build.mkv', updatedAt: 10 })]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['from-an-older-build.mkv'], 'an older row is still an unmatched release');
@@ -442,7 +455,7 @@ test('an answer too large to store says so, rather than rendering the marker JSO
     rssOp({ id: 1, filename: 'huge.mkv', mediaItemId: null, updatedAt: 10, lookupJson: LOOKUP_JSON_TOO_LARGE }),
   ]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['huge.mkv']);
   });
@@ -458,7 +471,7 @@ test('a release that has since been matched drops off the list', async () => {
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'pending.mkv', mediaItemId: null, updatedAt: 10 })]);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['pending.mkv']);
@@ -482,7 +495,7 @@ test('a release that has since been matched drops off the list', async () => {
 test('an empty list says nothing is unmatched, rather than rendering blank', async () => {
   const db = await freshDb();
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/everything has been matched/i));
@@ -492,7 +505,7 @@ test('an empty list says nothing is unmatched, rather than rendering blank', asy
 test('a fresh unmatched release appears without a reload', async () => {
   const db = await freshDb();
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/everything has been matched/i));
@@ -523,7 +536,7 @@ test('no fetch is issued while listing', async () => {
       rssOp({ id: 1, filename: 'local.mkv', mediaItemId: null, updatedAt: 10 }),
     ]);
 
-    render(<Unmatched source={sourceFor(db)} />);
+    render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
     await waitFor(() => {
       assert.deepEqual(filenamesShown(), ['local.mkv']);
@@ -610,7 +623,7 @@ test('a batch that matches every listed release costs one re-read, not one per l
     },
   };
 
-  render(<Unmatched source={source} />);
+  render(<Unmatched retry={neverRetries} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, listed, 'one screenful of unmatched releases');
   });
@@ -645,7 +658,7 @@ test('a second page is read on demand, and the first page is kept', async () => 
   }
   await seed(db, seedOps);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(
@@ -681,7 +694,7 @@ test('the sentinel and the button both disappear once the table is exhausted', a
   }
   await seed(db, seedOps);
 
-  render(<Unmatched source={sourceFor(db)} />);
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful, exactly filling the first raw page');
@@ -738,7 +751,7 @@ test('a wake resets the walk rather than resuming a stale cursor', async () => {
     },
   };
 
-  render(<Unmatched source={source} />);
+  render(<Unmatched retry={neverRetries} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful of the first 26 releases');
   });
@@ -813,7 +826,7 @@ test('paging does not re-walk the pages already read', async () => {
     },
   };
 
-  render(<Unmatched source={source} />);
+  render(<Unmatched retry={neverRetries} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, newestUnmatched, 'one screenful -- exactly the newest, unmatched block');
   });
@@ -838,5 +851,134 @@ test('paging does not re-walk the pages already read', async () => {
     pageReads - readsForFirstPage,
     2,
     'loadMore paid for the gap and the next block, and nothing it already had',
+  );
+});
+
+/** Opens the one card on screen and returns its Retry button. */
+async function openAndFindRetry(): Promise<HTMLButtonElement> {
+  const heading = await screen.findByRole('button', { name: /\.mkv$/ });
+  fireEvent.click(heading);
+  return screen.getByRole<HTMLButtonElement>('button', { name: 'Retry' });
+}
+
+test('an expanded card offers a retry, and asks for that release by id', async () => {
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
+  const asked: number[] = [];
+  const retry: RetrySubmit = (rssItemId) => {
+    asked.push(rssItemId);
+    return Promise.resolve({ accepted: true });
+  };
+
+  render(<Unmatched retry={retry} source={sourceFor(db)} />);
+  fireEvent.click(await openAndFindRetry());
+
+  // Spelled literally rather than read back off the seeded row: a card
+  // that passed the wrong release's id would still look right on screen.
+  await waitFor(() => {
+    assert.deepEqual(asked, [7]);
+  });
+});
+
+test('a collapsed card offers no retry', async () => {
+  // The control lives in the body, so the body gate is what hides it.
+  // Without this, a retry rendered unconditionally would put one button
+  // per release on a screen that may list two dozen.
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
+
+  render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
+
+  await screen.findByRole('button', { name: /\.mkv$/ });
+  assert.ok(!screen.queryByRole('button', { name: 'Retry' }), 'nothing to retry until the card is open');
+});
+
+test('an accepted retry stays pending until the row actually changes', async () => {
+  // **The property this button exists to get right.** The host answers 202
+  // as soon as it has enqueued a job -- the lookup service has not been
+  // asked yet -- so clearing on the response re-enables the control within
+  // milliseconds of a click whose work has not started. `ReleaseList`
+  // measured exactly that: enabled again at 33ms, the answer arriving at
+  // 2934ms.
+  //
+  // **The submit is resolved on demand, and that is not ceremony.** The
+  // obvious version of this test -- resolve immediately, `waitFor` the
+  // disabled button, then push a newer row -- passes against a component
+  // that clears on the 202, and it was written that way first and
+  // measured surviving that exact mutant. `setAwaitingSince` runs before
+  // the `await`, so even the broken version renders `Retrying...` for one
+  // tick and a polling `waitFor` can catch it. The assertion has to land
+  // *after* the submit has settled and *before* the row moves, which
+  // means the test has to own when the submit settles.
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
+  let accept = (): void => {};
+  const settled = new Promise<void>((resolve) => { accept = resolve; });
+  const retry: RetrySubmit = () => settled.then(() => ({ accepted: true as const }));
+
+  render(<Unmatched retry={retry} source={sourceFor(db)} />);
+  fireEvent.click(await openAndFindRetry());
+
+  await waitFor(() => {
+    assert.ok(screen.getByRole<HTMLButtonElement>('button', { name: 'Retrying…' }).disabled);
+  });
+
+  // The 202 lands here, and nothing else does. `act` flushes the
+  // continuation and every render it schedules, so what is asserted next
+  // is the settled state after the response rather than a race with it.
+  await act(async () => {
+    accept();
+    await settled;
+  });
+  assert.ok(
+    screen.getByRole<HTMLButtonElement>('button', { name: 'Retrying…' }).disabled,
+    'still pending after the host said yes -- the work has not started yet',
+  );
+
+  // The same release, written again by the lookup path -- a *later*
+  // `updatedAt` and, deliberately, the very same resolution. Watching
+  // `resolution` instead would miss this, and a retry that lands on the
+  // same answer is the commonest outcome of all.
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 20 })]);
+
+  await waitFor(() => {
+    assert.ok(!screen.getByRole<HTMLButtonElement>('button', { name: 'Retry' }).disabled);
+  });
+});
+
+test('a refused retry says why, in this page’s own words, and re-enables', async () => {
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
+  const retry: RetrySubmit = () => Promise.resolve({ refusal: 'already-matched' });
+
+  render(<Unmatched retry={retry} source={sourceFor(db)} />);
+  fireEvent.click(await openAndFindRetry());
+
+  // The literal sentence, not `RETRY_REFUSAL_MESSAGES['already-matched']`:
+  // an expectation read out of the map under test cannot see that map
+  // change (`CLAUDE.md`).
+  await screen.findByText('That release has already been identified — reload to see what it matched.');
+  assert.ok(
+    !screen.getByRole<HTMLButtonElement>('button', { name: 'Retry' }).disabled,
+    'a refusal re-enables, because nothing is in flight',
+  );
+});
+
+test('a refusal is announced, not merely printed', async () => {
+  // The sentence is the whole point of the control failing, so it has to
+  // reach a screen reader too -- real text in a real `role="alert"`, never
+  // an `aria-label` on an empty element (`CLAUDE.md`'s longest hazard).
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
+  const retry: RetrySubmit = () => Promise.resolve({ refusal: 'offline' });
+
+  render(<Unmatched retry={retry} source={sourceFor(db)} />);
+  fireEvent.click(await openAndFindRetry());
+
+  const alert = await screen.findByRole('alert');
+  assert.equal(
+    alert.textContent,
+    'Could not reach Pickarr. Check your connection and try again.',
+    'the announced string and the visible one are the same string',
   );
 });
