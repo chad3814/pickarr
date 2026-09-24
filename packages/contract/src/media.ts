@@ -128,6 +128,21 @@ export interface MediaWriter {
    * `dropMediaItem` throws while any rss item still points at the row, and
    * without a way to unlink, that link could never be broken. Throws if
    * `rssItemId` does not exist.
+   *
+   * **Linking also clears `lookup_json`, in the same statement.** A stored
+   * lookup answer ({@link RssItemSyncRead.lookupJson}) exists only while a
+   * release is unmatched -- the screen that reads it selects on
+   * `media_item_id IS NULL` -- so the moment this row gains a media item
+   * the answer is unreachable, and leaving it behind is storage no UI can
+   * show and no code will revisit. One statement rather than two is what
+   * makes that true even if the caller throws immediately afterwards,
+   * which is not hypothetical: the clear used to live at the end of the
+   * lookup engine's resolved branch, with plugin code in between, and a
+   * persistently failing plugin stranded the answer permanently.
+   *
+   * **Unlinking does not clear it**, and the asymmetry is deliberate: a
+   * release returning to unmatched is exactly the state an answer belongs
+   * to.
    */
   relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void>;
 

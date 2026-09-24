@@ -127,8 +127,34 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
 
     async relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void> {
       const at = now();
-      const result = raw.prepare('UPDATE rss_item SET media_item_id = ?, updated_at = ? WHERE id = ?')
-        .run(mediaItemId, at, rssItemId);
+      // **Linking clears `lookup_json` in the same statement, and that is
+      // not tidiness -- it is where the invariant lives.** A stored lookup
+      // answer exists only while a release is unmatched: `/unmatched` is
+      // the only screen that reads it, and that screen selects on
+      // `media_item_id IS NULL`. So the moment this row gains a media item
+      // the answer is unreachable, and anything that leaves it behind is
+      // storage no UI can show and no code will revisit.
+      //
+      // It used to be cleared two statements later, by `setResolution` at
+      // the end of `openmetadata/src/engine.ts`'s resolved branch -- with
+      // the plugin's own `apply` and `attachPeople` in between. A throw in
+      // either left the row linked and the answer retained; the lookup job
+      // retries and then **dead-letters**, so a persistently failing
+      // `apply` stranded up to `LOOKUP_JSON_CAP_BYTES` per release,
+      // permanently. One statement has no window to lose.
+      //
+      // **Unlinking deliberately does not clear.** `relinkRssItem(id,
+      // null)` is the refusal path: the media item created before the
+      // answer arrived is being dropped and the release goes back to being
+      // unmatched, which is exactly the state an answer belongs to.
+      // `applyEnvelope` writes a fresh one straight afterwards, so clearing
+      // here would be a write the next statement undoes -- but the reason
+      // it would be wrong is the invariant, not the redundancy.
+      const result = mediaItemId === null
+        ? raw.prepare('UPDATE rss_item SET media_item_id = NULL, updated_at = ? WHERE id = ?')
+          .run(at, rssItemId)
+        : raw.prepare('UPDATE rss_item SET media_item_id = ?, lookup_json = NULL, updated_at = ? WHERE id = ?')
+          .run(mediaItemId, at, rssItemId);
       if (result.changes === 0) {
         throw new Error(`relinkRssItem: no rss item ${rssItemId}`);
       }

@@ -173,9 +173,20 @@ async function applyResolved(
   // rather than a duplicate.
   await deps.apply({ media, mediaItemId: claim.kept, raw: deps.raw, ctx, now: deps.now });
   await attachPeople(media, claim.kept, ctx);
-  // `null` clears any answer an earlier failed attempt at this same rss item
-  // left in `lookup_json` -- a retry that now resolves must not keep the
-  // envelope that explained why it did not, or the column would only grow.
+  // `null` for the answer, and by the time this runs there is nothing left
+  // to clear: `relinkRssItem` above already cleared `lookup_json` in the
+  // same statement that set `media_item_id`, because a stored answer is
+  // only reachable while a release is unmatched. Passing `null` anyway is
+  // not ceremony -- `setResolution`'s fourth argument is required exactly
+  // so no branch can forget what it means to do, and a resolved release
+  // carrying an answer would be a contradiction whichever statement wrote
+  // it.
+  //
+  // **This line used to be the clear, and that was the bug.** `apply` and
+  // `attachPeople` sit between the link and here; a throw in either left
+  // the row linked with its answer retained, and the job retries and then
+  // dead-letters, so a persistently failing `apply` stranded it for good
+  // on a row `/unmatched` no longer shows.
   await ctx.media.setResolution(target.rssItemId, 'resolved', null, null);
 }
 

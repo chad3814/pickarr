@@ -235,6 +235,65 @@ test('relinkRssItem(id, null) unlinks and bumps updated_at', async () => {
   assert.equal(after.updated_at, 999);
 });
 
+test('linking a release to a media item clears its stored lookup answer', async () => {
+  // **The invariant, enforced in the statement that breaks it.** A stored
+  // lookup answer exists only while a release is unmatched -- `lookup_json`
+  // non-null implies `media_item_id IS NULL`, because `/unmatched` is the
+  // only screen that reads it and a linked release has left that screen.
+  //
+  // It used to be two statements several `await`s apart in
+  // `openmetadata/src/engine.ts`: the link, then the plugin's own `apply`
+  // and `attachPeople`, then the clear. A throw in either of the middle two
+  // left the row linked with its answer retained, and the lookup job
+  // retries and then **dead-letters** -- so a persistently failing `apply`
+  // stranded up to `LOOKUP_JSON_CAP_BYTES` on a row no screen shows and
+  // nothing would ever clear. One statement has no window to lose.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+
+  const feedId = insertFeed(raw, 'https://example.test/feed');
+  const itemId = insertRssItem(raw, feedId, 500);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  await writer.setResolution(itemId, 'unresolved', 'nothing recognised', '{"state":"unresolved"}');
+  const stranded = readRssItem(raw, itemId);
+  assert.ok(stranded);
+  assert.equal(stranded.lookup_json, '{"state":"unresolved"}', 'the answer is there to begin with');
+
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  await writer.relinkRssItem(itemId, mediaItemId);
+
+  const after = readRssItem(raw, itemId);
+  assert.ok(after);
+  assert.equal(after.media_item_id, mediaItemId);
+  assert.equal(after.lookup_json, null, 'and is gone the instant the release is linked');
+});
+
+test('unlinking a release leaves its stored lookup answer alone', async () => {
+  // The other direction, and it must NOT clear. `relinkRssItem(id, null)` is
+  // the refusal path: the media item created before the answer arrived is
+  // being dropped, and the release goes back to being unmatched -- which is
+  // exactly the state an answer belongs to. `applyEnvelope` writes a fresh
+  // one immediately afterwards, so clearing here would be a write the next
+  // statement undoes; but the reason it is wrong is the invariant, not the
+  // redundancy.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+
+  const feedId = insertFeed(raw, 'https://example.test/feed');
+  const itemId = insertRssItem(raw, feedId, 500);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+  await writer.relinkRssItem(itemId, mediaItemId);
+  await writer.setResolution(itemId, 'unresolved', 'nothing recognised', '{"state":"unresolved"}');
+
+  await writer.relinkRssItem(itemId, null);
+
+  const after = readRssItem(raw, itemId);
+  assert.ok(after);
+  assert.equal(after.media_item_id, null);
+  assert.equal(after.lookup_json, '{"state":"unresolved"}', 'an unmatched release keeps its answer');
+});
+
 test('relinkRssItem on an rss item that does not exist throws', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
