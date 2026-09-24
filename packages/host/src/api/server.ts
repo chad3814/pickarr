@@ -741,12 +741,12 @@ async function artworkAnswer(
   if (kind === undefined || id === undefined) return UNKNOWN_ROUTE;
   if (!isArtworkKind(kind) || !DIGITS.test(id)) return UNKNOWN_ROUTE;
 
-  const mediaItemId = Number(id);
-  if (!Number.isSafeInteger(mediaItemId)) return UNKNOWN_ROUTE;
+  const ownerId = Number(id);
+  if (!Number.isSafeInteger(ownerId)) return UNKNOWN_ROUTE;
 
   return {
     kind: 'artwork',
-    artwork: await readArtwork(raw, kind, mediaItemId, ARTWORK_FILES, ifNoneMatch),
+    artwork: await readArtwork(raw, kind, ownerId, ARTWORK_FILES, ifNoneMatch),
   };
 }
 
