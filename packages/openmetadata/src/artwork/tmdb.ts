@@ -8,18 +8,38 @@
  * this provider satisfies `personRefs` with its own `/3/person/{id}/images`
  * calls, which is the branch of that seam's docblock TMDB actually takes --
  * ThePornDB (a different task) takes the other one.
+ *
+ * **Person images are never gated by `kind`.** `MEDIA_KIND_PATH` below
+ * decides only whether *this media item* has an images endpoint; a
+ * person's own picture comes from a separate, unrelated TMDB endpoint, so
+ * a `season` or `episode` ref (neither has a media endpoint here) still
+ * gets its people's images answered. Coupling the two would be wrong, not
+ * merely stricter -- a cast list does not stop existing because its
+ * season has no poster of its own.
  */
 import type { HostFetch } from '@pickarr/contract';
 import type { SecretResolver } from '../types.ts';
 import type { ArtworkAnswer, ArtworkSource, MediaImages, ProviderImage } from './source.ts';
 
 /**
- * The logical secret name, per the design spec's "Secret names" section:
- * `resolveSecret('TMDB_READ_ACCESS_TOKEN')`, through the same chain the
- * lookup key uses -- so an operator sets
- * `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN`.
+ * The logical secret name, lowercase-kebab like this package's own
+ * `API_KEY_SECRET` (`../types.ts`, `'openmetadata-api-key'`) -- not the
+ * uppercase `TMDB_READ_ACCESS_TOKEN` the design spec first wrote, which
+ * `packages/host/src/secrets/names.ts`'s `assertSecretName` rejects
+ * outright (`^[a-z0-9][a-z0-9_-]{0,63}$`, no uppercase): the real
+ * `Secrets.get` would throw before its chain was ever consulted, which is
+ * not "no key configured", it is every call failing.
+ *
+ * The name and the environment variable it resolves through are
+ * deliberately different strings, and conflating them is exactly the bug
+ * being fixed here: `envNameFor` (same file) uppercases this name and
+ * turns `-` into `_`, so `tmdb-read-access-token` resolves through
+ * `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN` -- verified by calling
+ * `envNameFor` directly, not assumed. The operator-facing variable name is
+ * therefore unchanged from the design spec's; only the secret's own
+ * internal name (illegal there) moves to a legal spelling.
  */
-export const TMDB_TOKEN_SECRET = 'TMDB_READ_ACCESS_TOKEN';
+export const TMDB_TOKEN_SECRET = 'tmdb-read-access-token';
 
 const API_BASE = 'https://api.themoviedb.org/3';
 
