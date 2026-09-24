@@ -43,6 +43,7 @@ export {
 export type { Expectation, Selection, SelectionRefusal, SelectionRefusalCode } from './select.ts';
 export { episodeMarker, isCandidate, select } from './select.ts';
 export type {
+  ArtworkAnswer,
   ArtworkSource,
   ArtworkSourceDeps,
   MediaImages,
