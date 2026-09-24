@@ -678,6 +678,13 @@ function seedMediaItem(raw: DatabaseSync, pluginId: string, updatedAt: number, t
   return Number(info.lastInsertRowid);
 }
 
+function seedPerson(raw: DatabaseSync, name: string): number {
+  const info = raw.prepare(
+    'INSERT INTO person (name, provider_ref, created_at, updated_at) VALUES (?, ?, 1, 1)',
+  ).run(name, `provider-ref-${name}`);
+  return Number(info.lastInsertRowid);
+}
+
 /** The `MediaItemRead` a row seeded by `seedMediaItem(raw, _, 1000 + id, ...)` serialises to. */
 function expectedMediaItem(id: number): Record<string, unknown> {
   return {
@@ -1284,6 +1291,37 @@ test('artwork is served from the real filesystem with its type read from the byt
       const missing = await get(server, `/api/artwork/logo/${mediaItemId}`, cookie);
       assert.equal(missing.status, 404, 'no logo row is a 404, not an empty 200');
       assert.equal((await missing.arrayBuffer()).byteLength, 0);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a person\'s picture is served over /api/artwork/person/:personId', async () => {
+  // Guards against the exact failure mode this route once had: `isArtworkKind`
+  // was a hand-written `poster|background|logo` disjunction that stayed
+  // well-typed after `ArtworkKind` grew a fourth member, so `person` reached
+  // `readArtwork` with a correct query and still 404'd on every request --
+  // `artworkAnswer`'s own guard threw it away before `readArtwork` ever ran.
+  // A unit test of `readArtwork` cannot see that: it calls straight past the
+  // guard this test exercises by going in through the real HTTP path.
+  const { raw, db } = setup();
+  const personId = seedPerson(raw, 'An Actor');
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-server-artwork-person-'));
+  try {
+    const path = join(dir, 'headshot.bin');
+    await writeFile(path, PNG_BYTES);
+    raw.prepare('INSERT INTO person_image (person_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
+      .run(personId, 'https://images.test/headshot.png', path);
+
+    const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+    try {
+      const response = await get(server, `/api/artwork/person/${personId}`, cookie);
+      assert.equal(response.status, 200, 'the person kind must be reachable, not swallowed by the kind guard');
+      assert.equal(response.headers.get('content-type'), 'image/png');
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), PNG_BYTES);
     } finally {
       await server.close();
     }

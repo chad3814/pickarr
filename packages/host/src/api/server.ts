@@ -142,7 +142,7 @@ import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
-import { readArtwork } from './artwork-route.ts';
+import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
 import type { StaticResponse } from './static-route.ts';
@@ -692,8 +692,29 @@ function pluginFor(
   return { pluginId };
 }
 
+/**
+ * Derived from `ARTWORK_QUERY`'s own keys, not a hand-written disjunction --
+ * a literal chain (`value === 'poster' || ...`) type-checks as long as it
+ * narrows to *some* subset of `ArtworkKind`, so a chain that named only
+ * three of four kinds was still a well-typed `value is ArtworkKind` and the
+ * compiler had no way to flag the missing one. That is exactly how `person`
+ * stayed unreachable over HTTP after `ArtworkKind` grew a fourth member: the
+ * guard silently stopped covering the type it claims to guard, and nothing
+ * failed to compile.
+ *
+ * `ARTWORK_QUERY` is typed `Record<ArtworkKind, string>`, so it is missing
+ * no key `ArtworkKind` has -- TypeScript refuses the object literal
+ * otherwise. `Object.hasOwn` against those keys therefore admits exactly
+ * `ArtworkKind`'s members, automatically, with no separate list to keep in
+ * step. Adding a fifth kind to `ArtworkKind` and leaving `ARTWORK_QUERY`
+ * untouched is a compile error at `ARTWORK_QUERY`'s own declaration (a
+ * missing property on a `Record`), which is what forces the one place this
+ * guard actually reads to grow with the type -- checked by attempting it:
+ * widening `ArtworkKind` alone, with no other change, fails
+ * `npm run typecheck` on `ARTWORK_QUERY`'s literal.
+ */
 function isArtworkKind(value: string): value is ArtworkKind {
-  return value === 'poster' || value === 'background' || value === 'logo';
+  return Object.hasOwn(ARTWORK_QUERY, value);
 }
 
 /**
