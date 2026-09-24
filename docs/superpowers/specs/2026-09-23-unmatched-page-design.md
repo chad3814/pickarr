@@ -115,9 +115,24 @@ Four rules bound it, and each is load-bearing:
    unmatched and its envelope would never be read — and `media` on a
    resolved envelope is the largest thing the service returns. Written on
    the `refused` and `unresolved` terminal branches only.
-2. **Cleared when an item resolves.** A release that was unresolved and is
-   later matched by a retry drops its envelope in the same `UPDATE` that
-   sets `resolution = 'resolved'`. Without this the column only ever grows.
+2. **Cleared the instant the release is linked to a media item.** Without
+   this the column only ever grows.
+
+   **The clear happens in `relinkRssItem`'s own `UPDATE`, not in the
+   `setResolution` that follows it** — an amendment made after the branch
+   shipped, because the original placement had a real hole. The engine
+   links the release, then hands off to the plugin's `apply` and to
+   `attachPeople`, and only then records the resolution. A throw in either
+   middle step left the release linked, and therefore off `/unmatched`,
+   with its answer retained; the lookup job retries and then
+   **dead-letters**, so a persistently failing plugin stranded up to the
+   cap per release, permanently, on a row no screen shows.
+
+   The invariant is really about the link rather than the resolution — an
+   answer is reachable only while `media_item_id IS NULL` — so it is
+   enforced in the statement that changes `media_item_id`. Unlinking
+   deliberately does not clear: a release returning to unmatched is
+   exactly the state an answer belongs to.
 3. **`media` IS stored**, on the repo owner's instruction, reversing an
    earlier draft of this rule. The reasoning that excluded it was: `media`
    is the largest field the service returns, and it is null whenever a

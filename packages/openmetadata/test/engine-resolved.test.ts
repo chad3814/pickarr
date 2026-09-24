@@ -192,6 +192,44 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   assert.equal(stateRow(harness)?.['media_item_id'], 99);
 });
 
+test('the release is linked before the plugin applies, so a throwing apply strands no answer', async () => {
+  // **The call-site half of a two-part guarantee, and the half nothing
+  // pinned.** `MediaWriter.relinkRssItem` clears `lookup_json` in the same
+  // statement that sets `media_item_id`, because a stored lookup answer is
+  // only reachable while a release is unmatched. That fix is worth nothing
+  // unless the link really does happen before the steps that can fail:
+  // `apply` is plugin code and `attachPeople` walks a cast, and a throw in
+  // either used to leave the row linked with its answer retained. The job
+  // retries and then dead-letters, so a persistently failing `apply`
+  // stranded the answer permanently, on a row `/unmatched` no longer shows.
+  //
+  // The existing order assertion above covers the first four *media* calls
+  // and cannot see this: `apply` is a `deps` function, not a `ctx.media`
+  // one, so it never enters `harness.media.calls`. This drives the failure
+  // instead of inspecting the order, which is the same distinction
+  // `CLAUDE.md` draws about pinning a function versus pinning its call
+  // site.
+  const { harness, deps, rssItemId } = fixture();
+  const boom = new Error('the plugin could not write its own rows');
+
+  await assert.rejects(
+    () => applyEnvelope(
+      resolvedEnvelope({ lookupId: 'lookup-7', media: movieMedia() }),
+      { rssItemId, filename: 'dune.mkv', polls: 0 },
+      { ...deps, apply: async () => { throw boom; } },
+    ),
+    (err: unknown) => err === boom,
+    'the throw propagates, so the job fails and retries rather than reporting success',
+  );
+
+  const methods = harness.media.calls.map((call) => call.method);
+  assert.ok(methods.includes('relinkRssItem'), 'the link happened before the plugin could fail');
+  assert.ok(
+    !methods.includes('setResolution'),
+    'and the resolution did not -- which is exactly why the clear cannot be left to it',
+  );
+});
+
 test('the resolution is written last, after the rows a reader would then look for', async () => {
   const { harness, deps, rssItemId } = fixture();
 
