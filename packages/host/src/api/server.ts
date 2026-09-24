@@ -135,6 +135,7 @@ import type { Auth } from '../auth/instance.ts';
 import { redactText } from '../clients/redact.ts';
 import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
 import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
+import type { RetryLookupOutcome } from '../media/retry.ts';
 import type { DestinationRefusalBody } from '@pickarr/contract';
 import type { DestinationRefusal, SaveDestinationInput } from '../media/destinations.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
@@ -329,6 +330,12 @@ export interface ReadServerDeps {
    * `{ refusal }`, both of which carry nothing from the request.
    */
   addDownloadClient: (input: AddDownloadClientInput) => Promise<{ id: number } | AddDownloadClientRefusal>;
+  /**
+   * Asks for an unmatched release to be identified again -- `Host.retryLookup`,
+   * handed in as one function for the same reason `requestPick` below is.
+   * Resolves a refusal value; throws only on a fault.
+   */
+  retryLookup: (rssItemId: number) => Promise<RetryLookupOutcome>;
   /**
    * Submits a pick -- `Host.requestPick`, handed in as the one operation
    * this route needs rather than the whole `Host`, for the reason `addFeed`
@@ -1022,6 +1029,24 @@ function isPickBody(value: unknown): value is { rssItemId: number } {
  * -- never a message a human would read, and never the rss item id it was
  * asked about.
  */
+/**
+ * `POST /api/unmatched/:id/retry`'s three refusals.
+ *
+ * `already-matched` is 409 and the other two are 422, matching
+ * {@link statusForPickRefusal}'s own split: a 409 is a state that changed
+ * under the caller and that a reload fixes, while a 422 says the request
+ * names something this host cannot act on at all.
+ */
+function statusForRetryRefusal(refusal: Exclude<RetryLookupOutcome, { accepted: true }>['refusal']): number {
+  switch (refusal) {
+    case 'already-matched':
+      return 409;
+    case 'unknown-release':
+    case 'plugin-not-registered':
+      return 422;
+  }
+}
+
 function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
   switch (refusal) {
     case 'already-submitted':
@@ -1205,9 +1230,35 @@ function feedIdFrom(pathname: string): number | undefined {
 }
 
 function mappingIdFrom(pathname: string): number | undefined {
-  const segments = pathname.split('/');
-  if (segments.length !== 4) return undefined;
-  const raw = segments[3];
+  return idAt(pathname, 4, 3);
+}
+
+/**
+ * The release id in `/api/unmatched/:id/retry`.
+ *
+ * Five segments, not four, which is why this is not simply
+ * {@link mappingIdFrom}: the id is not the last thing in the path. The
+ * shared {@link idAt} is what the note above `feedIdFrom` asked for -- "if
+ * a third arrives, share it" -- and a third has.
+ */
+function retryIdFrom(pathname: string): number | undefined {
+  return idAt(pathname, 5, 3);
+}
+
+/**
+ * The integer at `index` of a pathname with exactly `segments` parts, or
+ * `undefined` for anything else.
+ *
+ * **The segment count is checked, not just the one segment.** Without it
+ * `/api/feeds/7/anything` would read as feed 7 and answer a route that
+ * does not exist. `DIGITS` rather than `Number()` alone because `Number`
+ * accepts `' 7'`, `'0x7'` and `''`, each of which would name a row the
+ * caller did not ask for or none at all.
+ */
+function idAt(pathname: string, segments: number, index: number): number | undefined {
+  const parts = pathname.split('/');
+  if (parts.length !== segments) return undefined;
+  const raw = parts[index];
   if (raw === undefined || !DIGITS.test(raw)) return undefined;
   const id = Number(raw);
   return Number.isSafeInteger(id) ? id : undefined;
@@ -1621,6 +1672,38 @@ export const ROUTES: readonly Route[] = [
       const result = await deps.requestPick(body.rssItemId);
       if ('refusal' in result) {
         return json(statusForPickRefusal(result.refusal), { refusal: result.refusal });
+      }
+      return json(202, { accepted: true });
+    },
+  },
+  {
+    path: '/api/unmatched/:id/retry',
+    methods: ['POST'],
+    open: false,
+    // Asks for one unmatched release to be identified again. The lookup
+    // engine leaves a name it did not recognise `unresolved` and enqueues
+    // nothing, calling it "the state a human might fix"; this is how the
+    // human says they have.
+    //
+    // **The id is in the path and there is no body**, unlike `/api/picks`
+    // next door, which takes `{ rssItemId }`. The difference is not style:
+    // a pick names the thing it acts on as data because the route is about
+    // picks in general, while this route acts on one already-identified
+    // resource and has nothing else to say about it. A body would be a
+    // second place the id could come from and a second shape to guard.
+    //
+    // **202, on `/api/picks`'s reasoning and more plainly than there.**
+    // Nothing is finished when this answers: `retryLookup` enqueues a job
+    // and returns, the service has not been asked yet, and what the
+    // browser eventually sees -- a new resolution, or the release leaving
+    // `/unmatched` entirely -- arrives through the sync replica rather
+    // than through this response. There is no resource to point a 201 at.
+    answer: async ({ deps, pathname }) => {
+      const id = retryIdFrom(pathname);
+      if (id === undefined) return UNKNOWN_ROUTE;
+      const result = await deps.retryLookup(id);
+      if ('refusal' in result) {
+        return json(statusForRetryRefusal(result.refusal), { refusal: result.refusal });
       }
       return json(202, { accepted: true });
     },

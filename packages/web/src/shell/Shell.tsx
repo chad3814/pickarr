@@ -49,6 +49,7 @@ import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
+import { postRetry } from '../library/postRetry.ts';
 import { useCounts, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
 import { Settings } from '../settings/Settings.tsx';
@@ -239,7 +240,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           renders Unmatched, not a category" now asserts this route's rendered
           content through `Unmatched`'s own `data-testid`.
         */}
-        <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} />} />
+        <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} retry={postRetry} />} />
         {/*
           `postFeed`, `postDownloadClient`, `mappingSubmit` and
           `destinationSubmit` are the real `submit`s this screen needs

@@ -65,3 +65,35 @@ export const REQUEST_PICK_REFUSALS = [
  * same way.
  */
 export type RequestPickRefusalCode = (typeof REQUEST_PICK_REFUSALS)[number];
+
+/**
+ * Every way `Host.retryLookup` can decline to ask for a release to be
+ * identified again.
+ *
+ * **Three codes, and two of them are spelled the same as a pick's.** That
+ * is deliberate rather than an oversight to deduplicate: `unknown-release`
+ * and `plugin-not-registered` mean the same thing to a reader on both
+ * paths, and a client's sentence for them is the same sentence. Sharing
+ * one union across two unrelated operations would be worse -- it would
+ * say a retry can answer `no-client-of-type`, which it cannot, and the
+ * exhaustive `switch` that maps each to a status would stop being
+ * exhaustive over what this route really returns.
+ *
+ * `already-matched` is this list's own. It is not a failure so much as a
+ * stale page: a lookup landed between the render and the click, the
+ * release is fine, and the sentence an operator reads should say so
+ * rather than implying they did something wrong.
+ *
+ * Unlike {@link REQUEST_PICK_REFUSALS}, none of these is produced by
+ * converting a throw -- `packages/host/src/media/retry.ts` returns all
+ * three as values, and rethrows anything it does not recognise so a
+ * broken plugin becomes a 500 rather than a 4xx.
+ */
+export const RETRY_LOOKUP_REFUSALS = [
+  'unknown-release',
+  'already-matched',
+  'plugin-not-registered',
+] as const;
+
+/** One of {@link RETRY_LOOKUP_REFUSALS}, as a type. Derived, never re-spelled. */
+export type RetryLookupRefusalCode = (typeof RETRY_LOOKUP_REFUSALS)[number];

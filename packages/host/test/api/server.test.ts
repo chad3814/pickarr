@@ -21,6 +21,7 @@ import { shippedPlugins } from '../../src/main.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
+import type { RetryLookupOutcome } from '../../src/media/retry.ts';
 import {
   API_VERSION,
   CONNECTIONS_CHECK_MS,
@@ -180,6 +181,9 @@ async function start(
     // `/api/picks` with a session, but they send `{}`, which the shape
     // guard refuses ahead of this -- so a stub that resolved would make
     // those tests pass for the wrong reason.
+    retryLookup: () => {
+      throw new Error('retryLookup not stubbed in this test');
+    },
     requestPick: () => {
       throw new Error('requestPick not stubbed in this test');
     },
@@ -2112,6 +2116,89 @@ test('each pick refusal answers a distinct code the client can branch on', async
       await server.close();
     }
   }));
+});
+
+test('a retry is accepted with 202, and hands the route\u2019s id straight to the host', async () => {
+  // 202 because nothing is finished: `retryLookup` enqueues and returns,
+  // the service has not been asked yet, and what the browser eventually
+  // sees arrives through the sync replica rather than this response.
+  const { raw, db } = setup();
+  const asked: number[] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    retryLookup: async (rssItemId) => {
+      asked.push(rssItemId);
+      return { accepted: true };
+    },
+  });
+  try {
+    const answer = await post(server, '/api/unmatched/860531/retry', cookie, null);
+    assert.equal(answer.status, 202);
+    assert.deepEqual(JSON.parse(answer.text), { accepted: true });
+    // Spelled literally: the id travels in the path, so a parser reading
+    // the wrong segment would still answer 202 while retrying a stranger.
+    assert.deepEqual(asked, [860531]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('each retry refusal answers its own status, and the split is real', async () => {
+  const cases: [Exclude<RetryLookupOutcome, { accepted: true }>['refusal'], number][] = [
+    ['already-matched', 409],
+    ['unknown-release', 422],
+    ['plugin-not-registered', 422],
+  ];
+  // The same guard the pick table carries: a mapper answering one status
+  // for everything would satisfy every per-case assertion below if the
+  // table said that status three times.
+  assert.equal(new Set(cases.map(([, status]) => status)).size, 2, 'the table distinguishes two statuses');
+
+  await Promise.all(cases.map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+      retryLookup: async () => ({ refusal }),
+    });
+    try {
+      const answer = await post(server, '/api/unmatched/860531/retry', cookie, null);
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal }, 'and the whole body is that one stable code');
+      assert.ok(!answer.text.includes('860531'), 'no refusal repeats the id it was asked about');
+      assert.ok(!JSON.stringify(logs).includes('860531'), 'and nothing about it is written down either');
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('a retry path whose id is not an integer is an unknown route, and never reaches the host', async () => {
+  // The id is read back off the pathname, so this is the route's own
+  // guard rather than a body shape check. `/api/unmatched/7/retry/extra`
+  // is in the list because a parser that checked only the segment and not
+  // the segment *count* would read it as release 7.
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    retryLookup: async () => {
+      called += 1;
+      return { accepted: true };
+    },
+  });
+  try {
+    for (const path of [
+      '/api/unmatched/abc/retry',
+      '/api/unmatched/ /retry',
+      '/api/unmatched/0x7/retry',
+      '/api/unmatched//retry',
+      '/api/unmatched/7/retry/extra',
+    ]) {
+      // eslint-disable-next-line no-await-in-loop -- one server, and each answer is asserted before the next request is sent
+      const answer = await post(server, path, cookie, null);
+      assert.equal(answer.status, 404, `${path} is not a route`);
+    }
+    assert.equal(called, 0, 'and the host was never asked about any of them');
+  } finally {
+    await server.close();
+  }
 });
 
 test('both pick 400s carry a code, so the one status they share is not told apart by prose', async () => {

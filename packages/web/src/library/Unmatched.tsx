@@ -102,6 +102,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
+import { RETRY_REFUSAL_MESSAGES, type RetrySubmit } from './postRetry.ts';
 import { CardHeading, useExpansion } from '@pickarr/plugin-ui';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
@@ -130,6 +131,14 @@ export interface UnmatchedSource {
 
 export interface UnmatchedProps {
   source: UnmatchedSource;
+  /**
+   * Asks the host to identify one release again. Required and never
+   * defaulted, the rule every submit on this codebase follows: a default
+   * that performed network I/O would be invisible at the call site, and a
+   * test that forgot the prop would get a real `fetch` under happy-dom --
+   * which hangs rather than failing, with nothing pointing at the cause.
+   */
+  retry: RetrySubmit;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -253,6 +262,16 @@ interface UnmatchedRow {
   readonly resolutionDetail: string | undefined;
   /** The lookup service's answer, as stored -- or the `LOOKUP_JSON_TOO_LARGE` marker in place of one too big to keep. */
   readonly lookupJson: string | undefined;
+  /**
+   * When the host last wrote this row.
+   *
+   * Read for the cursor already; carried onto the row so {@link RetryButton}
+   * can tell that a retry has landed. Every write the lookup path makes
+   * bumps it -- `setResolution` sets `updated_at` unconditionally -- so it
+   * advances even when the retry produces the very same answer, which a
+   * comparison of `resolution` would not catch.
+   */
+  readonly updatedAt: number;
 }
 
 /** The full key `by_table_updated` orders by -- what {@link readUnmatched} resumes a walk from, and what it hands back as where it stopped. */
@@ -319,6 +338,7 @@ async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<Un
         feedId: typeof value.feedId === 'number' ? value.feedId : undefined,
         resolution: textOf(value, 'resolution'),
         resolutionDetail: textOf(value, 'resolutionDetail'),
+        updatedAt: updatedAtOf(row),
         lookupJson: textOf(value, 'lookupJson'),
       });
     }
@@ -487,7 +507,80 @@ const REPORTS_NOTHING = (): void => {};
  * answer` label standing over nothing: a bordered box containing nothing
  * reads as a bug, and the state line above it already says `pending`.
  */
-function UnmatchedDetail({ row }: { row: UnmatchedRow }): ReactElement {
+/**
+ * The control that asks for this release to be identified again, and
+ * whatever the last attempt had to say.
+ *
+ * **`Retrying...` ends when the row changes, not when the request
+ * answers.** The host replies 202 the moment it has enqueued a job -- the
+ * service has not been asked yet -- so clearing on the response would
+ * re-enable the button within milliseconds of a click whose work had not
+ * started. That is the defect `ReleaseList`'s Pick button was fixed for,
+ * measured there at 33ms against an answer that arrived at 2934ms. The
+ * signal here is `row.updatedAt` advancing past what it was at the click:
+ * every write the lookup path makes bumps it, so this clears even when
+ * the retry lands on the very same answer, which watching `resolution`
+ * would miss.
+ *
+ * **The hang this accepts, deliberately.** If the job dies before writing
+ * anything -- dead-lettered after its retries -- nothing ever bumps
+ * `updatedAt` and this button stays disabled until the card is collapsed
+ * and reopened. There is no timer, for the reason `ReleaseList` gives:
+ * re-enabling on a clock offers a second retry for work that may still be
+ * in flight, and a second lookup is a second charge against the service.
+ * It is scoped to one card and survives no remount.
+ *
+ * An accepted retry sets no message. There is nothing to say that the
+ * disabled button does not already say.
+ */
+function RetryButton({ row, submit }: { row: UnmatchedRow; submit: RetrySubmit }): ReactElement {
+  // The `updatedAt` this release had when the button was clicked, or
+  // `undefined` when nothing is pending. One piece of state rather than a
+  // boolean plus a number: "pending" *is* "waiting for a row newer than
+  // this one", and two fields could disagree.
+  const [awaitingSince, setAwaitingSince] = useState<number | undefined>(undefined);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const pending = awaitingSince !== undefined && row.updatedAt === awaitingSince;
+
+  async function retry(): Promise<void> {
+    setAwaitingSince(row.updatedAt);
+    setMessage(null);
+    const outcome = await submit(row.id);
+    // Only a refusal clears the wait. An accepted retry stays pending
+    // until the row moves -- see this component's docblock.
+    if ('refusal' in outcome) {
+      setAwaitingSince(undefined);
+      setMessage(RETRY_REFUSAL_MESSAGES[outcome.refusal]);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={pending}
+        onClick={() => {
+          void retry();
+        }}
+      >
+        {pending ? 'Retrying\u2026' : 'Retry'}
+      </button>
+      {message !== null && (
+        <div role="alert">
+          {/*
+            Real text in a real element, never an `aria-label` on an empty
+            one (`CLAUDE.md`'s longest hazard): the announced string and
+            the visible one are the same string, so they cannot drift.
+          */}
+          <span>{message}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+function UnmatchedDetail({ row, submit }: { row: UnmatchedRow; submit: RetrySubmit }): ReactElement {
   return (
     <dl>
       {/*
@@ -535,6 +628,15 @@ function UnmatchedDetail({ row }: { row: UnmatchedRow }): ReactElement {
           )}
         </>
       )}
+      {/*
+        Inside the `<dl>` as its own pair, rather than loose beside it: the
+        body is a description list and a control with no term above it
+        would be the one child of that list that is not part of one.
+        `Actions` rather than `Retry` as the term, so the label does not
+        simply repeat the button.
+      */}
+      <dt>Actions</dt>
+      <dd><RetryButton row={row} submit={submit} /></dd>
     </dl>
   );
 }
@@ -553,7 +655,9 @@ function UnmatchedDetail({ row }: { row: UnmatchedRow }): ReactElement {
  * absent key from an explicit `undefined`, and `CardHeading` renders no
  * `<small>` at all only for the absent one.
  */
-function UnmatchedCard({ row, feedName }: { row: UnmatchedRow; feedName: string | undefined }): ReactElement {
+function UnmatchedCard(
+  { row, feedName, submit }: { row: UnmatchedRow; feedName: string | undefined; submit: RetrySubmit },
+): ReactElement {
   const { expanded, toggle } = useExpansion(REPORTS_NOTHING);
 
   return (
@@ -564,12 +668,12 @@ function UnmatchedCard({ row, feedName }: { row: UnmatchedRow; feedName: string 
         expanded={expanded}
         onToggle={toggle}
       />
-      {expanded && <UnmatchedDetail row={row} />}
+      {expanded && <UnmatchedDetail row={row} submit={submit} />}
     </article>
   );
 }
 
-export function Unmatched({ source }: UnmatchedProps): ReactElement {
+export function Unmatched({ source, retry }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
@@ -734,6 +838,7 @@ export function Unmatched({ source }: UnmatchedProps): ReactElement {
           <>
             {rows.map((row) => (
               <UnmatchedCard
+                submit={retry}
                 key={row.id}
                 row={row}
                 feedName={feedLabel(feedNames, row.feedId)}
