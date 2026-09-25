@@ -21,6 +21,8 @@ import type {
 } from '@pickarr/contract';
 import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
+import type { ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
+import { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';
 import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
@@ -98,9 +100,29 @@ export function describeUnresolved(filename: string, suggestions: MediaSuggestio
 
 /**
  * The service's people, de-duplicated by the provider's own person id as they
- * are written, in the order the service gave them.
+ * are written, in the order the service gave them -- and the rows it wrote,
+ * for the artwork job to fetch pictures for.
+ *
+ * **Returning them rather than `void` is what makes the artwork payload
+ * truthful.** `ArtworkJobPayload.people` has to name people the database
+ * actually holds, and `MediaWriter.upsertPerson` is the only thing that
+ * decides that: it is keyed on `provider_ref`, so the answer's list of
+ * *parts* is not the list of *people* -- a cast member who also directs
+ * appears twice in `media.people` and is one `person` row. Building the
+ * payload from `media.people` here would name that person twice and fetch
+ * the same picture twice, and it could not name them at all in the
+ * vocabulary the writer needs: `attachPersonImage` takes a `personId`, and
+ * `media.people` carries no id, only the provider's ref.
+ *
+ * So the de-duplication is on `providerRef`, which is the key the upsert
+ * itself dedupes on -- one entry per person row written, in billing order.
  */
-async function attachPeople(media: Media, mediaItemId: number, ctx: PluginContext): Promise<void> {
+async function attachPeople(
+  media: Media,
+  mediaItemId: number,
+  ctx: PluginContext,
+): Promise<ArtworkJobPerson[]> {
+  const written = new Map<string, ArtworkJobPerson>();
   for (const person of media.people) {
     // eslint-disable-next-line no-await-in-loop -- one person at a time: `attachRole` needs the id this upsert returns, and the roles have to land in billing order
     const personId = await ctx.media.upsertPerson({ name: person.name, providerRef: person.providerRef });
@@ -111,7 +133,11 @@ async function attachPeople(media: Media, mediaItemId: number, ctx: PluginContex
       name: person.characterName,
       billingOrder: person.billingOrder,
     });
+    if (!written.has(person.providerRef)) {
+      written.set(person.providerRef, { personId, providerRef: person.providerRef });
+    }
   }
+  return [...written.values()];
 }
 
 /**
@@ -172,7 +198,7 @@ async function applyResolved(
   // provider reference, so re-applying the winner's own answer is a no-op
   // rather than a duplicate.
   await deps.apply({ media, mediaItemId: claim.kept, raw: deps.raw, ctx, now: deps.now });
-  await attachPeople(media, claim.kept, ctx);
+  const people = await attachPeople(media, claim.kept, ctx);
   // `null` for the answer, and by the time this runs there is nothing left
   // to clear: `relinkRssItem` above already cleared `lookup_json` in the
   // same statement that set `media_item_id`, because a stored answer is
@@ -188,6 +214,42 @@ async function applyResolved(
   // dead-letters, so a persistently failing `apply` stranded it for good
   // on a row `/unmatched` no longer shows.
   await ctx.media.setResolution(target.rssItemId, 'resolved', null, null);
+
+  // Artwork, in a job of its own and enqueued last.
+  //
+  // **Last, because a job that ran before the line above could read this
+  // release mid-identification.** That is not theoretical: `host.ts`'s
+  // `JobQueue.enqueue` re-arms the dispatcher on the spot, and the
+  // dispatcher runs eight jobs at once by default, so the artwork handler
+  // can start before the handler that queued it has returned.
+  //
+  // **Caught, because a failure to queue artwork must not un-identify the
+  // release.** That is the whole premise of `./artwork/job.ts` being a
+  // separate job: the item is identified by the statement above, and
+  // letting this throw would fail the lookup job, put it on the runner's
+  // backoff curve and re-run every write here -- all of them idempotent, so
+  // the retry is harmless and also pointless, and after the last attempt
+  // the job dead-letters over a missing poster. What is lost instead is
+  // this item's artwork until it is identified again, which is what the log
+  // line says.
+  try {
+    const payload: ArtworkJobPayload = {
+      mediaItemId: claim.kept,
+      kind: media.kind,
+      provider: media.provider,
+      providerRef: media.providerRef,
+      people,
+    };
+    await ctx.jobs.enqueue({ kind: ARTWORK_JOB, payload });
+  } catch (error) {
+    ctx.log('the artwork job could not be queued, so this item has no pictures until it is identified again', {
+      mediaItemId: claim.kept,
+      // The message rather than the `Error`: the host's `redactDetail`
+      // walks string values only, so an error object placed here would
+      // reach the sink unredacted. The same shape `logged` below uses.
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -632,6 +694,11 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     }
   };
 
+  // One handler for the plugin's whole life, not one per job: it caches a
+  // provider registry per `HostFetch` and reports an unregistered provider
+  // once rather than once per release. See `createArtworkJob`.
+  const artwork = createArtworkJob({ resolveSecret: deps.resolveSecret });
+
   const poll: JobHandler = async (job, ctx, signal) => {
     const { raw, db } = ownTables(ctx);
     // The rss item comes from the payload, never from `job.id`: both are
@@ -653,7 +720,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     id: spec.id,
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
-    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll },
+    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork },
     // Defaults to empty: `LookupPluginSpec.synced` is optional, so a spec
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.

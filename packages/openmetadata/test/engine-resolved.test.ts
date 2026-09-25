@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { drizzle } from 'drizzle-orm/node-sqlite';
+import type { PluginContext } from '@pickarr/contract';
+import { ARTWORK_JOB } from '../src/artwork/job.ts';
 import { applyEnvelope } from '../src/engine.ts';
 import { lookupTable, lookupTableMigration } from '../src/table.ts';
-import { createTestHarness, resolvedEnvelope, unresolvedEnvelope } from '../src/testing.ts';
+import { createTestHarness, refusedEnvelope, resolvedEnvelope, unresolvedEnvelope } from '../src/testing.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { Media } from '../src/types.ts';
 
@@ -282,4 +284,144 @@ test('a null confidence is stored as null rather than refused', async () => {
   await applyEnvelope(envelope, { rssItemId, filename: 'dune.mkv', polls: 0 }, deps);
 
   assert.equal(stateRow(harness)?.['confidence'], null);
+});
+
+test('a resolved lookup enqueues one artwork job for the item it resolved', async () => {
+  const { harness, deps, rssItemId } = fixture();
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-10', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const artwork = harness.enqueued.filter((job) => job.kind === ARTWORK_JOB);
+  assert.equal(artwork.length, 1, 'one job for the item, not one per person');
+  // Every field spelled out, and `mediaItemId` spelled as the literal `1`
+  // rather than read back out of `harness.media.items`: an expectation
+  // computed from the code under test cannot see that code change.
+  //
+  // The two `people` entries are the second half of what this pins. The
+  // fixture's cast is three parts naming two provider refs, and the payload
+  // names people the database actually holds -- `upsertPerson` is keyed on
+  // `provider_ref`, so the ref that plays cast and director is one `person`
+  // row and gets one picture fetched, not two.
+  assert.deepEqual(artwork[0]?.payload, {
+    mediaItemId: 1,
+    kind: 'movie',
+    provider: 'tmdb',
+    providerRef: 'tmdb:movie:693134',
+    people: [
+      { personId: 1, providerRef: 'tmdb:person:1' },
+      { personId: 2, providerRef: 'tmdb:person:2' },
+    ],
+  });
+});
+
+test('the artwork job names the media item that kept the claim, not the one that lost it', async () => {
+  // The happy path cannot tell `claim.kept` from the row this call created:
+  // they are the same number. A lost dedup race is where they differ, and
+  // the artwork has to be fetched for the row everything else was pointed
+  // at -- a job naming the dropped row would download four images and
+  // attach them to nothing.
+  const { harness, deps, rssItemId } = fixture();
+  harness.media.loseNextClaim(99);
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-11', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const artwork = harness.enqueued.filter((job) => job.kind === ARTWORK_JOB);
+  assert.equal(artwork.length, 1);
+  assert.deepEqual(artwork[0]?.payload, {
+    mediaItemId: 99,
+    kind: 'movie',
+    provider: 'tmdb',
+    providerRef: 'tmdb:movie:693134',
+    people: [
+      { personId: 1, providerRef: 'tmdb:person:1' },
+      { personId: 2, providerRef: 'tmdb:person:2' },
+    ],
+  });
+});
+
+test('a refused or unresolved lookup enqueues nothing', async () => {
+  // Neither outcome has a media item, so there is nothing to fetch artwork
+  // for. Both drive the same assertion because they are two different
+  // branches of `applyEnvelope` and only one of them was ever likely to
+  // grow an enqueue by accident.
+  const refused = fixture();
+  await applyEnvelope(
+    refusedEnvelope({ lookupId: 'lookup-12', refusal: 'this is a subtitle' }),
+    { rssItemId: refused.rssItemId, filename: 'dune.srt', polls: 0 },
+    refused.deps,
+  );
+  assert.deepEqual(refused.harness.enqueued.map((job) => job.kind), []);
+
+  const unresolved = fixture();
+  await applyEnvelope(
+    unresolvedEnvelope({ lookupId: 'lookup-13' }),
+    { rssItemId: unresolved.rssItemId, filename: 'dune.mkv', polls: 0 },
+    unresolved.deps,
+  );
+  assert.deepEqual(unresolved.harness.enqueued.map((job) => job.kind), []);
+});
+
+test('the enqueue happens after the resolution is recorded', async () => {
+  // One direction only: a job that ran before `setResolution` could read a
+  // row mid-write. Pinned by asking the recording writer what it had been
+  // told *at the moment* `enqueue` was called, which is what the fake's
+  // call list already captures -- `enqueue` itself is not a `ctx.media`
+  // call, so it never lands in that list and the order cannot be read off
+  // it afterwards.
+  const { harness, deps, rssItemId } = fixture();
+  const seen: string[][] = [];
+  const ctx: PluginContext = {
+    ...harness.ctx,
+    jobs: {
+      async enqueue(job) {
+        seen.push(harness.media.calls.map((call) => call.method));
+        return await harness.ctx.jobs.enqueue(job);
+      },
+    },
+  };
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-14', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { ...deps, ctx },
+  );
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.at(-1), 'setResolution', 'the release was resolved before the job was queued');
+});
+
+test('a failing enqueue does not fail the lookup', async () => {
+  // The whole premise of a separate job: artwork cannot break
+  // identification. A queue that refuses the job leaves the release
+  // identified and says so in a log line, rather than throwing and having
+  // the job runner retry an identification that already succeeded.
+  const { harness, deps, rssItemId } = fixture();
+  const boom = new Error('the job queue is unavailable');
+  const ctx: PluginContext = {
+    ...harness.ctx,
+    jobs: { async enqueue(): Promise<number> { throw boom; } },
+  };
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-15', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { ...deps, ctx },
+  );
+
+  assert.deepEqual(
+    harness.media.resolutions.get(rssItemId),
+    { resolution: 'resolved', detail: null, lookupJson: null },
+    'the release stays identified',
+  );
+  const logged = harness.logs.filter((entry) => entry.detail?.['error'] === 'the job queue is unavailable');
+  assert.equal(logged.length, 1, 'and the failure is logged rather than swallowed');
+  assert.equal(logged[0]?.detail?.['mediaItemId'], 1);
 });
