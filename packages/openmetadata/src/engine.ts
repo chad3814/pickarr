@@ -115,7 +115,19 @@ export function describeUnresolved(filename: string, suggestions: MediaSuggestio
  * `media.people` carries no id, only the provider's ref.
  *
  * So the de-duplication is on `providerRef`, which is the key the upsert
- * itself dedupes on -- one entry per person row written, in billing order.
+ * itself dedupes on: one entry per person row written, in the order each
+ * ref **first appears in `media.people`** -- list order, not billing order.
+ * The two coincide whenever the service billing-orders its answer, and
+ * nothing here makes them coincide: a person whose non-billed part arrived
+ * first would be emitted at that part's position.
+ *
+ * That is fine, and deliberately unsorted. Nothing downstream reads this
+ * order -- `./artwork/job.ts` passes the refs to `imagesFor` as a list to
+ * look up and attaches each picture by its own `personId` -- so there is no
+ * promise here for a sort to keep. The roles themselves are a separate
+ * matter and do keep their order: `attachRole` above is called once per
+ * entry, in the order the service gave them, which is what carries
+ * `billingOrder` to the database.
  */
 async function attachPeople(
   media: Media,
