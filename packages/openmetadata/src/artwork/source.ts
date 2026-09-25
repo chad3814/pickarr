@@ -109,9 +109,11 @@ export interface ArtworkParent {
  * fall back to, and an optional argument is one a caller can quietly stop
  * passing with nothing to show for it. TMDB is exactly that provider --
  * a television lookup resolves to `episode`, `season` or `series`
- * (`plugin-tv`'s `checkTv`) and TMDB publishes an images endpoint for the
- * last of those only -- so an episode takes its series' poster, which is
- * what a media library shows for one anyway. A source with an endpoint for
+ * (`plugin-tv`'s `checkTv`), and of those three only `series` has an
+ * images endpoint addressable by the standalone `providerRef`
+ * openmetadata hands over (`./tmdb.ts`'s `MEDIA_KIND_PATH` says what was
+ * verified and what was not) -- so an episode takes its series' poster,
+ * which is what a media library shows for one anyway. A source with an endpoint for
  * every kind it handles ignores the argument; ThePornDB does.
  *
  * A single `imagesFor` rather than a `mediaImages` plus a `personImages` --
