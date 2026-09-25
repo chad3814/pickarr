@@ -66,6 +66,24 @@ export interface ReconcileResult {
    * still happened. See `recoverRefs`.
    */
   recoverFailures: number;
+  /**
+   * Entries this client holds that are filed under some other category and
+   * that no row of ours claims -- somebody else's downloads, in short.
+   *
+   * A download client is not Pickarr's alone, and qBittorrent's
+   * `/torrents/info` is fetched unfiltered (`qbittorrent.ts`'s `snapshot`),
+   * so every torrent its operator ever added arrives in this walk. Each one
+   * used to be counted `untracked` and logged by name, which on a real
+   * install meant 200+ lines a minute about downloads Pickarr was never
+   * asked to manage -- and, worse, made `untracked` mean "things in this
+   * client" rather than "things in our category we cannot explain".
+   *
+   * Counted rather than dropped silently: `logTickSummary` prints every
+   * non-zero counter, so one number per tick still says "this client holds
+   * things that are not ours" -- which is the whole of what those lines
+   * were worth.
+   */
+  foreign: number;
 }
 
 /**
@@ -133,6 +151,29 @@ function alreadyFailedForThisReason(row: DownloadRow, message: string): boolean 
 }
 
 /**
+ * Whether an entry no row of ours claims belongs to somebody else.
+ *
+ * Deliberately consulted **only** when `rowByRef` found nothing. Filtering
+ * the snapshot up front by category is the obvious fix and is wrong: an
+ * operator who drags a torrent into another category in qBittorrent would
+ * strand its row at `submitted` for ever while the client finished the
+ * download. A row we already own is ours whatever category it sits in; it
+ * is only the *unclaimed* entries that category can speak for.
+ *
+ * Both sides are already normalised -- `deps.category` through
+ * `reconcile-job.ts`'s `normalizeClientCategory`, and each entry's through
+ * its adapter -- so `''` and `'None'` have both become `null` by here and
+ * a client configured with no category matches entries filed under none.
+ *
+ * This says nothing about adoption: `recoverRefs` already requires
+ * `entry.category === deps.category`, so an entry this refuses could never
+ * have been adopted anyway.
+ */
+function isSomeoneElses(deps: ReconcileDeps, entryCategory: string | null): boolean {
+  return entryCategory !== deps.category;
+}
+
+/**
  * Handles one queue entry: an advance to `downloading` from `submitted` or
  * `submitting`, then a progress observation applied regardless -- unless the
  * row is `delivered`, which every arm of this walk leaves untouched because
@@ -145,6 +186,10 @@ function walkQueueEntry(
 ): void {
   const row = rowByRef(deps.raw, deps.clientId, entry.ref);
   if (row === undefined) {
+    if (isSomeoneElses(deps, entry.category)) {
+      result.foreign += 1;
+      return;
+    }
     result.untracked += 1;
     deps.log('client queue entry has no matching download row', { clientId: deps.clientId, ref: entry.ref });
     return;
@@ -179,6 +224,10 @@ function walkHistoryEntry(
 ): void {
   const row = rowByRef(deps.raw, deps.clientId, entry.ref);
   if (row === undefined) {
+    if (isSomeoneElses(deps, entry.category)) {
+      result.foreign += 1;
+      return;
+    }
     result.untracked += 1;
     deps.log('client history entry has no matching download row', { clientId: deps.clientId, ref: entry.ref });
     return;
@@ -514,7 +563,7 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   const result: ReconcileResult = {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
   };
 
   recoverRefs(deps, result);
