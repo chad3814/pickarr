@@ -337,7 +337,7 @@ test('a passkey embedded in the path is redacted too, which no parameter list co
   seedFeed(raw, { url: 'https://tr.example/announce/9f8e7d6c5b4a39281706f5e4d3c2b1a0/rss' });
   seedFeed(raw, { url: 'https://tr.example/category/tv-shows/rss', id: 2 });
   const rows = registry.readRows(raw, 'rss_feed', [1, 2]);
-  assert.equal(rowUrl(rows[1]), 'https://tr.example/announce/*****/rss');
+  assert.equal(rowUrl(rows[1]), 'https://tr.example/announce/9f8*****/rss');
   assert.equal(rowUrl(rows[2]), 'https://tr.example/category/tv-shows/rss', 'a slug is not a secret');
 });
 

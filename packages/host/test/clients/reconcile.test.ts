@@ -225,7 +225,7 @@ test('a passkey in the client\'s message is masked before it reaches last_error 
   const stored = readColumn(raw, 'torrent_download', id, 'last_error');
   assert.equal(
     stored,
-    'announce https://tr.example/announce/*****/x failed, retry https://tr.example/rss?passkey=*****',
+    'announce https://tr.example/announce/9f8*****/x failed, retry https://tr.example/rss?passkey=*****',
   );
   // Spelled as an absence too, because the assertion above would still hold
   // if the mask were applied to the wrong span.

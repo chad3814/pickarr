@@ -22,11 +22,19 @@
  */
 
 /**
- * Query parameter names known to carry a client's credential in the url
- * itself. SABnzbd's `apikey` is the only one anything in this codebase
- * sends; a future client with another credential-bearing query parameter
- * must add its name here rather than assume `redactText` already knows every
- * shape a credential can take.
+ * Substrings that make a query parameter's **name** look like it carries a
+ * credential -- the same four words {@link CREDENTIAL_PARAM_HINTS} uses,
+ * and deliberately the same list rather than a second one to keep in step.
+ *
+ * **This was the single name `apikey` until the three-character prefix
+ * arrived.** While every shape match masked to bare stars the gap cost
+ * nothing: a `passkey=` this rule missed was caught by
+ * {@link redactSecrets} and fully hidden anyway. Once a shape match began
+ * keeping a prefix, that fallback started leaking three characters of a
+ * credential the *name* rule should have taken whole -- visible in
+ * `reconcile.test.ts`, where a tracker's own error message carries
+ * `?passkey=`. A name match is not a false positive and has nothing to
+ * diagnose, so it must win here, and it can only win if it fires.
  */
 /**
  * What a redacted secret reads as, everywhere in this module.
@@ -34,21 +42,29 @@
  * One spelling, because two would be a distinction without a difference:
  * a reader meeting `***` beside `*****` has to work out whether the
  * length means something. It does not.
+ *
+ * The stars are always exactly this, but a shape-matched run is prefixed
+ * with three of its own characters before them ({@link maskRun}); a
+ * credential matched by name or position is replaced by this alone.
  */
 const MASK = '*****';
 
-const CREDENTIAL_QUERY_PARAM_NAMES = ['apikey'];
+const CREDENTIAL_QUERY_PARAM_HINTS = ['api', 'token', 'key', 'pass'];
 
 /**
- * Matches `?apikey=<value>` or `&apikey=<value>` anywhere in a string,
- * keying off the structural delimiters (`?`/`&` before, `&`/whitespace/
- * end-of-string after) rather than the value itself, so it fires regardless
- * of how that value is encoded. Case-insensitive because a query parameter
- * name is not case-sensitive to the server reading it, so `ApiKey` and
- * `APIKEY` must be redacted exactly as `apikey` is.
+ * Matches `?<name>=<value>` or `&<name>=<value>` anywhere in a string, for
+ * any parameter whose name *contains* one of the hints above, keying off
+ * the structural delimiters (`?`/`&` before, `&`/whitespace/end-of-string
+ * after) rather than the value itself, so it fires regardless of how that
+ * value is encoded. Case-insensitive because a query parameter name is not
+ * case-sensitive to the server reading it, so `ApiKey` and `APIKEY` are
+ * redacted exactly as `apikey` is.
+ *
+ * The name part excludes `?`, `&`, `=` and whitespace so it cannot run
+ * across a parameter boundary and swallow a neighbouring pair.
  */
 const CREDENTIAL_QUERY_PARAM_PATTERN = new RegExp(
-  `([?&](?:${CREDENTIAL_QUERY_PARAM_NAMES.join('|')})=)[^&\\s]*`,
+  `([?&][^?&\\s=]*(?:${CREDENTIAL_QUERY_PARAM_HINTS.join('|')})[^?&\\s=]*=)[^&\\s]*`,
   'gi',
 );
 
@@ -127,9 +143,28 @@ function hasTwoOfEachClass(run: string): boolean {
  * A rule about what a credential looks like reaches the path case; no list
  * of names can.
  *
- * **Every match becomes the same five stars**, never a run of stars as long
- * as the match. A length-preserving mask leaks how long the credential was,
- * and makes two different secrets distinguishable from each other in a log.
+ * **A match keeps its first three characters and loses the rest** --
+ * `9f8e7d6c…` becomes `9f8*****`. Never a run of stars as long as the
+ * match: a length-preserving mask would leak how long the credential was.
+ *
+ * The prefix exists because these two rules match by *shape*, so some of
+ * what they catch is not a credential at all -- a torrent infohash, an
+ * eight-digit byte count, a thirteen-digit epoch. `reconcile.ts` logs a
+ * `ref` that is exactly an infohash, and a screenful of identical
+ * `*****`s gave an operator no way to tell a redaction miss from the
+ * redactor being wrong about an ordinary value.
+ *
+ * **It costs the property this docblock used to claim**, which was that
+ * two different secrets mask to the same string and so cannot be told
+ * apart in a log. They can now. That is the request rather than an
+ * oversight -- telling them apart is how a false positive gets spotted --
+ * but it means three characters of every shape-matched secret reach the
+ * log. Three characters of a 32-hex passkey is not a usable credential;
+ * it is still more than nothing, which is why the prefix is confined to
+ * the shape rules. A credential matched by *name* or *position* --
+ * `apikey=`, `Authorization:`, `password=`, a url's userinfo -- is not a
+ * false positive and has nothing to diagnose, so it keeps the bare
+ * {@link MASK}.
  *
  * **What it does not catch, recorded rather than left to be discovered.** A
  * credential shorter than eight characters, and one with no digits and no
@@ -140,8 +175,33 @@ function hasTwoOfEachClass(run: string): boolean {
  */
 export function redactSecrets(text: string): string {
   return text
-    .replace(HEX_RUN, MASK)
-    .replace(ALNUM_RUN, (run) => (hasTwoOfEachClass(run) ? MASK : run));
+    .replace(HEX_RUN, maskRun)
+    .replace(ALNUM_RUN, (run) => (hasTwoOfEachClass(run) ? maskRun(run) : run));
+}
+
+/**
+ * How much of a shape-matched run survives redaction.
+ *
+ * Three, because both rules require a run of at least eight, so a prefix
+ * this size can never be most of the value -- and because three hex
+ * characters is enough to find the same torrent in a client's own UI,
+ * which is the whole job it was added for.
+ */
+const VISIBLE_PREFIX = 3;
+
+/**
+ * A shape-matched run, masked. Takes the run itself rather than closing
+ * over the surrounding text: `String.replace`'s replacer is called once
+ * per match, so the prefix comes from the match and not from the start of
+ * the line -- the difference between a path segment masked as `9f8` plus
+ * stars and a mangled `htt*****` taken from the front of the whole url.
+ *
+ * (Spelled in prose rather than shown literally: the example ends in a
+ * slash, and a star followed by a slash closes this comment. That is not
+ * hypothetical -- writing it out is what broke this file once already.)
+ */
+function maskRun(run: string): string {
+  return `${run.slice(0, VISIBLE_PREFIX)}${MASK}`;
 }
 
 
