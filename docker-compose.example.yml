@@ -13,9 +13,23 @@ services:
       PUID: 1000
       PGID: 1000
     secrets:
+      # Each name here is also the filename the host looks for under
+      # `secrets.baseDir` (`/run/secrets` by default), because Docker mounts
+      # a secret at `/run/secrets/<name>`. So the name below IS the lookup
+      # name -- lowercase and hyphenated, never the uppercase environment
+      # spelling.
       - openmetadata-api-key
+      # Optional. Each buys artwork from the provider that identified a
+      # release; without one, that provider's cards carry no image and the
+      # job says so once. See README's Secrets section.
+      - tmdb-read-access-token
+      - tpdb-api-key
     restart: unless-stopped
 
 secrets:
   openmetadata-api-key:
     file: ./secrets/openmetadata-api-key
+  tmdb-read-access-token:
+    file: ./secrets/tmdb-read-access-token
+  tpdb-api-key:
+    file: ./secrets/tpdb-api-key

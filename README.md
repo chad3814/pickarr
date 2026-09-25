@@ -212,6 +212,12 @@ underscores, under the `PICKARR_SECRET_` prefix: `openmetadata-api-key` is
 secret named `path` resolves from the container's own `PATH`, and that string would go
 to a third-party service as its API key.
 
+**As a file, the name is the filename**, unchanged — the host reads
+`<secrets.baseDir>/<name>`, and Docker mounts a secret at `/run/secrets/<name>`, so a
+compose `secrets:` entry named `openmetadata-api-key` is already in the right place
+with no mapping to write. Only the environment form is uppercased; the file form never
+is. `docker-compose.example.yml` mounts all three this way.
+
 **The one secret a working install needs is `openmetadata-api-key`.** All three shipped
 plugins look up metadata through that service, and without a key each one dead-letters
 every lookup job. The host checks the chain at boot and warns rather than refusing,
