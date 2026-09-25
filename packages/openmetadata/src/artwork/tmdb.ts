@@ -80,6 +80,57 @@ const MEDIA_KIND_PATH: Readonly<Record<string, string>> = {
   series: 'tv',
 };
 
+/**
+ * The numeric TMDB id inside an openmetadata `providerRef`.
+ *
+ * **openmetadata does not hand over a bare id, and assuming it did cost
+ * this feature its first deployment.** Read from the live service, a
+ * reference is `<provider>:<type>:<id>` with optional trailing ordinals:
+ *
+ * - a film is `tmdb:movie:335984`
+ * - a series is `tmdb:tv:1399`
+ * - a season is `tmdb:tv:1399:1`
+ * - an episode is `tmdb:tv:1399:1:1`
+ * - a person is `tmdb:person:30614`
+ *
+ * The first build passed the whole string into the path, so every request
+ * went to `/3/tv/tmdb%3Atv%3A1399/images` and answered 404. It failed for
+ * **every** TMDB item -- 743 dead artwork jobs on the first real
+ * deployment -- and no test caught it, because every fixture in this file
+ * used a bare id that had been invented rather than observed.
+ * That is why the tests beside this function now use references copied
+ * from real `/api/v1/lookup` answers.
+ *
+ * The id is the third segment. Trailing ordinals are deliberately
+ * discarded rather than used, because the endpoints they would address
+ * cannot fill this seam's three slots. Asked of the live API for
+ * `tv/1399`:
+ *
+ * - `/3/tv/1399/images` -> `posters`, `backdrops`, `logos`
+ * - `/3/tv/1399/season/1/images` -> `posters` only
+ * - `/3/tv/1399/season/1/episode/1/images` -> `stills` only
+ *
+ * So a season has no backdrop or logo to give and an episode has neither
+ * plus no poster. {@link mediaTarget} sends both kinds to their series
+ * instead, which is also the picture a media library shows for an episode.
+ *
+ * Answers `undefined` for anything that is not `<something>:<something>:<digits>`,
+ * so an unrecognised shape asks nothing instead of building a url that
+ * cannot work. A future provider-ref format change therefore degrades to
+ * "no artwork" rather than to a storm of 404s.
+ */
+export function tmdbId(providerRef: string): string | undefined {
+  // No length guard: under `noUncheckedIndexedAccess` a missing third segment
+  // reads as `undefined`, which the same check that rejects a non-numeric one
+  // already refuses. A guard was written here first and removed -- no mutation
+  // of it could redden a test, because nothing reached it.
+  const id = providerRef.split(':')[2];
+  return id !== undefined && DIGITS.test(id) ? id : undefined;
+}
+
+/** A TMDB id is decimal digits and nothing else -- never `' 12'`, `'0x1'` or `''`. */
+const DIGITS = /^[0-9]+$/;
+
 /** Which TMDB images endpoint to ask, and with which id. */
 interface MediaTarget {
   readonly path: string;
@@ -110,11 +161,24 @@ function mediaTarget(
   providerRef: string,
   parents: readonly ArtworkParent[],
 ): MediaTarget | undefined {
+  // The id is parsed out of each candidate, not off the first one that
+  // matches a kind: a reference this build cannot read is no more usable
+  // than a kind it cannot address, so an unreadable candidate is skipped
+  // rather than returned as a target that would 404.
+  //
+  // For an episode that skipping buys nothing today and is not claimed to:
+  // its parents are `[season, series]`, only `series` is in the map, so an
+  // unreadable series reference does cost the episode its poster. What the
+  // per-candidate parse actually buys is that the failure is "no artwork"
+  // instead of a request built from a string that cannot be an id.
   const own = MEDIA_KIND_PATH[kind];
-  if (own !== undefined) return { path: own, ref: providerRef };
+  const ownId = own === undefined ? undefined : tmdbId(providerRef);
+  if (own !== undefined && ownId !== undefined) return { path: own, ref: ownId };
   for (const parent of parents) {
     const path = MEDIA_KIND_PATH[parent.kind];
-    if (path !== undefined) return { path, ref: parent.providerRef };
+    if (path === undefined) continue;
+    const id = tmdbId(parent.providerRef);
+    if (id !== undefined) return { path, ref: id };
   }
   return undefined;
 }
@@ -260,10 +324,16 @@ export function createTmdbSource(deps: { fetch: HostFetch; resolveSecret: Secret
   }
 
   async function personImages(providerRef: string, key: string): Promise<readonly ProviderImage[]> {
+    // The same composite shape the media reference has -- a person is
+    // `tmdb:person:41087`, not `41087` (see {@link tmdbId}). An
+    // unreadable reference asks nothing rather than 404ing a url built
+    // from it.
+    const id = tmdbId(providerRef);
+    if (id === undefined) return [];
     const [config, body] = await Promise.all([
       fetchConfiguration(key),
       deps.fetch.json<TmdbPersonImagesResponse>(
-        `${API_BASE}/person/${encodeURIComponent(providerRef)}/images`,
+        `${API_BASE}/person/${encodeURIComponent(id)}/images`,
         authorized(key),
       ),
     ]);

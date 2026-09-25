@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { HostFetch } from '@pickarr/contract';
 import type { SecretResolver } from '../../src/types.ts';
-import { createTmdbSource } from '../../src/artwork/tmdb.ts';
+import { createTmdbSource, tmdbId } from '../../src/artwork/tmdb.ts';
 
 /**
  * TMDB's own image object shape, as read live from `/3/movie/{id}/images`
@@ -77,7 +77,7 @@ test('a movie’s images become posters, backgrounds and logos', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '603', [], []);
+  const answer = await source.imagesFor('movie', 'tmdb:movie:603', [], []);
 
   // The rename: the provider's `backdrops` becomes this codebase's
   // `background` here, and nowhere else -- the table, the writer and the
@@ -106,7 +106,7 @@ test('a television kind asks the television endpoint', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('series', '1399', [], []);
+  const answer = await source.imagesFor('series', 'tmdb:tv:1399', [], []);
 
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/got.jpg');
   // Pinned because asking `/3/movie/{id}` for a series id answers a
@@ -127,7 +127,7 @@ test('a kind TMDB has no images endpoint for, and no usable ancestor, asks nothi
   // An ancestor is offered, and it is one this provider cannot address
   // either -- so the fallback finds nothing and the answer is still "ask
   // nothing", not "ask about the first parent in the list".
-  const answer = await source.imagesFor('season', 'whatever', [], [{ kind: 'book', providerRef: 'p-1' }]);
+  const answer = await source.imagesFor('season', 'tmdb:tv:1399:1', [], [{ kind: 'book', providerRef: 'tmdb:book:7' }]);
 
   assert.equal(calls.length, 0);
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
@@ -151,9 +151,9 @@ test('an episode is answered with its series\u2019 images', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('episode', 'ep-77', [], [
-    { kind: 'season', providerRef: 'se-9' },
-    { kind: 'series', providerRef: '1399' },
+  const answer = await source.imagesFor('episode', 'tmdb:tv:1399:1:1', [], [
+    { kind: 'season', providerRef: 'tmdb:tv:1399:1' },
+    { kind: 'series', providerRef: 'tmdb:tv:1399' },
   ]);
 
   // Spelled literally rather than built from the fixture: the url proves
@@ -178,7 +178,7 @@ test('a season is answered with its series\u2019 images', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('season', 'se-9', [], [{ kind: 'series', providerRef: '1399' }]);
+  const answer = await source.imagesFor('season', 'tmdb:tv:1399:1', [], [{ kind: 'series', providerRef: 'tmdb:tv:1399' }]);
 
   assert.deepEqual(answer.media.backgrounds, [
     { url: 'https://image.tmdb.org/t/p/w1280/backdrop.jpg', language: null, score: 5.1 },
@@ -201,7 +201,7 @@ test('an item that has an endpoint of its own ignores its ancestors', async () =
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('series', '1399', [], [{ kind: 'series', providerRef: '9999' }]);
+  const answer = await source.imagesFor('series', 'tmdb:tv:1399', [], [{ kind: 'series', providerRef: 'tmdb:tv:9999' }]);
 
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/own.jpg');
 });
@@ -222,11 +222,11 @@ test('a kind with no media endpoint still answers its people', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('season', 'whatever', ['500'], []);
+  const answer = await source.imagesFor('season', 'tmdb:tv:1399:1', ['tmdb:person:500'], []);
 
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
   assert.ok(!calls.some((call) => /\/3\/[a-z]+\/whatever\/images$/.test(call.url)), 'no media images call for an unmapped kind');
-  assert.deepEqual(answer.people.get('500'), [
+  assert.deepEqual(answer.people.get('tmdb:person:500'), [
     { url: 'https://image.tmdb.org/t/p/w185/face.jpg', language: null, score: 4.2 },
   ]);
 });
@@ -246,7 +246,7 @@ test('the image url is secure_base_url + size + file_path', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '1', [], []);
+  const answer = await source.imagesFor('movie', 'tmdb:movie:1', [], []);
 
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/abc.jpg');
 });
@@ -261,8 +261,8 @@ test('configuration is fetched once and reused across calls', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  await source.imagesFor('movie', '1', [], []);
-  await source.imagesFor('movie', '2', [], []);
+  await source.imagesFor('movie', 'tmdb:movie:1', [], []);
+  await source.imagesFor('movie', 'tmdb:movie:2', [], []);
 
   const configCalls = calls.filter((call) => call.url === CONFIGURATION_URL);
   assert.equal(configCalls.length, 1);
@@ -291,12 +291,12 @@ test('a failed configuration fetch is not cached: the next call retries and succ
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
   await assert.rejects(
-    () => source.imagesFor('movie', '1', [], []),
+    () => source.imagesFor('movie', 'tmdb:movie:1', [], []),
     /briefly unavailable/,
     'the first call surfaces the configuration failure',
   );
 
-  const answer = await source.imagesFor('movie', '1', [], []);
+  const answer = await source.imagesFor('movie', 'tmdb:movie:1', [], []);
 
   assert.equal(configurationCalls, 2, 'the second call must re-ask for configuration, not replay the rejection');
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/p.jpg');
@@ -310,7 +310,7 @@ test('the api key travels as a bearer header, never in the url', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver(token) });
 
-  await source.imagesFor('movie', '1', [], []);
+  await source.imagesFor('movie', 'tmdb:movie:1', [], []);
 
   assert.ok(calls.length > 0);
   for (const call of calls) {
@@ -337,22 +337,22 @@ test('a person’s profiles become images', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '1', ['500', '501'], []);
+  const answer = await source.imagesFor('movie', 'tmdb:movie:1', ['tmdb:person:500', 'tmdb:person:501'], []);
 
-  assert.deepEqual(answer.people.get('500'), [
+  assert.deepEqual(answer.people.get('tmdb:person:500'), [
     { url: 'https://image.tmdb.org/t/p/w185/face.jpg', language: null, score: 4.2 },
   ]);
   // A person TMDB has nothing for is an omitted key, not an empty array --
   // the same "nothing this provider has is ordinary" rule `bestImage` and
   // the seam's own docblock describe for media images.
-  assert.ok(!answer.people.has('501'));
+  assert.ok(!answer.people.has('tmdb:person:501'));
 });
 
 test('no key configured answers no images rather than throwing', async () => {
   const { fetch, calls } = fakeFetch({});
   const source = createTmdbSource({ fetch, resolveSecret: missingSecretResolver() });
 
-  const answer = await source.imagesFor('movie', '1', ['500'], []);
+  const answer = await source.imagesFor('movie', 'tmdb:movie:1', ['tmdb:person:500'], []);
 
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
   assert.equal(answer.people.size, 0);
@@ -377,5 +377,42 @@ test('a secret-resolution failure that is not "no key configured" still propagat
   };
   const source = createTmdbSource({ fetch, resolveSecret });
 
-  await assert.rejects(() => source.imagesFor('movie', '1', [], []), /could not be read/);
+  await assert.rejects(() => source.imagesFor('movie', 'tmdb:movie:1', [], []), /could not be read/);
+});
+
+test('a provider reference is the composite openmetadata really sends, not a bare id', () => {
+  // **The defect this whole file missed, and why.** Every fixture above
+  // used a bare id that had been invented rather than observed, so the
+  // first build passed the full reference into the path -- every request
+  // went to `/3/tv/tmdb%3Atv%3A1399/images` and answered 404, for every
+  // TMDB item, 743 dead artwork jobs on the first real deployment. Ten
+  // reviews and four mutation rounds all ran against fixtures of the wrong
+  // shape, which no amount of mutating the code can see through.
+  //
+  // These five were read off live `/api/v1/lookup` answers -- one `movies`
+  // and one `tv` query against openmetadata.nexus -- and pasted here
+  // unaltered. An earlier revision of this test claimed the same
+  // provenance for five refs that had in fact been invented; that is the
+  // very defect above, so the claim is only worth making about values
+  // someone actually went and fetched.
+  assert.equal(tmdbId('tmdb:movie:335984'), '335984', 'a film');
+  assert.equal(tmdbId('tmdb:tv:1399'), '1399', 'a series');
+  assert.equal(tmdbId('tmdb:tv:1399:1'), '1399', 'a season -- the series id, trailing ordinal dropped');
+  assert.equal(tmdbId('tmdb:tv:1399:1:1'), '1399', 'an episode -- likewise');
+  assert.equal(tmdbId('tmdb:person:30614'), '30614', 'a person');
+});
+
+test('a reference this build cannot read asks nothing, rather than building a url that 404s', () => {
+  // Degrading to "no artwork" is the point: a provider-reference format
+  // change should cost a poster, not fill the job table with dead rows.
+  // A bare id is in this list deliberately -- it is what the first build
+  // assumed it would get, and it must now be refused rather than pasted
+  // into a path.
+  assert.equal(tmdbId('437557'), undefined, 'a bare id is not a reference');
+  assert.equal(tmdbId('tmdb:movie'), undefined, 'no id segment');
+  assert.equal(tmdbId('tmdb:movie:'), undefined, 'empty id segment');
+  assert.equal(tmdbId('tmdb:movie:abc'), undefined, 'a non-numeric id');
+  assert.equal(tmdbId('tmdb:movie: 12'), undefined, 'a space is not a digit');
+  assert.equal(tmdbId('tmdb:movie:0x7'), undefined, 'nor is hex');
+  assert.equal(tmdbId(''), undefined, 'nor is nothing');
 });
