@@ -21,9 +21,19 @@ import { redactUrl } from '../clients/redact.ts';
  * and so are `host_migrations` (schema bookkeeping), `sync_log` (this
  * mechanism's own log) and `sqlite_sequence` (SQLite's, and present only
  * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
- * describe files already reachable at `/api/artwork/:kind/:mediaItemId`, so a
- * client asks for the image and handles a 404 rather than replicating rows
- * about files it cannot read. `alias` and `external_reference` have no
+ * describe files already reachable at `/api/artwork/:kind/:mediaItemId`,
+ * and `person_image` files reachable at `/api/artwork/person/:personId` --
+ * the same route and the same handler, a different `:kind`, over a
+ * different id space. `api/artwork-route.ts`'s own docblock is where that
+ * decision is written down: `person` is "one more entry" in
+ * `ArtworkKind`/`ARTWORK_QUERY`, not a parallel handler, and the id in
+ * that second segment is a person id for it and a media item id for the
+ * other three. Spelled out here because a sentence that named only
+ * `:mediaItemId` for all four conflated two id spaces this branch is
+ * otherwise careful to keep apart. Either way a client asks for the image
+ * and handles a 404 rather than replicating rows about files it cannot
+ * read.
+ * `alias` and `external_reference` have no
  * consumer. `deleted_media_item` is slice E's
  * tombstone table: the log's delete ops supersede it, and it stays because
  * `/api/deletions` still serves it.

@@ -166,6 +166,7 @@ const fakeCtx: PluginContext = {
     attachPoster: async () => { throw new Error('media.attachPoster: not used by this test'); },
     attachBackground: async () => { throw new Error('media.attachBackground: not used by this test'); },
     attachLogo: async () => { throw new Error('media.attachLogo: not used by this test'); },
+    attachPersonImage: async () => { throw new Error('media.attachPersonImage: not used by this test'); },
     upsertPerson: async () => { throw new Error('media.upsertPerson: not used by this test'); },
     attachRole: async () => { throw new Error('media.attachRole: not used by this test'); },
     setResolution: async () => { throw new Error('media.setResolution: not used by this test'); },

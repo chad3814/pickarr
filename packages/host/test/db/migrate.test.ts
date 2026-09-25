@@ -1816,3 +1816,23 @@ test('migration 22 adds lookup_json without rebuilding rss_item, so its sync tri
     'all three sync triggers are still attached');
   raw.close();
 });
+
+test('migration 23 adds person_image, and does not replicate it', () => {
+  // Artwork is not synced -- `web/src/store/gather.ts` fetches it by url
+  // and holds no artwork rows (#79). Installing triggers here would push
+  // every image row into `sync_log` and into every browser's replica, for
+  // data no client reads. Asserted as the absence of triggers, because
+  // adding them is the habit this table has to resist.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+
+  const columns = raw.prepare("SELECT name FROM pragma_table_info('person_image')").all()
+    .map((row) => String((row as { name: unknown }).name));
+  assert.deepEqual(columns.sort(), ['created_at', 'height', 'id', 'language', 'path', 'person_id', 'title', 'url', 'width']);
+
+  const triggers = raw.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'person_image'",
+  ).all();
+  assert.deepEqual(triggers, [], 'artwork is not replicated, so this table has no sync triggers');
+  raw.close();
+});

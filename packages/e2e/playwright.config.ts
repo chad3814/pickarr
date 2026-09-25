@@ -23,6 +23,26 @@ export default defineConfig({
   // Retries stay at zero: a retry that turns red into green hides a flake
   // instead of reporting it, and this suite was measured stable across 104
   // executions including deliberate CPU contention.
+  //
+  // **One flake has been observed since that measurement**, in the artwork
+  // slice's task 6 -- recorded here rather than left in a task report,
+  // because the sentence above is this setting's whole justification and on
+  // its own it now reads as a stronger claim than the evidence supports.
+  // `the Load more button still loads a page without any scrolling` died at
+  // the 90s whole-test timeout inside a single `locator.click`, retrying:
+  // `<html ...> intercepts pointer events`, then `element was detached from
+  // the DOM, retrying`. That is the paging list re-rendering under
+  // replication and detaching the button out from under each retry -- not a
+  // timeout-budget miss, which is the other way a spec here reaches 90s and
+  // which `scripts/check-e2e-timeout-budget.test.ts` already guards.
+  //
+  // Once in roughly seven consecutive full-suite runs on one laptop, and it
+  // did not recur in the six either side of it (five with that slice's new
+  // spec present, one with it reverted), so the rate is known only to be
+  // nonzero. Deliberately not "fixed" by raising this number: the failure is
+  // a real race in that spec, and a retry would convert it into silence.
+  // Whoever changes `retries` next should be choosing against this, not
+  // against 104 clean runs alone.
   retries: 0,
   // **Playwright's default whole-test timeout is 30s, which was less than
   // some specs in this suite declare for their own steps.** Three of them

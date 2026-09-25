@@ -1306,6 +1306,41 @@ ALTER TABLE rss_item ADD COLUMN lookup_json TEXT;
 `;
 
 /**
+ * `person_image`: a cached picture of a person, the same shape the three
+ * media-item artwork tables (`poster`, `background`, `logo`) have, keyed on
+ * `person_id` instead of `media_item_id` because a person is not a media
+ * item -- the two id spaces are separate tables' `INTEGER PRIMARY KEY`s and
+ * can (and eventually will) name the same integer for unrelated rows.
+ *
+ * **No `installSyncTriggers` and no `seedSyncLog`, unlike every table added
+ * since migration 15.** Artwork is not replicated: a client fetches it by
+ * url through `/api/artwork/...` and holds no artwork row of any kind --
+ * `web/src/store/gather.ts`, and issue #79 records the decision. Triggers
+ * here would copy every image row into `sync_log` and from there into every
+ * browser's replica, for bytes no client reads through sync at all. The
+ * three existing artwork tables already sit outside `HOST_SYNCED_TABLES`
+ * for the same reason; this one joins them rather than the replicated
+ * tables that happened to land nearby in migration order.
+ *
+ * `UNIQUE (person_id, url)` for the reason `poster_media_item_url` gives:
+ * one image is one row however many times a handler re-runs.
+ */
+const MIGRATION_23 = `
+CREATE TABLE person_image (
+  id         INTEGER PRIMARY KEY,
+  person_id  INTEGER NOT NULL REFERENCES person (id),
+  title      TEXT,
+  language   TEXT,
+  url        TEXT    NOT NULL,
+  width      INTEGER NOT NULL,
+  height     INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  path       TEXT
+);
+CREATE UNIQUE INDEX person_image_person_url ON person_image (person_id, url);
+`;
+
+/**
  * The DDL above, then the one call replication needs.
  *
  * **`installSyncTriggers` and no `seedSyncLog`**, where migrations 16, 17 and
@@ -1351,6 +1386,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 20, up: (db) => migration20(db) },
   { version: 21, up: (db) => db.exec(MIGRATION_21) },
   { version: 22, up: (db) => db.exec(MIGRATION_22) },
+  { version: 23, up: (db) => db.exec(MIGRATION_23) },
 ];
 
 /**

@@ -57,10 +57,19 @@
  *   `MediaItemCard.tsx`'s own doc argues from, and until that spec existed
  *   nothing could see it.
  *
- * That spec is also the only one in the suite whose poster loads at all.
- * Every other card's artwork 404s and `MediaItemCard`'s `onError` removes
- * the `<img>` from the DOM for good, so there is nothing left there to
- * measure -- which is why the poster went unpinned for as long as it did.
+ * **Two specs in that file now load a real poster, and this paragraph used
+ * to say one.** A card whose artwork 404s loses its `<img>` outright --
+ * `MediaItemCard`'s `onError` removes it from the DOM for good -- so for a
+ * long while there was nothing anywhere in the suite to read this rule off,
+ * which is why the poster went unpinned as long as it did. The spec above
+ * was the first to seed real bytes; `a cached poster is decoded in the
+ * browser, and an item with none ends up with no <img> at all` is the
+ * second, and the two measure different things. This rule's numbers are
+ * the *frame*, and the frame computes the same for an `<img>` whose request
+ * is still in flight, so the spec above pins the rule and not the load.
+ * The second spec pins the load, on `naturalWidth`, and deliberately seeds
+ * a second card with no `poster` row so the 404 case is observed in the
+ * same run rather than described here.
  *
  * `<p>` appeared exactly three times when the first version of this
  * paragraph was written -- `Category`'s and `Unmatched`'s empty-list

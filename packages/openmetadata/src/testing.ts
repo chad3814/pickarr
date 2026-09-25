@@ -285,6 +285,7 @@ export function createRecordingMedia(): RecordingMedia {
     async attachPoster(mediaItemId, poster): Promise<void> { record('attachPoster', mediaItemId, poster.url); },
     async attachBackground(mediaItemId, background): Promise<void> { record('attachBackground', mediaItemId, background.url); },
     async attachLogo(mediaItemId, logo): Promise<void> { record('attachLogo', mediaItemId, logo.url); },
+    async attachPersonImage(personId, image): Promise<void> { record('attachPersonImage', personId, image.url); },
     async upsertPerson(person): Promise<number> {
       record('upsertPerson', person);
       const existing = people.get(person.providerRef);

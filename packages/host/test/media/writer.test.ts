@@ -14,6 +14,7 @@ import { gifBytes } from '../support/gif.ts';
 /** An `ArtworkStore` that fails loudly if a test that attaches no artwork somehow reaches it. */
 const unusedArtwork: ArtworkStore = {
   put: async () => { throw new Error('artwork.put: not used by this test'); },
+  putPerson: async () => { throw new Error('artwork.putPerson: not used by this test'); },
   remove: async () => { throw new Error('artwork.remove: not used by this test'); },
 };
 
@@ -570,6 +571,78 @@ test('attaching a logo stores a row, which slice A had no way to do', async () =
     assert.equal(row.width, 512);
     assert.equal(row.height, 128);
     assert.equal(typeof row.path, 'string');
+  });
+});
+
+test('attaching a person\'s picture stores the row with the measured width and height', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
+
+    await writer.attachPersonImage(personId, {
+      title: null, language: null, url: 'https://images.test/headshot.gif', bytes: gifBytes(300, 450),
+    });
+
+    const row = raw.prepare('SELECT url, width, height, path FROM person_image WHERE person_id = ?')
+      .get(personId) as { url: unknown; width: unknown; height: unknown; path: unknown };
+    assert.ok(row, 'attachPersonImage must write a row to person_image, not to any media-item artwork table');
+    assert.equal(row.url, 'https://images.test/headshot.gif');
+    assert.equal(row.width, 300);
+    assert.equal(row.height, 450);
+    assert.equal(typeof row.path, 'string');
+  });
+});
+
+test('attaching a person\'s picture twice leaves one row and one file', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
+    const url = 'https://images.test/headshot.gif';
+
+    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    // Crash recovery re-runs a handler that already ran once, the same
+    // reason `attachPoster` has to be idempotent.
+    await writer.attachPersonImage(personId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450) });
+
+    const rows = raw.prepare('SELECT title FROM person_image WHERE person_id = ?')
+      .all(personId) as { title: unknown }[];
+    assert.equal(rows.length, 1, 'a re-attach of the same url must be the same row, not a second one');
+    assert.equal(rows[0]?.title, 'front', 'the second attach must correct the row, not be discarded');
+
+    const files = await readdir(dir);
+    assert.equal(files.length, 1, 'a re-attach of the same url must be the same cached file, not a second one');
+  });
+});
+
+test('a person and a media item that share an id and a url get two files, not one', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    // `person.id` and `media_item.id` are two different tables' primary
+    // keys, so the first row each table ever gets is id 1 in both -- exactly
+    // the coincidence `ArtworkStore.putPerson`'s docblock describes. Sharing
+    // the url too is what actually exercises the collision `put` alone
+    // would have: the same `(id, url)` pair, if `putPerson` reused `put`'s
+    // hash namespace, would resolve to the very same path.
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+    const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
+    assert.equal(personId, mediaItemId, 'the fixture only proves the point if the two ids coincide');
+
+    const url = 'https://images.test/shared.gif';
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+
+    const posterPath = (raw.prepare('SELECT path FROM poster WHERE media_item_id = ?').get(mediaItemId) as { path: unknown }).path;
+    const personPath = (raw.prepare('SELECT path FROM person_image WHERE person_id = ?').get(personId) as { path: unknown }).path;
+    assert.notEqual(posterPath, personPath, 'a shared id and url must not resolve to the same cached file');
+
+    const files = await readdir(dir);
+    assert.equal(files.length, 2, 'a shared id and url must produce two files, not one overwriting the other');
   });
 });
 

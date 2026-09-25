@@ -217,6 +217,19 @@ plugins look up metadata through that service, and without a key each one dead-l
 every lookup job. The host checks the chain at boot and warns rather than refusing,
 because a host serving reads with one plugin misconfigured is the right behaviour.
 
+Two more are optional, and each buys artwork from the provider that identified a
+release — posters, backgrounds and cast pictures on the browse cards. The lookup
+service holds no images, so these go straight to the provider it named:
+
+| Secret | Environment variable | What it buys |
+|---|---|---|
+| `tmdb-read-access-token` | `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN` | artwork for film and television |
+| `tpdb-api-key` | `PICKARR_SECRET_TPDB_API_KEY` | artwork for adult releases |
+
+Leaving one unset is not an error and nothing dead-letters: the artwork job logs once
+per provider that its credential is not configured, and the cards for that provider
+carry no image. A release stays identified either way.
+
 One failure is worth knowing in advance: a missing variable and a missing file both fall
 through to the next source, but a secrets *directory* that exists and cannot be read
 **halts** the chain, so no database-stored credential resolves at all. In Docker

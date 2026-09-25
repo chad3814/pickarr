@@ -42,3 +42,13 @@ export {
 } from './engine.ts';
 export type { Expectation, Selection, SelectionRefusal, SelectionRefusalCode } from './select.ts';
 export { episodeMarker, isCandidate, select } from './select.ts';
+export type {
+  ArtworkAnswer,
+  ArtworkSource,
+  ArtworkSourceDeps,
+  MediaImages,
+  ProviderImage,
+} from './artwork/source.ts';
+export { bestImage, createArtworkSources } from './artwork/source.ts';
+export type { ArtworkJobDeps, ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
+export { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';

@@ -524,9 +524,13 @@ const TV_HEADLINE = "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)";
  *    `<article>` stayed in `packages/web/src` when the card body left
  *    (`MediaItemCard.tsx`'s own doc, task 6's report §2). Nothing pinned
  *    that, so the decision could have been reversed without a red test.
- *    This is the suite's only spec whose poster actually loads -- every
- *    other one 404s its artwork, and `MediaItemCard`'s `onError` then takes
- *    the `<img>` out of the DOM for good, leaving nothing to measure.
+ *    Its poster has to load for that to be measurable at all -- a 404
+ *    latches `MediaItemCard`'s `onError`, which takes the `<img>` out of
+ *    the DOM for good and leaves nothing to read a rule off. That the
+ *    bytes really arrive is not asserted here, though: every declaration
+ *    above comes from the stylesheet and holds for an `<img>` still in
+ *    flight. The spec below this one pins the load itself, on
+ *    `naturalWidth`.
  */
 /**
  * The three colours the adult card's site label is judged on, all read in
@@ -709,6 +713,112 @@ test('a TV card reads its series and episode before anyone expands it, under a c
   const posterBox = await boxOf(poster, 'the poster');
   const headlineBox = await boxOf(headline, 'the card headline');
   expect(headlineBox.y).toBeGreaterThanOrEqual(posterBox.y + posterBox.height);
+});
+
+/*
+ * The second item the poster spec below seeds: a television release with
+ * no `poster` row at all. Spelled as literals for the reason `TV_SERIES`
+ * and friends are, above -- `plugin-tv`'s `tvHeadline` decides the
+ * separator, the order and the padding, so anything composed from these
+ * would move with it.
+ *
+ * Neither string shares a word with `TV_ITEM_TITLE` or `TV_SERIES`, which
+ * matters because `getByRole(role, { name })` matches a **substring** by
+ * default (`CLAUDE.md`): two fixtures with a word in common would let the
+ * spec's `img` locator resolve to the wrong card's poster and still pass.
+ */
+const BARE_SERIES = 'The Bare Broadcast';
+const BARE_ITEM_TITLE = 'No Art Tonight';
+
+/*
+ * **The end-to-end proof that a cached poster reaches the screen.** A
+ * `poster` row, the bytes its `path` names, `GET
+ * /api/artwork/poster/:mediaItemId`, and Chromium decoding the response --
+ * four links, and no smaller test can hold more than one of them at a
+ * time. Nothing exercised the whole chain before this slice: the `<img>`
+ * in every browse card 404'd from the day it was written.
+ *
+ * **Why the spec above is not already this proof.** It reads `width`,
+ * `aspect-ratio` and `object-fit` off the poster, and `library.css`
+ * supplies all three whether or not a byte ever arrived -- an `<img>`
+ * whose request is still in flight computes them identically. Its only
+ * load-sensitive property is that the element is still in the DOM, and
+ * `MediaItemCard`'s `onError` is asynchronous, so those assertions can
+ * resolve before a 404 has come back. `naturalWidth` cannot: it is `0`
+ * until the browser has both fetched and decoded the response, so pinning
+ * it to `1` -- `harness-2.ts`'s `POSTER_PNG` is 1x1 -- is a statement
+ * about bytes on disk rather than about a rule in a stylesheet.
+ *
+ * **The second card is the control, and it is what stops the first
+ * assertion being a tautology.** `MediaItemCard` renders the `<img>`
+ * unconditionally on first paint and removes it only once `onError`
+ * fires, so "an `<img>` is present" is true of a broken route too, for a
+ * while. Seeding one item with artwork and one without puts both outcomes
+ * on the same page in the same run: one image survives, one does not, and
+ * the disappearance is observed here rather than quoted from a docblock.
+ *
+ * **`GET /api/artwork/person/:personId` deliberately has no spec here.**
+ * It is the fourth `ArtworkKind` and it is reachable, but no screen in
+ * this build renders a person, so there is no card for a browser to
+ * assert against -- and a Playwright test that only issued a bare
+ * `page.request.get` would be a slower copy of `a person's picture is
+ * served over /api/artwork/person/:personId` in
+ * `packages/host/test/api/server.test.ts`, which already drives the real
+ * `createReadServer` over a real socket with a real session cookie.
+ * Mutating `ARTWORK_QUERY.person` reds that test and the two in
+ * `packages/host/test/api/artwork-route.test.ts`; see this task's report
+ * for the observed output. A browser spec belongs here the day a person
+ * appears on a screen, and not before.
+ */
+test('a cached poster is decoded in the browser, and an item with none ends up with no <img> at all', async ({ page, harness }) => {
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  // Both seeds back to back with no `await` between them, so the host's
+  // `/api/sync` handler cannot run in the middle and the whole fixture --
+  // two media items, two releases, one `poster` row -- reaches the replica
+  // in one batch. `Harness.seedTvRelease`'s own doc has why the poster row
+  // in particular may not arrive late.
+  harness.seedTvRelease({
+    title: TV_ITEM_TITLE,
+    seriesTitle: TV_SERIES,
+    seasonNumber: 2,
+    episodeNumber: 47,
+    withPoster: true,
+  });
+  harness.seedTvRelease({
+    title: BARE_ITEM_TITLE,
+    seriesTitle: BARE_SERIES,
+    seasonNumber: 1,
+    episodeNumber: 1,
+    withPoster: false,
+  });
+
+  // Both cards on screen first, so the count assertion at the end is
+  // reading a settled page rather than a half-rendered list. Cards render
+  // in one commit, `<img>` included, so after this the browser has asked
+  // for two posters and the only thing left to happen is that one of them
+  // fails.
+  await expect(page.getByRole('article')).toHaveCount(2, { timeout: 15_000 });
+
+  // The whole path, in one number. `naturalWidth` is the decoded image's
+  // intrinsic width, so `1` requires the `poster` row to be found, its
+  // `path` to stat and read, the route to answer 200 with bytes, and
+  // Chromium to decode them. `exact: true` because the alt text is the
+  // item's own title and a substring match over two seeded cards is the
+  // hazard `BARE_ITEM_TITLE` above is chosen against.
+  const poster = page.getByRole('img', { name: TV_ITEM_TITLE, exact: true });
+  await expect(poster, 'the seeded poster decoded to its real 1x1').toHaveJSProperty('naturalWidth', 1, { timeout: 15_000 });
+  await expect(poster, 'and both intrinsic dimensions came from the file, not the frame').toHaveJSProperty('naturalHeight', 1);
+
+  // The control. Two cards, two `<img>` elements painted, one 404 -- and
+  // `onError` takes that one out for good. One image left is what proves
+  // the assertion above is about loading and not about presence.
+  await expect(
+    page.locator('article img'),
+    'the item with no poster row loses its image, so only the seeded one is left',
+  ).toHaveCount(1, { timeout: 15_000 });
 });
 
 test('the empty state reads as an aside, not as content waiting to be filled in', async ({ page, harness }) => {
