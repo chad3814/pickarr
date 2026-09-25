@@ -223,7 +223,7 @@ plugins look up metadata through that service, and without a key each one dead-l
 every lookup job. The host checks the chain at boot and warns rather than refusing,
 because a host serving reads with one plugin misconfigured is the right behaviour.
 
-Two more are optional, and each buys artwork from the provider that identified a
+Three more are optional, and each buys artwork from the provider that identified a
 release — posters, backgrounds and cast pictures on the browse cards. The lookup
 service holds no images, so these go straight to the provider it named:
 
@@ -231,6 +231,12 @@ service holds no images, so these go straight to the provider it named:
 |---|---|---|
 | `tmdb-read-access-token` | `PICKARR_SECRET_TMDB_READ_ACCESS_TOKEN` | artwork for film and television |
 | `tpdb-api-key` | `PICKARR_SECRET_TPDB_API_KEY` | artwork for adult releases |
+| `tvdb-api-key` | `PICKARR_SECRET_TVDB_API_KEY` | artwork for the television the lookup service identifies from TheTVDB rather than TMDB |
+
+Which of the two television providers answers is the lookup service's choice, not a
+setting here, and it is not all-or-nothing: a library can have both. Setting only
+`tmdb-read-access-token` is the common case and leaves a small tail of shows without
+artwork.
 
 Leaving one unset is not an error and nothing dead-letters: the artwork job logs once
 per provider that its credential is not configured, and the cards for that provider

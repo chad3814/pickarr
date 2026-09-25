@@ -24,6 +24,7 @@ services:
       # job says so once. See README's Secrets section.
       - tmdb-read-access-token
       - tpdb-api-key
+      - tvdb-api-key
     restart: unless-stopped
 
 secrets:
@@ -33,3 +34,5 @@ secrets:
     file: ./secrets/tmdb-read-access-token
   tpdb-api-key:
     file: ./secrets/tpdb-api-key
+  tvdb-api-key:
+    file: ./secrets/tvdb-api-key
