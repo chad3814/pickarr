@@ -315,6 +315,7 @@ test('a resolved lookup enqueues one artwork job for the item it resolved', asyn
       { personId: 1, providerRef: 'tmdb:person:1' },
       { personId: 2, providerRef: 'tmdb:person:2' },
     ],
+    parents: [],
   });
 });
 
@@ -343,6 +344,51 @@ test('the artwork job names the media item that kept the claim, not the one that
     people: [
       { personId: 1, providerRef: 'tmdb:person:1' },
       { personId: 2, providerRef: 'tmdb:person:2' },
+    ],
+    parents: [],
+  });
+});
+
+test('the artwork payload carries the ancestors, nearest first and this provider\u2019s only', async () => {
+  // Without the ancestors nothing downstream can answer an episode: TMDB
+  // has no images endpoint addressable by an episode's own ref, so the
+  // source falls back to the nearest ancestor it can address -- and it can
+  // only do that if this enqueue hands them over.
+  const { harness, deps, rssItemId } = fixture();
+  const media: Media = {
+    ...movieMedia(),
+    kind: 'episode',
+    providerRef: 'tmdb:episode:9',
+    parents: [
+      { id: 's', kind: 'season', title: 'Season 1', releaseDate: null, year: null, provider: 'tmdb', providerRef: 'tmdb:season:1' },
+      { id: 'r', kind: 'series', title: 'A Show', releaseDate: null, year: null, provider: 'tmdb', providerRef: 'tmdb:series:1' },
+      // Another provider's ref means nothing to the source being asked,
+      // which is the one `media.provider` names.
+      { id: 'x', kind: 'series', title: 'Elsewhere', releaseDate: null, year: null, provider: 'tvdb', providerRef: 'tvdb:series:1' },
+    ],
+  };
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-14', media }),
+    { rssItemId, filename: 'show.s01e01.mkv', polls: 0 },
+    deps,
+  );
+
+  const artwork = harness.enqueued.filter((job) => job.kind === ARTWORK_JOB);
+  assert.deepEqual(artwork[0]?.payload, {
+    mediaItemId: 1,
+    kind: 'episode',
+    provider: 'tmdb',
+    providerRef: 'tmdb:episode:9',
+    people: [
+      { personId: 1, providerRef: 'tmdb:person:1' },
+      { personId: 2, providerRef: 'tmdb:person:2' },
+    ],
+    // Nearest first, the order the service gave: it is what decides which
+    // ancestor a source falls back to. The `tvdb` entry is gone.
+    parents: [
+      { kind: 'season', providerRef: 'tmdb:season:1' },
+      { kind: 'series', providerRef: 'tmdb:series:1' },
     ],
   });
 });

@@ -57,6 +57,39 @@ export interface MediaImages {
 export interface ArtworkAnswer {
   readonly media: MediaImages;
   readonly people: ReadonlyMap<string, readonly ProviderImage[]>;
+  /**
+   * Present, and `true`, only when this source answered nothing *because
+   * nobody configured its credential* -- never for a provider that simply
+   * has no pictures for this item.
+   *
+   * The distinction exists because it is the one the operator needs and the
+   * only one the images themselves cannot carry: an empty answer looks
+   * identical either way, and the design this implements requires a host
+   * with no key to "log once and fetch no artwork for it". `./job.ts` is
+   * what logs it, once per provider, because the sources have no logger --
+   * they are handed a `HostFetch` and a `SecretResolver` and nothing else
+   * (`ArtworkSourceDeps`).
+   *
+   * Optional rather than a required `boolean` so the ordinary answer stays
+   * the two fields above; with `exactOptionalPropertyTypes` on, the only
+   * values this can hold are `true` and absent.
+   */
+  readonly noCredential?: true;
+}
+
+/**
+ * One ancestor of the media item being asked about, in the provider's own
+ * vocabulary: openmetadata's `MediaParent` narrowed to the two fields a
+ * source can act on.
+ *
+ * Nearest first, the order openmetadata publishes (`types.ts`'s `Media.
+ * parents`: "an episode's are its season, then its series"), and a source
+ * that walks this list to find a fallback depends on that order -- the
+ * nearest usable ancestor is the most specific picture available.
+ */
+export interface ArtworkParent {
+  readonly kind: string;
+  readonly providerRef: string;
 }
 
 /**
@@ -69,6 +102,17 @@ export interface ArtworkAnswer {
  * does. `providerRef` is the id the lookup service returned for the media
  * item; `personRefs` are the refs it returned for that item's people, the
  * ones the caller wants an answer for.
+ *
+ * `parents` is that item's ancestors, nearest first, and it is a required
+ * argument rather than an optional one on purpose: a provider whose image
+ * endpoints do not cover every kind it is asked about needs somewhere to
+ * fall back to, and an optional argument is one a caller can quietly stop
+ * passing with nothing to show for it. TMDB is exactly that provider --
+ * a television lookup resolves to `episode`, `season` or `series`
+ * (`plugin-tv`'s `checkTv`) and TMDB publishes an images endpoint for the
+ * last of those only -- so an episode takes its series' poster, which is
+ * what a media library shows for one anyway. A source with an endpoint for
+ * every kind it handles ignores the argument; ThePornDB does.
  *
  * A single `imagesFor` rather than a `mediaImages` plus a `personImages` --
  * that was this module's first shape, and it does not fit every provider.
@@ -93,6 +137,7 @@ export interface ArtworkSource {
     kind: string,
     providerRef: string,
     personRefs: readonly string[],
+    parents: readonly ArtworkParent[],
   ): Promise<ArtworkAnswer>;
 }
 

@@ -38,6 +38,20 @@ function countingResolver(key: string): { resolveSecret: (name: string) => Promi
   };
 }
 
+/**
+ * Mimics `Secrets.get`'s rejection for a credential nobody configured.
+ * The `name` is the whole signal: `packages/host/src/secrets/names.ts`
+ * exports it as `SecretNotFound.name`, and the source narrows on it rather
+ * than on `instanceof`, which this package cannot reach.
+ */
+function missingSecretResolver(): (name: string) => Promise<string> {
+  return async () => {
+    const error = new Error('no value for secret "tpdb-api-key"');
+    error.name = 'SecretNotFound';
+    throw error;
+  };
+}
+
 interface SizesInit {
   full?: string | null;
   large?: string | null;
@@ -100,7 +114,7 @@ test('maps a scene\'s posters and background, preferring large over medium and f
   ]);
   const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, []);
+  const answer = await source.imagesFor('scene', SCENE_REF, [], []);
 
   assert.deepEqual(answer.media.posters, [{ url: 'https://cdn.test/poster-large.jpg', language: null, score: 0 }]);
   // No `large`, so `medium` is the fallback.
@@ -134,7 +148,7 @@ test('matches a person by ref against the embedded performer, preferring face ov
   ]);
   const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, [personRef]);
+  const answer = await source.imagesFor('scene', SCENE_REF, [personRef], []);
 
   assert.deepEqual(
     answer.people.get(personRef),
@@ -158,7 +172,7 @@ test('falls back to the embedded performer\'s parent when its own image fields a
   ]);
   const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, [personRef]);
+  const answer = await source.imagesFor('scene', SCENE_REF, [personRef], []);
 
   assert.deepEqual(
     answer.people.get(personRef),
@@ -174,7 +188,7 @@ test('a person whose embedded entry has no image anywhere -- own or parent -- om
   ]);
   const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, [personRef, missingRef]);
+  const answer = await source.imagesFor('scene', SCENE_REF, [personRef, missingRef], []);
 
   assert.equal(answer.people.has(personRef), false);
   assert.equal(answer.people.has(missingRef), false);
@@ -190,7 +204,7 @@ test('one scene call answers a whole cast: exactly one HTTP call for several per
   ]);
   const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, refs);
+  const answer = await source.imagesFor('scene', SCENE_REF, refs, []);
 
   // This is the property the whole seam exists for: one request served the
   // scene's own artwork and every one of its performers'.
@@ -206,7 +220,7 @@ test('a kind this provider has no endpoint for asks nothing at all -- no fetch, 
   const resolver = countingResolver(TOKEN);
   const source = createTpdbSource({ fetch, resolveSecret: resolver.resolveSecret });
 
-  const answer = await source.imagesFor('movie', SCENE_REF, ['someone']);
+  const answer = await source.imagesFor('movie', SCENE_REF, ['someone'], []);
 
   assert.equal(sent.length, 0);
   assert.equal(resolver.count(), 0);
@@ -215,15 +229,35 @@ test('a kind this provider has no endpoint for asks nothing at all -- no fetch, 
 
 test('no key answers no images and never throws', async () => {
   const { fetch, sent } = recordingFetch([sceneBody({})]);
+  const source = createTpdbSource({ fetch, resolveSecret: missingSecretResolver() });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, ['someone'], []);
+
+  assert.equal(sent.length, 0, 'a missing key must not reach the network');
+  assert.deepEqual(answer, {
+    media: { posters: [], backgrounds: [], logos: [] },
+    people: new Map(),
+    noCredential: true,
+  });
+});
+
+test('a secret-resolution failure that is not "no key configured" still propagates', async () => {
+  // `SecretsFileUnreadable` is the one that matters and it is not
+  // hypothetical: `README.md` records `/run/secrets` being root-owned in
+  // Docker as a live failure, and the host raises that distinct name so a
+  // permissions problem is not mistaken for an unconfigured credential.
+  // Swallowed here, it would read as "artwork is turned off" and the real
+  // fault would surface nowhere.
+  const { fetch, sent } = recordingFetch([sceneBody({})]);
   const source = createTpdbSource({
     fetch,
     resolveSecret: async () => {
-      throw new Error('no value for secret "tpdb-api-key"');
+      const error = new Error('the secrets directory could not be read');
+      error.name = 'SecretsFileUnreadable';
+      throw error;
     },
   });
 
-  const answer = await source.imagesFor('scene', SCENE_REF, ['someone']);
-
-  assert.equal(sent.length, 0, 'a missing key must not reach the network');
-  assert.deepEqual(answer, { media: { posters: [], backgrounds: [], logos: [] }, people: new Map() });
+  await assert.rejects(() => source.imagesFor('scene', SCENE_REF, ['someone'], []), /could not be read/);
+  assert.equal(sent.length, 0);
 });

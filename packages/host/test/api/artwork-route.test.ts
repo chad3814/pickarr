@@ -244,6 +244,31 @@ test('a null-path row does not shadow a later row of the same kind that has byte
   assert.deepEqual(readFileCalls, ['/artwork/g.bin']);
 });
 
+test('a person\u2019s null-path picture does not shadow a later one that has bytes', async () => {
+  // The same composition the poster test above pins, on the one query that
+  // nothing exercised: `ARTWORK_QUERY.person`'s `AND path IS NOT NULL` was
+  // driven by no fixture at all -- every seeded `person_image` row had a
+  // path, so deleting the clause from that one query reddened nothing while
+  // the docblock claimed it for all four tables. `path` is nullable on
+  // `person_image` too, and `PluginContext.db` hands a plugin the raw
+  // connection, so the pair is a shape these tables permit.
+  const raw = setup();
+  const personId = seedPerson(raw);
+  const nullId = seedPersonImage(raw, personId, 'https://example.com/recorded.png', null);
+  const fetchedId = seedPersonImage(raw, personId, 'https://example.com/headshot.png', '/artwork/h.bin');
+  assert.equal(nullId < fetchedId, true, 'the null-path row must be the lower id, or this proves nothing');
+
+  const { deps, readFileCalls, statCalls } = fakeDeps({
+    '/artwork/h.bin': { bytes: PNG_BYTES, mtimeMs: 7000, size: PNG_BYTES.length },
+  });
+
+  const response = await readArtwork(raw, 'person', personId, deps);
+  assert.equal(response.status, 200, 'the row with bytes is served, not the null-path row that precedes it');
+  assert.deepEqual(response.body, PNG_BYTES);
+  assert.deepEqual(statCalls, ['/artwork/h.bin']);
+  assert.deepEqual(readFileCalls, ['/artwork/h.bin']);
+});
+
 test('a matching If-None-Match gets 304 with no body', async () => {
   const raw = setup();
   const mediaItemId = seedMediaItem(raw);

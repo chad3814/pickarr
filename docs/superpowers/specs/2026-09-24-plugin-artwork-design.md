@@ -102,8 +102,16 @@ object of `full`/`large`/`medium`/`small` — sized variants, like TMDB's.
 
 ```ts
 interface ArtworkSource {
-  imagesFor(kind: string, providerRef: string, personRefs: readonly string[]):
-    Promise<{ media: MediaImages; people: ReadonlyMap<string, readonly ProviderImage[]> }>;
+  imagesFor(
+    kind: string,
+    providerRef: string,
+    personRefs: readonly string[],
+    parents: readonly { kind: string; providerRef: string }[],
+  ): Promise<{
+    media: MediaImages;
+    people: ReadonlyMap<string, readonly ProviderImage[]>;
+    noCredential?: true;
+  }>;
 }
 ```
 
@@ -117,6 +125,20 @@ a person omits the key.
 TMDB satisfies `personRefs` with its own `/3/person/{id}/images` calls;
 ThePornDB satisfies them for free from the scene it already fetched.
 Neither has to say which.
+
+`parents` is the item's ancestors, nearest first, and it is there because
+a provider's endpoints do not have to cover every kind it is asked about.
+A television lookup resolves to `episode`, `season` or `series`, and TMDB
+publishes an images endpoint addressable by the ref openmetadata gives for
+the last of those only — so without a fallback the bulk of a television
+library keeps the 404 this document opens with. An episode is answered
+with its series' poster, which is what a media library shows for an
+episode anyway. A provider with an endpoint for every kind it handles
+ignores the argument.
+
+`noCredential` is how a source says "nobody configured my key", which an
+empty answer cannot say on its own. The sources have no logger; the job
+has one, and that is where the once-per-provider line below is written.
 
 ### Secret names
 
@@ -144,8 +166,16 @@ an api key. A bare `TMDB_READ_ACCESS_TOKEN` in a `.env.local` is loaded
 into `process.env` by `--env-file-if-exists` and then never found.
 
 **Absent is not an error.** A host with no key for a provider logs once
-and fetches no artwork for it, exactly as a host with no openmetadata key
-declines to look anything up. Artwork should cost nothing to opt out of.
+that artwork is unavailable for it and fetches none, exactly as a host
+with no openmetadata key declines to look anything up. An operator who
+does not want artwork should not have to configure anything to avoid it.
+
+This section is the only statement of either fact. A second "Credentials
+and absence" section used to repeat the absence rule for TMDB alone, and
+spelled the secret `resolveSecret('TMDB_API_KEY')` — a name
+`assertSecretName` refuses outright, left behind when the correction above
+was made in one place and not the other. Struck rather than reworded: two
+statements of one rule is how the wrong one survives.
 
 ### A job, not the resolved branch
 
@@ -204,15 +234,6 @@ change. Building the storage without the screen is deliberate — the data
 has to exist before anything can render it, and the route is what makes
 it verifiable rather than write-only.
 
-### Credentials and absence
-
-`resolveSecret('TMDB_API_KEY')`, the same chain the lookup key uses.
-
-**Absent is not an error.** A host with no TMDB key logs once that artwork
-is unavailable and skips the job, exactly as a host with no
-openmetadata key logs and declines to look anything up. An operator who
-does not want artwork should not have to configure anything to avoid it.
-
 ## Components
 
 | File | Responsibility |
@@ -223,7 +244,7 @@ does not want artwork should not have to configure anything to avoid it.
 | `packages/host/src/media/writer.ts` | `attachPersonImage`, measuring through `ArtworkStore` like its three siblings |
 | `packages/host/src/api/artwork-route.ts` | the `person` kind |
 | `packages/openmetadata/src/artwork/source.ts` | the `ArtworkSource` seam and the provider registry |
-| `packages/openmetadata/src/artwork/tmdb.ts` | TMDB's implementation: configuration cache, images call, selection |
+| `packages/openmetadata/src/artwork/tmdb.ts` | TMDB's implementation: configuration cache, images call, nearest-ancestor fallback, selection |
 | `packages/openmetadata/src/artwork/job.ts` | the job handler: source lookup, fetch, attach, per-provider skip |
 | `packages/openmetadata/src/engine.ts` | enqueue at the end of `applyResolved` |
 
@@ -238,7 +259,17 @@ does not want artwork should not have to configure anything to avoid it.
   `applyResolved`.
 - **An unregistered provider logs once**, not once per item. Driven with
   two items from the same provider and a counted log.
-- **No key means no job and no error.**
+- **A television kind reaches its series' images.** An episode and a
+  season each resolve to the nearest ancestor TMDB can address, and a kind
+  with no usable ancestor asks TMDB nothing at all.
+- **A failed configuration fetch is not cached.** The next call re-asks
+  and succeeds — the source outlives every job, so a held rejection would
+  disable the provider until a restart.
+- **No key means no request, one log line, and no error.** The job still
+  runs — it is enqueued before anything knows whether a key exists — and
+  answers nothing: no network call is made, the media item is untouched,
+  and the provider is reported once rather than once per item, the same
+  counted way an unregistered provider is.
 - **Idempotence**: running the job twice writes one row per slot and one
   file, which the unique indexes enforce and a second run must prove.
 - **The migration adds `person_image` without touching a synced table**,

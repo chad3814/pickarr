@@ -22,7 +22,7 @@
  */
 import type { HostFetch, ImageInit, JobHandler, PluginContext } from '@pickarr/contract';
 import type { SecretResolver } from '../types.ts';
-import type { ArtworkSource, ArtworkSourceDeps, ProviderImage } from './source.ts';
+import type { ArtworkParent, ArtworkSource, ArtworkSourceDeps, ProviderImage } from './source.ts';
 import { bestImage, createArtworkSources } from './source.ts';
 
 /** The job kind. `../engine.ts` registers the handler under it and enqueues it. */
@@ -97,6 +97,16 @@ export interface ArtworkJobPayload {
   readonly provider: string;
   readonly providerRef: string;
   readonly people: readonly ArtworkJobPerson[];
+  /**
+   * The item's ancestors, nearest first, passed through to the source
+   * unchanged -- what lets a provider answer a kind it has no endpoint of
+   * its own for (TMDB and every episode, see `ArtworkSource`).
+   *
+   * Carried in the payload for the same reason every other field here is:
+   * `../engine.ts` has them on the `Media` record at the moment it
+   * enqueues, and this handler reads no host table at all.
+   */
+  readonly parents: readonly ArtworkParent[];
 }
 
 function readPerson(value: unknown, index: number): ArtworkJobPerson {
@@ -109,6 +119,18 @@ function readPerson(value: unknown, index: number): ArtworkJobPerson {
     throw new TypeError(`openmetadata: artwork payload people[${index}] must carry personId and providerRef`);
   }
   return { personId, providerRef };
+}
+
+function readParent(value: unknown, index: number): ArtworkParent {
+  if (typeof value !== 'object' || value === null
+    || !('kind' in value) || !('providerRef' in value)) {
+    throw new TypeError(`openmetadata: artwork payload parents[${index}] must carry kind and providerRef`);
+  }
+  const { kind, providerRef } = value;
+  if (typeof kind !== 'string' || typeof providerRef !== 'string') {
+    throw new TypeError(`openmetadata: artwork payload parents[${index}] must carry kind and providerRef`);
+  }
+  return { kind, providerRef };
 }
 
 /**
@@ -124,20 +146,29 @@ function readPerson(value: unknown, index: number): ArtworkJobPerson {
 function readArtworkPayload(payload: unknown): ArtworkJobPayload {
   if (typeof payload !== 'object' || payload === null
     || !('mediaItemId' in payload) || !('kind' in payload)
-    || !('provider' in payload) || !('providerRef' in payload) || !('people' in payload)) {
+    || !('provider' in payload) || !('providerRef' in payload) || !('people' in payload)
+    || !('parents' in payload)) {
     throw new TypeError(
-      'openmetadata: an artwork payload must carry mediaItemId, kind, provider, providerRef and people',
+      'openmetadata: an artwork payload must carry mediaItemId, kind, provider, providerRef, people and parents',
     );
   }
-  const { mediaItemId, kind, provider, providerRef, people } = payload;
+  const { mediaItemId, kind, provider, providerRef, people, parents } = payload;
   if (typeof mediaItemId !== 'number' || typeof kind !== 'string'
     || typeof provider !== 'string' || typeof providerRef !== 'string') {
     throw new TypeError(
-      'openmetadata: an artwork payload must carry mediaItemId, kind, provider, providerRef and people',
+      'openmetadata: an artwork payload must carry mediaItemId, kind, provider, providerRef, people and parents',
     );
   }
   if (!Array.isArray(people)) throw new TypeError('openmetadata: artwork payload people is not an array');
-  return { mediaItemId, kind, provider, providerRef, people: people.map(readPerson) };
+  if (!Array.isArray(parents)) throw new TypeError('openmetadata: artwork payload parents is not an array');
+  return {
+    mediaItemId,
+    kind,
+    provider,
+    providerRef,
+    people: people.map(readPerson),
+    parents: parents.map(readParent),
+  };
 }
 
 /**
@@ -252,12 +283,13 @@ export interface ArtworkJobDeps {
 
 /**
  * The handler, closed over the state that has to outlive one job: which
- * providers have already been reported as unregistered, and one registry per
- * `HostFetch`.
+ * providers have already been reported as unregistered, which have already
+ * been reported as having no credential, and one registry per `HostFetch`.
  *
- * **Both are per handler, not per job, and that is the point of the
+ * **All are per handler, not per job, and that is the point of the
  * factory.** A feed of a thousand adult releases on a host with no such
- * source registered must produce one log line, not a thousand; and TMDB's
+ * source registered -- or with one registered and no key for it -- must
+ * produce one log line each, not a thousand; and TMDB's
  * source caches `/3/configuration` for its own lifetime, which is worth
  * nothing if a fresh source is built for every item. The registry is keyed
  * on `ctx.fetch` rather than built once at construction because a source
@@ -271,6 +303,15 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
   const createSources = deps.sources ?? createArtworkSources;
   const registries = new WeakMap<HostFetch, ReadonlyMap<string, ArtworkSource>>();
   const reportedUnregistered = new Set<string>();
+  /**
+   * Separate from `reportedUnregistered` because they are different facts
+   * about a provider and an operator may need to be told either. They
+   * cannot both happen for one provider today -- an unregistered provider
+   * returns before a source is ever asked -- so one shared set would
+   * behave identically now and silently swallow the second message the
+   * day that stops being true.
+   */
+  const reportedNoCredential = new Set<string>();
 
   function sourcesFor(ctx: PluginContext): ReadonlyMap<string, ArtworkSource> {
     const existing = registries.get(ctx.fetch);
@@ -360,7 +401,25 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
       payload.kind,
       payload.providerRef,
       payload.people.map((person) => person.providerRef),
+      payload.parents,
     );
+
+    // The design's "absent is not an error" rule, with the half that was
+    // specified and missing: a host with no key for a provider "logs once
+    // and fetches no artwork for it". Without this an operator with no
+    // TMDB key gets blank cards and no diagnostic anywhere -- the sources
+    // have no logger of their own, so the fact has to be reported here.
+    // The provider is the only detail: which secret that provider wants
+    // is the source's own business (`TMDB_TOKEN_SECRET`, `API_KEY_SECRET`)
+    // and is written down for the operator in `README.md`'s Secrets
+    // section. No credential value exists on this path to leak -- the
+    // resolver rejected, so there is nothing resolved to log.
+    if (answer.noCredential === true && !reportedNoCredential.has(payload.provider)) {
+      reportedNoCredential.add(payload.provider);
+      ctx.log('artwork: no credential is configured for this provider, so its items get no artwork', {
+        provider: payload.provider,
+      });
+    }
 
     // One image per slot, chosen by `bestImage`: one poster, one background,
     // one logo, one picture per person. Not every image the provider

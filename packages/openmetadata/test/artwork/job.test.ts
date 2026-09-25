@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { HostFetch, ImageInit, JobRecord, MediaWriter, PluginContext } from '@pickarr/contract';
 import { ARTWORK_JOB, createArtworkJob } from '../../src/artwork/job.ts';
 import type { ArtworkJobPayload } from '../../src/artwork/job.ts';
-import type { ArtworkAnswer, ArtworkSource, ProviderImage } from '../../src/artwork/source.ts';
+import type { ArtworkAnswer, ArtworkParent, ArtworkSource, ProviderImage } from '../../src/artwork/source.ts';
 import { createTestHarness } from '../../src/testing.ts';
 
 function image(url: string, fields: { language?: string | null; score?: number } = {}): ProviderImage {
@@ -16,29 +16,33 @@ function answer(fields: {
   backgrounds?: readonly ProviderImage[];
   logos?: readonly ProviderImage[];
   people?: Readonly<Record<string, readonly ProviderImage[]>>;
+  noCredential?: true;
 }): ArtworkAnswer {
-  return {
-    media: {
-      posters: fields.posters ?? [],
-      backgrounds: fields.backgrounds ?? [],
-      logos: fields.logos ?? [],
-    },
-    people: new Map(Object.entries(fields.people ?? {})),
+  const media = {
+    posters: fields.posters ?? [],
+    backgrounds: fields.backgrounds ?? [],
+    logos: fields.logos ?? [],
   };
+  const people = new Map(Object.entries(fields.people ?? {}));
+  // Two shapes rather than one literal with `noCredential: undefined`:
+  // `exactOptionalPropertyTypes` makes an absent key and an explicit
+  // `undefined` different things, and the field is declared `?: true`.
+  return fields.noCredential === undefined ? { media, people } : { media, people, noCredential: true };
 }
 
 interface AskedFor {
   kind: string;
   providerRef: string;
   personRefs: readonly string[];
+  parents: readonly ArtworkParent[];
 }
 
 /** A source that answers from a script, recording exactly what it was asked. */
 function scriptedSource(reply: ArtworkAnswer | Error): { source: ArtworkSource; asked: AskedFor[] } {
   const asked: AskedFor[] = [];
   const source: ArtworkSource = {
-    async imagesFor(kind, providerRef, personRefs): Promise<ArtworkAnswer> {
-      asked.push({ kind, providerRef, personRefs });
+    async imagesFor(kind, providerRef, personRefs, parents): Promise<ArtworkAnswer> {
+      asked.push({ kind, providerRef, personRefs, parents });
       if (reply instanceof Error) throw reply;
       return reply;
     },
@@ -148,6 +152,7 @@ function payloadFor(fields: Partial<ArtworkJobPayload> = {}): ArtworkJobPayload 
     provider: fields.provider ?? 'tmdb',
     providerRef: fields.providerRef ?? 'ref-1',
     people: fields.people ?? [],
+    parents: fields.parents ?? [],
   };
 }
 
@@ -277,6 +282,90 @@ test('each person gets one image', async () => {
       ['person', 12, 'https://cdn.test/b-only.jpg'],
     ],
   );
+});
+
+test('the payload\u2019s ancestors reach the source', async () => {
+  // The source-side fallback is worth nothing if the job does not hand the
+  // ancestors over: dropping this argument would put every episode and
+  // season card back to a 404 with every `tmdb.ts` test still green.
+  const { source, asked } = scriptedSource(answer({}));
+  const { fetch } = bytesFetch({});
+  const writer = attachWriter();
+  const { ctx } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({
+    kind: 'episode',
+    providerRef: 'ep-77',
+    parents: [{ kind: 'season', providerRef: 'se-9' }, { kind: 'series', providerRef: '1399' }],
+  })), ctx);
+
+  // Nearest first, unchanged: the order is what decides which ancestor a
+  // source falls back to.
+  assert.deepEqual(asked[0]?.parents, [
+    { kind: 'season', providerRef: 'se-9' },
+    { kind: 'series', providerRef: '1399' },
+  ]);
+  assert.equal(asked[0]?.kind, 'episode');
+});
+
+test('a provider whose credential is not configured is reported once, not once per item', async () => {
+  // The design's "absent is not an error" rule has a second half -- "logs
+  // once and fetches no artwork for it" -- and without this an operator
+  // with no key gets blank cards and no diagnostic at all.
+  const { source } = scriptedSource(answer({ noCredential: true }));
+  const { fetch, asked } = bytesFetch({});
+  const writer = attachWriter();
+  const { ctx, logs } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ mediaItemId: 1, provider: 'tmdb' })), ctx);
+  await handler(jobRecord(payloadFor({ mediaItemId: 2, provider: 'tmdb' })), ctx);
+
+  const reported = logs.filter((line) => line.message.includes('no credential is configured'));
+  assert.equal(reported.length, 1, 'one line for the provider, not one per item');
+  assert.equal(reported[0]?.detail?.['provider'], 'tmdb');
+  // Not a failure, and nothing downloaded: the job succeeds and the item
+  // simply has no pictures.
+  assert.deepEqual(asked, []);
+  assert.deepEqual(writer.attached, []);
+});
+
+test('a second provider with no credential is reported separately', async () => {
+  const { fetch } = bytesFetch({});
+  const writer = attachWriter();
+  const { ctx, logs } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({
+    resolveSecret: async () => 'unused',
+    sources: registryOf({
+      tmdb: scriptedSource(answer({ noCredential: true })).source,
+      tpdb: scriptedSource(answer({ noCredential: true })).source,
+    }),
+  });
+  await handler(jobRecord(payloadFor({ provider: 'tmdb' })), ctx);
+  await handler(jobRecord(payloadFor({ provider: 'tpdb' })), ctx);
+
+  assert.deepEqual(
+    logs.filter((line) => line.message.includes('no credential is configured')).map((line) => line.detail?.['provider']),
+    ['tmdb', 'tpdb'],
+  );
+});
+
+test('a configured provider with no pictures for an item says nothing', async () => {
+  // The flag, not the emptiness, is what the log keys off: an item a
+  // provider simply has no artwork for is ordinary and must stay silent,
+  // or the once-per-provider line would fire for the first such item and
+  // then never again for a host that really has no key.
+  const { source } = scriptedSource(answer({}));
+  const { fetch } = bytesFetch({});
+  const writer = attachWriter();
+  const { ctx, logs } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ provider: 'tmdb' })), ctx);
+
+  assert.deepEqual(logs, []);
 });
 
 test('a provider with no registered source logs once, not once per item', async () => {
@@ -656,7 +745,7 @@ test('a malformed payload fails the job rather than storing a stranger', async (
   const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({}) });
   await assert.rejects(
     handler({ id: 1, kind: ARTWORK_JOB, payload: { mediaItemId: 1 }, attempts: 1 }, ctx),
-    /must carry mediaItemId, kind, provider, providerRef and people/,
+    /must carry mediaItemId, kind, provider, providerRef, people and parents/,
   );
   await assert.rejects(
     handler(
@@ -664,5 +753,12 @@ test('a malformed payload fails the job rather than storing a stranger', async (
       ctx,
     ),
     /people\[0\] must carry personId and providerRef/,
+  );
+  await assert.rejects(
+    handler(
+      { id: 1, kind: ARTWORK_JOB, payload: { ...payloadFor(), parents: [{ kind: 'series' }] }, attempts: 1 },
+      ctx,
+    ),
+    /parents\[0\] must carry kind and providerRef/,
   );
 });

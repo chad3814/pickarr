@@ -20,10 +20,13 @@ import { redactUrl } from '../clients/redact.ts';
  * credential leaves this process. `jobs` is machinery a client has no use for,
  * and so are `host_migrations` (schema bookkeeping), `sync_log` (this
  * mechanism's own log) and `sqlite_sequence` (SQLite's, and present only
- * because `sync_log` is `AUTOINCREMENT`). `poster`, `background`, `logo` and
- * `person_image` describe files already reachable at
- * `/api/artwork/:kind/:mediaItemId`, so a client asks for the image and
- * handles a 404 rather than replicating rows about files it cannot read.
+ * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
+ * describe files already reachable at `/api/artwork/:kind/:mediaItemId`,
+ * and `person_image` the same for `/api/artwork/person/:personId` -- a
+ * different id space, which is why it gets its own route and its own
+ * mention rather than being folded into the sentence above. Either way a
+ * client asks for the image and handles a 404 rather than replicating
+ * rows about files it cannot read.
  * `alias` and `external_reference` have no
  * consumer. `deleted_media_item` is slice E's
  * tombstone table: the log's delete ops supersede it, and it stays because

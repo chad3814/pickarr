@@ -251,6 +251,21 @@ async function applyResolved(
       provider: media.provider,
       providerRef: media.providerRef,
       people,
+      // The ancestors, nearest first as the service ordered them, so a
+      // source can answer a kind it has no endpoint for from the nearest
+      // one it does -- which is the whole of a television library's
+      // artwork, since a tv lookup resolves to `episode`, `season` or
+      // `series` and TMDB addresses only the last.
+      //
+      // Filtered to this item's own provider: a parent's `providerRef` is
+      // only meaningful to the provider that issued it, and the source
+      // being asked is the one `media.provider` names. Nothing observed
+      // here emits a mixed set -- `MediaParent` simply carries its own
+      // `provider`, so the filter is what makes "same provider" true
+      // rather than assumed.
+      parents: media.parents
+        .filter((parent) => parent.provider === media.provider)
+        .map((parent) => ({ kind: parent.kind, providerRef: parent.providerRef })),
     };
     await ctx.jobs.enqueue({ kind: ARTWORK_JOB, payload });
   } catch (error) {

@@ -189,6 +189,11 @@ function providerImage(url: string): ProviderImage {
 /** Builds ThePornDB's `ArtworkSource`. */
 export function createTpdbSource(deps: ArtworkSourceDeps): ArtworkSource {
   return {
+    // The seam's fourth argument, `parents`, is deliberately not taken:
+    // it exists for a provider whose endpoints do not cover every kind it
+    // is asked about, and this one has exactly one endpoint for exactly
+    // one kind. A `scene` is answered by `/scenes/{uuid}` directly, and
+    // for anything else there is no url to build from an ancestor either.
     async imagesFor(kind, providerRef, personRefs) {
       // This provider has one endpoint, for one kind. A kind it cannot
       // answer for (movie, series, ...) asks nothing at all -- checked
@@ -199,14 +204,26 @@ export function createTpdbSource(deps: ArtworkSourceDeps): ArtworkSource {
       let key: string;
       try {
         key = await deps.resolveSecret(API_KEY_SECRET);
-      } catch {
+      } catch (error) {
         // No key configured: an operator who has not set up ThePornDB sees
         // no error and gets no artwork from it, the same way a host with no
         // openmetadata key declines to look anything up rather than
-        // failing. Whatever `resolveSecret` throws (`SecretNotFound` today,
-        // structurally -- this package cannot import the host's class to
-        // narrow it) is treated as "no key", not inspected further.
-        return emptyAnswer();
+        // failing. `noCredential` marks that case so `./job.ts` can say it
+        // once per provider instead of leaving blank cards unexplained.
+        //
+        // Narrowed on `Error.name` rather than swallowing everything --
+        // the same test `./tmdb.ts` makes, for the same reason and by the
+        // same means. This package does not import `@pickarr/host`, so
+        // `instanceof SecretNotFound` is unavailable; the *name* is not,
+        // and it is what `packages/host/src/secrets/names.ts` exports as
+        // `SecretNotFound.name`. Anything else -- `SecretsFileUnreadable`
+        // above all, which `README.md` records as a live Docker failure
+        // where `/run/secrets` is root-owned -- is a real misconfiguration
+        // and must surface as one, not read as "artwork is turned off".
+        if (error instanceof Error && error.name === 'SecretNotFound') {
+          return { ...emptyAnswer(), noCredential: true };
+        }
+        throw error;
       }
 
       const url = `${BASE_URL}/scenes/${encodeURIComponent(providerRef)}`;

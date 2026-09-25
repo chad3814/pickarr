@@ -77,7 +77,7 @@ test('a movie’s images become posters, backgrounds and logos', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '603', []);
+  const answer = await source.imagesFor('movie', '603', [], []);
 
   // The rename: the provider's `backdrops` becomes this codebase's
   // `background` here, and nowhere else -- the table, the writer and the
@@ -106,7 +106,7 @@ test('a television kind asks the television endpoint', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('series', '1399', []);
+  const answer = await source.imagesFor('series', '1399', [], []);
 
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/got.jpg');
   // Pinned because asking `/3/movie/{id}` for a series id answers a
@@ -115,20 +115,95 @@ test('a television kind asks the television endpoint', async () => {
   assert.ok(!calls.some((call) => call.url.includes('/3/movie/')), 'must not ask the movie endpoint for a series');
 });
 
-test('a kind TMDB has no images endpoint for asks nothing at all', async () => {
+test('a kind TMDB has no images endpoint for, and no usable ancestor, asks nothing at all', async () => {
   // `book` and `scene` belong to the other two providers; `season` and
-  // `episode` have no TMDB images endpoint of their own. Any of them
-  // reaching `fakeFetch` with nothing scripted would throw and fail this
-  // test, which is the point: the assertion is "zero calls", not "calls
-  // that happen to 404 gracefully".
+  // `episode` have no TMDB images endpoint of their own, and here neither
+  // do their ancestors. Any of them reaching `fakeFetch` with nothing
+  // scripted would throw and fail this test, which is the point: the
+  // assertion is "zero calls", not "calls that happen to 404 gracefully".
   const { fetch, calls } = fakeFetch({});
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('season', 'whatever', []);
+  // An ancestor is offered, and it is one this provider cannot address
+  // either -- so the fallback finds nothing and the answer is still "ask
+  // nothing", not "ask about the first parent in the list".
+  const answer = await source.imagesFor('season', 'whatever', [], [{ kind: 'book', providerRef: 'p-1' }]);
 
   assert.equal(calls.length, 0);
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
   assert.equal(answer.people.size, 0);
+});
+
+test('an episode is answered with its series\u2019 images', async () => {
+  // Without this fallback every episode card 404s its `<img>`, which is
+  // the bulk of a television library and the exact symptom the feature
+  // exists to end: a tv lookup resolves to `episode`, `season` or
+  // `series` (`plugin-tv`'s `checkTv`) and only `series` is in
+  // `MEDIA_KIND_PATH`.
+  const { fetch, calls } = fakeFetch({
+    [CONFIGURATION_URL]: CONFIGURATION_BODY,
+    'https://api.themoviedb.org/3/tv/1399/images': {
+      id: 1399,
+      posters: [image('/got.jpg', 'en', 9.0)],
+      backdrops: [],
+      logos: [],
+    },
+  });
+  const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
+
+  const answer = await source.imagesFor('episode', 'ep-77', [], [
+    { kind: 'season', providerRef: 'se-9' },
+    { kind: 'series', providerRef: '1399' },
+  ]);
+
+  // Spelled literally rather than built from the fixture: the url proves
+  // both that the series ref was used and that the series *path* was.
+  assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/got.jpg');
+  // The episode's own ref must never reach a url -- TMDB has no endpoint
+  // that would answer it, so a request carrying it is a request to the
+  // wrong thing rather than a harmless miss.
+  assert.ok(!calls.some((call) => call.url.includes('ep-77')), 'the episode ref must not be asked about');
+  assert.ok(!calls.some((call) => call.url.includes('se-9')), 'the unaddressable season must be skipped, not asked');
+});
+
+test('a season is answered with its series\u2019 images', async () => {
+  const { fetch, calls } = fakeFetch({
+    [CONFIGURATION_URL]: CONFIGURATION_BODY,
+    'https://api.themoviedb.org/3/tv/1399/images': {
+      id: 1399,
+      posters: [],
+      backdrops: [image('/backdrop.jpg', null, 5.1)],
+      logos: [],
+    },
+  });
+  const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
+
+  const answer = await source.imagesFor('season', 'se-9', [], [{ kind: 'series', providerRef: '1399' }]);
+
+  assert.deepEqual(answer.media.backgrounds, [
+    { url: 'https://image.tmdb.org/t/p/w1280/backdrop.jpg', language: null, score: 5.1 },
+  ]);
+  assert.ok(!calls.some((call) => call.url.includes('se-9')), 'the season ref must not be asked about');
+});
+
+test('an item that has an endpoint of its own ignores its ancestors', async () => {
+  // The fallback is a fallback: a `series` with a `series` ancestor (a
+  // shape nothing forbids) must still be asked about itself, or the
+  // nearest-ancestor walk would quietly outrank the item.
+  const { fetch } = fakeFetch({
+    [CONFIGURATION_URL]: CONFIGURATION_BODY,
+    'https://api.themoviedb.org/3/tv/1399/images': {
+      id: 1399,
+      posters: [image('/own.jpg', 'en', 9.0)],
+      backdrops: [],
+      logos: [],
+    },
+  });
+  const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
+
+  const answer = await source.imagesFor('series', '1399', [], [{ kind: 'series', providerRef: '9999' }]);
+
+  assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/own.jpg');
 });
 
 test('a kind with no media endpoint still answers its people', async () => {
@@ -147,7 +222,7 @@ test('a kind with no media endpoint still answers its people', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('season', 'whatever', ['500']);
+  const answer = await source.imagesFor('season', 'whatever', ['500'], []);
 
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
   assert.ok(!calls.some((call) => /\/3\/[a-z]+\/whatever\/images$/.test(call.url)), 'no media images call for an unmapped kind');
@@ -171,7 +246,7 @@ test('the image url is secure_base_url + size + file_path', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '1', []);
+  const answer = await source.imagesFor('movie', '1', [], []);
 
   assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/abc.jpg');
 });
@@ -186,11 +261,45 @@ test('configuration is fetched once and reused across calls', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  await source.imagesFor('movie', '1', []);
-  await source.imagesFor('movie', '2', []);
+  await source.imagesFor('movie', '1', [], []);
+  await source.imagesFor('movie', '2', [], []);
 
   const configCalls = calls.filter((call) => call.url === CONFIGURATION_URL);
   assert.equal(configCalls.length, 1);
+});
+
+test('a failed configuration fetch is not cached: the next call retries and succeeds', async () => {
+  // The failure this pins is permanent, not transient. The source outlives
+  // any single job -- `engine.ts` builds the handler once and `job.ts`
+  // holds the registry in a `WeakMap` keyed on `ctx.fetch` -- so a cached
+  // *rejection* would make every later TMDB artwork job reject with the
+  // same stale error, retry and dead-letter, until the process restarted.
+  let configurationCalls = 0;
+  const fetch: HostFetch = {
+    async json<T>(url: string): Promise<T> {
+      if (url === CONFIGURATION_URL) {
+        configurationCalls += 1;
+        if (configurationCalls === 1) throw new Error('tmdb configuration is briefly unavailable');
+        return CONFIGURATION_BODY as T;
+      }
+      return { id: 1, posters: [image('/p.jpg', 'en', 1)], backdrops: [], logos: [] } as T;
+    },
+    async bytes(): Promise<Uint8Array> {
+      throw new Error('bytes: this source only ever calls json');
+    },
+  };
+  const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
+
+  await assert.rejects(
+    () => source.imagesFor('movie', '1', [], []),
+    /briefly unavailable/,
+    'the first call surfaces the configuration failure',
+  );
+
+  const answer = await source.imagesFor('movie', '1', [], []);
+
+  assert.equal(configurationCalls, 2, 'the second call must re-ask for configuration, not replay the rejection');
+  assert.equal(answer.media.posters[0]?.url, 'https://image.tmdb.org/t/p/w780/p.jpg');
 });
 
 test('the api key travels as a bearer header, never in the url', async () => {
@@ -201,7 +310,7 @@ test('the api key travels as a bearer header, never in the url', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver(token) });
 
-  await source.imagesFor('movie', '1', []);
+  await source.imagesFor('movie', '1', [], []);
 
   assert.ok(calls.length > 0);
   for (const call of calls) {
@@ -228,7 +337,7 @@ test('a person’s profiles become images', async () => {
   });
   const source = createTmdbSource({ fetch, resolveSecret: bearerResolver('tok') });
 
-  const answer = await source.imagesFor('movie', '1', ['500', '501']);
+  const answer = await source.imagesFor('movie', '1', ['500', '501'], []);
 
   assert.deepEqual(answer.people.get('500'), [
     { url: 'https://image.tmdb.org/t/p/w185/face.jpg', language: null, score: 4.2 },
@@ -243,10 +352,14 @@ test('no key configured answers no images rather than throwing', async () => {
   const { fetch, calls } = fakeFetch({});
   const source = createTmdbSource({ fetch, resolveSecret: missingSecretResolver() });
 
-  const answer = await source.imagesFor('movie', '1', ['500']);
+  const answer = await source.imagesFor('movie', '1', ['500'], []);
 
   assert.deepEqual(answer.media, { posters: [], backgrounds: [], logos: [] });
   assert.equal(answer.people.size, 0);
+  // The flag, not just the emptiness: an empty answer from a configured
+  // key means "TMDB has no pictures for this", and only this field lets
+  // `job.ts` tell the operator the other thing once.
+  assert.equal(answer.noCredential, true);
   // Not merely "did not throw" -- a host with no key should make no network
   // call at all, the same way a host with no openmetadata key declines to
   // look anything up rather than asking and discarding the answer.
@@ -264,5 +377,5 @@ test('a secret-resolution failure that is not "no key configured" still propagat
   };
   const source = createTmdbSource({ fetch, resolveSecret });
 
-  await assert.rejects(() => source.imagesFor('movie', '1', []), /could not be read/);
+  await assert.rejects(() => source.imagesFor('movie', '1', [], []), /could not be read/);
 });
