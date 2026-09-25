@@ -595,3 +595,50 @@ section > p {
   font-size: var(--text-meta);
   font-style: italic;
 }
+
+/* The expanded card's detail section: poster beside a body, then cast, then a footer line. */
+.details { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.75rem 0; }
+.details-head { display: flex; gap: 1rem; align-items: flex-start; }
+.details-body { flex: 1; min-width: 0; }
+
+.details .poster { padding: 0; border: none; background: none; cursor: pointer; flex-shrink: 0; }
+.details .poster img,
+.details .poster .placeholder { width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; }
+.details .poster .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1.5rem; }
+
+.icon-row { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.5rem; }
+.icon-row .icon { width: 1.1rem; height: 1.1rem; color: var(--color-text-dim); }
+.icon-row .badge {
+  font-size: 0.75rem; padding: 0.1rem 0.35rem; border-radius: 3px;
+  border: 1px solid var(--color-text-dim); color: var(--color-text-dim);
+}
+.icon-row a { text-decoration: none; }
+
+.description { margin: 0; }
+
+.cast { display: flex; gap: 0.75rem; list-style: none; margin: 0; padding: 0; }
+.cast li { width: 72px; text-align: center; font-size: 0.75rem; }
+.cast button { padding: 0; border: none; background: none; cursor: pointer; display: block; width: 100%; }
+.cast img,
+.cast .placeholder { width: 72px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; }
+.cast .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1rem; }
+
+.details-foot { display: flex; justify-content: space-between; align-items: baseline; margin: 0; }
+.details-foot small { color: var(--color-text-dim); }
+
+/* The gallery: a real overlay, because a dialog that is merely in the
+   accessibility tree renders as an unstyled block of text -- see the
+   IdentityChangeConfirm entry in CLAUDE.md. */
+.gallery-backdrop {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  background: rgb(0 0 0 / 70%);
+}
+.gallery {
+  display: flex; flex-direction: column; gap: 0.75rem; align-items: center;
+  max-width: 90vw; max-height: 90vh; overflow: auto;
+  padding: 1rem; border-radius: 6px;
+  background: var(--color-surface); color: var(--color-text);
+}
+.gallery h2 { margin: 0; font-size: 1rem; }
+.gallery img { max-width: 80vw; max-height: 70vh; object-fit: contain; }

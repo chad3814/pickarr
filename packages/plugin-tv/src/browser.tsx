@@ -29,7 +29,7 @@
  */
 import type { ReactElement } from 'react';
 import type { TvRead } from '@pickarr/contract';
-import { CardHeading, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
+import { CardHeading, MediaDetails, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
 import { tvHeadline } from './headline.ts';
 
 /**
@@ -101,7 +101,12 @@ function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): 
   return (
     <>
       <CardHeading headline={headline} expanded={expanded} onToggle={toggle} />
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
+      {expanded && gathered !== undefined && (
+        <>
+          <MediaDetails item={item} gathered={gathered} />
+          <ReleaseList releases={gathered.releases} submit={submit} />
+        </>
+      )}
     </>
   );
 }

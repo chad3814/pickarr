@@ -20,7 +20,7 @@
  * is the whole reason `tables` is a declaration rather than a free read.
  */
 import type { ReactElement } from 'react';
-import { CardHeading, ReleaseList, useExpansion, type BrowserPlugin, type CardProps, type PluginRows } from '@pickarr/plugin-ui';
+import { CardHeading, MediaDetails, ReleaseList, useExpansion, type BrowserPlugin, type CardProps, type PluginRows } from '@pickarr/plugin-ui';
 
 /** The replica table this card reads, named once so the declaration and the read cannot drift. */
 const SCENE_TABLE = 'xxx_scene';
@@ -82,7 +82,12 @@ function XxxCard({ item, rows, gathered, onExpandedChange, submit }: CardProps):
         expanded={expanded}
         onToggle={toggle}
       />
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
+      {expanded && gathered !== undefined && (
+        <>
+          <MediaDetails item={item} gathered={gathered} />
+          <ReleaseList releases={gathered.releases} submit={submit} />
+        </>
+      )}
     </>
   );
 }

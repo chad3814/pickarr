@@ -258,7 +258,12 @@ test('closing a card tears its subscriptions down, and reopening gathers again b
   // `DOWNLOAD_TABLES`, which holds two).
   assert.equal(liveSubscriptions, 3, 'an open card watches its own row and both download tables');
 
-  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  // `{ expanded: true }`, not just the name: `MediaDetails` now renders a
+  // poster `<button>` whose accessible name is also "The Thing" (from its
+  // `<img alt>`), so a bare name match resolves to two buttons once the
+  // gather has landed. `aria-expanded` is unique to the toggle `CardHeading`
+  // owns.
+  fireEvent.click(screen.getByRole('button', { name: /The Thing/, expanded: true }));
   assert.ok(!screen.queryByRole('list', { name: /releases/i }), 'the card is closed again');
   assert.equal(gathers, 1, 'collapsing gathers nothing');
   assert.equal(liveSubscriptions, 0, 'and the close tore every subscription down, which the latch could not');

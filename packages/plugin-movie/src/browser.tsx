@@ -22,7 +22,7 @@
  * column and arrives on `CardProps.item`. See {@link movieHeadline}.
  */
 import type { ReactElement } from 'react';
-import { CardHeading, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
+import { CardHeading, MediaDetails, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
 
 /**
  * `Title (2024)`, or the bare title when this film has no usable year.
@@ -55,7 +55,12 @@ function MovieCard({ item, gathered, onExpandedChange, submit }: CardProps): Rea
   return (
     <>
       <CardHeading headline={movieHeadline(item.title, item.releaseDate)} expanded={expanded} onToggle={toggle} />
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
+      {expanded && gathered !== undefined && (
+        <>
+          <MediaDetails item={item} gathered={gathered} />
+          <ReleaseList releases={gathered.releases} submit={submit} />
+        </>
+      )}
     </>
   );
 }
