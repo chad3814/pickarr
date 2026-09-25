@@ -77,7 +77,7 @@ test('a credential-shaped path segment is masked, and an ordinary slug is not', 
   // the reason issue #78 said adding names was not a fix.
   assert.equal(
     redactUrl(`https://tr.example/announce/${PASSKEY}/file.torrent`),
-    'https://tr.example/announce/*****/file.torrent',
+    'https://tr.example/announce/9f8*****/file.torrent',
   );
   assert.equal(
     redactUrl('https://tr.example/category/tv-shows/rss'),
@@ -102,7 +102,7 @@ test('a string that is not a url falls back to text redaction rather than throwi
   assert.equal(redactUrl('not a url at all'), 'not a url at all');
   assert.equal(
     redactUrl(`fetch failed for tracker/${PASSKEY}`),
-    'fetch failed for tracker/*****',
+    'fetch failed for tracker/9f8*****',
     'and the shape rules still apply on that path',
   );
 });

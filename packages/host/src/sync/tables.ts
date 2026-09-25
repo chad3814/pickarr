@@ -69,8 +69,11 @@ import { redactUrl } from '../clients/redact.ts';
  * case, or 8+ alphanumerics carrying two uppercase, two lowercase and two
  * digits -- and both reach the path case, which no list of names could.
  * Measured on a realistic 32-hex passkey:
- * `?passkey=9f8e…` and `/announce/9f8e…/` both mask to `*****`, while
- * `/category/tv-shows/` is untouched.
+ * `?passkey=9f8e…` and `/announce/9f8e…/` both mask to `9f8*****`, while
+ * `/category/tv-shows/` is untouched. (The three surviving characters are
+ * deliberate and recent -- see `redactSecrets` for why a shape match keeps
+ * a prefix where a name match does not. This line read `*****` before
+ * that, and a projection test pins the current spelling.)
  *
  * **This paragraph used to argue the path case was undetectable in
  * principle** -- "nothing about a string distinguishes a secret segment
