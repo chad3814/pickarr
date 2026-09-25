@@ -129,7 +129,15 @@ test('the projection carries imdb_id, which the card links to', () => {
 
   const detail = MOVIE_SYNCED.find((table) => table.table === 'movie_detail');
   assert.ok(detail !== undefined, 'movie_detail must be declared');
-  const rows = detail.read(raw, [1]) as Record<number, MovieRead>;
 
-  assert.equal(rows[1]?.imdbId, 'tt15239678');
+  // The whole row, not just `imdbId`: a cast tells the type checker to
+  // trust the shape but proves nothing at runtime, so `mediaItemId`,
+  // `runtimeMinutes` or `tagline` drifting silently needs a real assertion
+  // to catch it too -- matching the sibling test above.
+  assert.deepEqual(detail.read(raw, [1])[1] as MovieRead | undefined, {
+    mediaItemId: 1,
+    runtimeMinutes: null,
+    imdbId: 'tt15239678',
+    tagline: null,
+  });
 });
