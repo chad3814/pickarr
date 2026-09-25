@@ -218,20 +218,19 @@ test('the registry holds the three shipped plugins, with the ids and labels the 
 test('each plugin declares the replica tables its card reads, and no others', () => {
   // `tables` is what `Shell.tsx` hands `Category`, and what
   // `pluginRowsByMediaItems` fetches per page. A plugin that declared none
-  // would render its collapsed headline from an empty `rows` for ever --
-  // which is precisely what the movie card *does* want, so its empty list
-  // is pinned too rather than left as "not yet filled in".
+  // would render its collapsed headline from an empty `rows` for ever.
   //
   // **`xxx` moved from `[]` to `['xxx_scene']` when its card started
   // showing the site name, and this pin is what made that a decision.**
-  // The cost is a real one -- a table read for every card on every page --
-  // so it belongs in a list someone has to edit on purpose, not in a
-  // number that quietly grows.
+  // **`movie` moved from `[]` to `['movie_detail']` the same way, when its
+  // card started reading `imdb_id` for its IMDb link.** The cost is a real
+  // one -- a table read for every card on every page -- so it belongs in a
+  // list someone has to edit on purpose, not in a number that quietly grows.
   assert.deepEqual(
     BROWSER_PLUGINS.map((plugin) => [plugin.id, [...plugin.tables]]),
     [
       ['tv', ['tv_release']],
-      ['movie', []],
+      ['movie', ['movie_detail']],
       ['xxx', ['xxx_scene']],
     ],
   );

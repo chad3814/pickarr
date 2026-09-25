@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { PickSubmit } from '@pickarr/plugin-ui';
+import type { GatheredItemView, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
 import { movieBrowser, movieHeadline } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -32,6 +32,52 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  * `submit` is a required prop precisely so a test cannot forget it.
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
+
+function gathered(): GatheredItemView {
+  return {
+    releases: [],
+    roles: [],
+    artwork: {
+      poster: '/api/artwork/poster/1',
+      background: '/api/artwork/background/1',
+      logo: '/api/artwork/logo/1',
+    },
+  };
+}
+
+/**
+ * Renders the movie card already expanded, with a `movie_detail` row
+ * carrying the given `imdbId`. Expansion is real, not assumed: the card
+ * starts collapsed (`useExpansion`'s own default), so this clicks the
+ * heading's own button rather than rendering `MediaDetails` directly --
+ * the same path a user takes.
+ */
+function renderMovieCardExpanded(row: { imdbId: string | null }): void {
+  const rows: PluginRows = {
+    movie_detail: [{ mediaItemId: 1, runtimeMinutes: null, tagline: null, ...row }],
+  };
+  render(
+    <Card
+      item={mediaItem()}
+      rows={rows}
+      gathered={gathered()}
+      onExpandedChange={() => {}}
+      submit={submit}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button'));
+}
+
+test('a film with an imdb id links to IMDb, and one without shows no IMDb badge', () => {
+  renderMovieCardExpanded({ imdbId: 'tt15239678' });
+  const link = screen.getByRole('link', { name: 'IMDb' });
+  assert.equal(link.getAttribute('href'), 'https://www.imdb.com/title/tt15239678/');
+
+  cleanup();
+
+  renderMovieCardExpanded({ imdbId: null });
+  assert.ok(!screen.queryByText('IMDb'), 'no badge without an id');
+});
 
 test('a film with a release date is titled with its year, in the film-library convention', () => {
   // Spelled literally rather than built from `mediaItem(...)`'s own

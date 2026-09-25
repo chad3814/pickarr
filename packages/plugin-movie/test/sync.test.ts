@@ -98,8 +98,38 @@ test('a detail read carries its media item and its own columns', async () => {
   assert.deepEqual(detail.read(harness.raw, [id])[id] as MovieRead | undefined, {
     mediaItemId: 1,
     runtimeMinutes: 166,
+    imdbId: null,
     tagline: 'Long live the fighters.',
   });
 
   assert.deepEqual(detail.read(harness.raw, []), {}, 'an empty id list never reaches SQLite');
+});
+
+/**
+ * A fresh harness with a single `movie_detail` row at id 1, so a test can
+ * call `detail.read(raw, [1])` directly rather than querying back the id an
+ * insert assigned. Separate from `harnessWithTables`, which deliberately
+ * gives its placeholder row a high id for a different reason (see its own
+ * comment) and would not land the real row at id 1.
+ */
+function seededDbWithMovie(overrides: { imdbId?: string | null } = {}) {
+  const harness = createTestHarness();
+  for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
+  harness.raw.prepare(
+    'INSERT INTO movie_detail (id, media_item_id, runtime_minutes, imdb_id, tagline, created_at, updated_at) VALUES (1, 1, NULL, ?, NULL, 0, 0)',
+  ).run(overrides.imdbId ?? null);
+  return harness.raw;
+}
+
+test('the projection carries imdb_id, which the card links to', () => {
+  // The column already exists and `apply.ts` already fills it from the
+  // lookup service's `details.imdbId`; it was simply never projected, so
+  // the browser could not see an id that was on disk all along.
+  const raw = seededDbWithMovie({ imdbId: 'tt15239678' });
+
+  const detail = MOVIE_SYNCED.find((table) => table.table === 'movie_detail');
+  assert.ok(detail !== undefined, 'movie_detail must be declared');
+  const rows = detail.read(raw, [1]) as Record<number, MovieRead>;
+
+  assert.equal(rows[1]?.imdbId, 'tt15239678');
 });

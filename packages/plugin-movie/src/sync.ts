@@ -37,13 +37,14 @@ const detail: SyncedTable<MovieRead> = {
   read(raw: DatabaseSync, ids: readonly number[]): Record<number, MovieRead> {
     if (ids.length === 0) return {};
     const rows = raw.prepare(
-      `SELECT id, media_item_id, runtime_minutes, tagline FROM movie_detail WHERE id IN (${holes(ids)})`,
+      `SELECT id, media_item_id, runtime_minutes, imdb_id, tagline FROM movie_detail WHERE id IN (${holes(ids)})`,
     ).all(...ids);
     const result: Record<number, MovieRead> = {};
     for (const row of rows) {
       result[asNumber(row.id)] = {
         mediaItemId: asNumber(row.media_item_id),
         runtimeMinutes: asNumberOrNull(row.runtime_minutes),
+        imdbId: asTextOrNull(row.imdb_id),
         tagline: asTextOrNull(row.tagline),
       };
     }
