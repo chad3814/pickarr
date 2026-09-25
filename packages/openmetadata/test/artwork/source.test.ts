@@ -60,12 +60,20 @@ test('ties break on score, then stably', () => {
   assert.equal(bestImage(images, 'en')?.url, 'https://example.test/a.jpg');
 });
 
-test('createArtworkSources registers both providers openmetadata emits', () => {
+test('createArtworkSources registers every provider openmetadata emits', () => {
   // The registry is the only place that answers "which providers have
   // artwork", and its first consumer (`artwork/job.ts`) silently gives an
-  // item nothing when the answer is wrong. Both keys are spelled literally
+  // item nothing when the answer is wrong. Every key is spelled literally
   // here rather than derived from the map, so a rename on either side is a
   // failure rather than a tautology.
+  //
+  // **This test asserted two keys and a size of 2 while production was
+  // logging "no source is registered" for a third.** A test can only
+  // pin the registry against the list someone wrote down; that the list
+  // matches what the service actually emits is not a property this file
+  // can check, and it was wrong for `tvdb` until a real deployment said
+  // so. Treat the count as "no provider was added without updating this
+  // line", never as evidence that the set is complete.
   const sources = createArtworkSources({
     fetch: {
       json: async () => {
@@ -77,12 +85,11 @@ test('createArtworkSources registers both providers openmetadata emits', () => {
     },
     resolveSecret: async () => 'unused',
   });
-  assert.deepEqual([...sources.keys()].toSorted(), ['tmdb', 'tpdb']);
+  assert.deepEqual([...sources.keys()].toSorted(), ['tmdb', 'tpdb', 'tvdb']);
   assert.ok(sources.get('tmdb'), 'tmdb has a source');
   assert.ok(sources.get('tpdb'), 'tpdb has a source');
-  // Nothing else: a third key would be a provider nobody verified against a
-  // live API, which is exactly what the seam's docblock refuses.
-  assert.equal(sources.size, 2);
+  assert.ok(sources.get('tvdb'), 'tvdb has a source');
+  assert.equal(sources.size, 3);
 });
 
 test('a provider openmetadata does not emit has no source, and asking is not an error', () => {
@@ -97,5 +104,10 @@ test('a provider openmetadata does not emit has no source, and asking is not an 
     },
     resolveSecret: async () => 'unused',
   });
-  assert.equal(sources.get('tvdb'), undefined);
+  // `imdb` is the stand-in here precisely because `tvdb` used to be, and
+  // `tvdb` turned out to be a provider the service really emits. This
+  // asserts the lookup's *behaviour* for an unregistered key -- `undefined`
+  // rather than a throw, which is what lets `job.ts` log once and move on
+  // -- and asserts nothing about which providers exist.
+  assert.equal(sources.get('imdb'), undefined);
 });

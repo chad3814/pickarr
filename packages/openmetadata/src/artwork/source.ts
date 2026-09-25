@@ -15,6 +15,7 @@ import type { HostFetch } from '@pickarr/contract';
 import type { SecretResolver } from '../types.ts';
 import { createTmdbSource } from './tmdb.ts';
 import { createTpdbSource } from './tpdb.ts';
+import { createTvdbSource } from './tvdb.ts';
 
 /**
  * One image as a provider reports it, before any decision is made about
@@ -197,11 +198,19 @@ export interface ArtworkSourceDeps {
  * have artwork", keyed by the same `provider` string the lookup service
  * puts on a `Media` record.
  *
- * Two keys: `tmdb` for television and film, `tpdb` for adult. Those are the
- * only two provider values this slice saw openmetadata emit -- a real
- * release of each was run through it end to end while the design was
- * written -- and each spelling is the lowercase string it answered with
- * rather than a display name. Both providers' APIs were then read live with
+ * Three keys: `tmdb` for television and film, `tpdb` for adult, `tvdb` for
+ * the television openmetadata prefers TheTVDB's records for. Each spelling
+ * is the lowercase string the service answered with rather than a display
+ * name.
+ *
+ * **`tvdb` was missed when this registry was written, and the miss was
+ * argued for rather than measured.** The claim was that openmetadata only
+ * ever emits `tmdb` and `tpdb`, and the evidence offered for it was a grep
+ * of this repo's own test fixtures -- which could only ever report what
+ * had already been written down here. The first real deployment answered
+ * `tvdb` for 3 of 443 items, and each of them logged "no source is
+ * registered for this provider". A registry of what a third party emits
+ * cannot be verified against this repo; it has to be asked of the service. Both providers' APIs were then read live with
  * real credentials; see each module's docblock for what was checked there.
  *
  * A provider with no entry here is not an error anywhere: `./job.ts` looks
@@ -221,5 +230,6 @@ export function createArtworkSources(
   return new Map<string, ArtworkSource>([
     ['tmdb', createTmdbSource(deps)],
     ['tpdb', createTpdbSource(deps)],
+    ['tvdb', createTvdbSource(deps)],
   ]);
 }

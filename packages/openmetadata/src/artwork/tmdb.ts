@@ -325,7 +325,7 @@ export function createTmdbSource(deps: { fetch: HostFetch; resolveSecret: Secret
 
   async function personImages(providerRef: string, key: string): Promise<readonly ProviderImage[]> {
     // The same composite shape the media reference has -- a person is
-    // `tmdb:person:41087`, not `41087` (see {@link tmdbId}). An
+    // `tmdb:person:30614`, not `30614` (see {@link tmdbId}). An
     // unreadable reference asks nothing rather than 404ing a url built
     // from it.
     const id = tmdbId(providerRef);
