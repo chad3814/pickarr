@@ -6,12 +6,15 @@
  * artwork at all -- checked against its live OpenAPI document, not assumed.
  * What it gives instead is `provider` and `providerRef`, so artwork is
  * fetched straight from whichever provider matched, through the interface
- * below. Nothing in this file calls a provider's API; later tasks implement
- * `ArtworkSource` for each provider and register it in `createArtworkSources`,
- * and are the first callers of `bestImage`.
+ * below. Nothing in this file calls a provider's API -- it names the seam,
+ * the one pure choice (`bestImage`), and which providers have an
+ * implementation (`createArtworkSources`); `./tmdb.ts` and `./tpdb.ts` are
+ * where a request is actually made, and `./job.ts` is what calls all of it.
  */
 import type { HostFetch } from '@pickarr/contract';
 import type { SecretResolver } from '../types.ts';
+import { createTmdbSource } from './tmdb.ts';
+import { createTpdbSource } from './tpdb.ts';
 
 /**
  * One image as a provider reports it, before any decision is made about
@@ -147,21 +150,29 @@ export interface ArtworkSourceDeps {
  * have artwork", keyed by the same `provider` string the lookup service
  * puts on a `Media` record.
  *
- * Empty for now, **on purpose**. This task owns only the seam and the map's
- * shape; a later task registers each provider's real `ArtworkSource` here
- * once it is implemented. Nothing is excluded by design -- an empty map is
- * simply the honest answer for "which providers have a registered source"
- * before any provider task has landed. Do not pre-populate an entry for a
- * provider whose implementation this task did not write: a guessed
- * `ArtworkSource` is a wrong one that compiles.
+ * Two keys: `tmdb` for television and film, `tpdb` for adult. Those are the
+ * only two provider values this slice saw openmetadata emit -- a real
+ * release of each was run through it end to end while the design was
+ * written -- and each spelling is the lowercase string it answered with
+ * rather than a display name. Both providers' APIs were then read live with
+ * real credentials; see each module's docblock for what was checked there.
+ *
+ * A provider with no entry here is not an error anywhere: `./job.ts` looks
+ * a source up, finds nothing, and logs that fact **once** rather than once
+ * per item. So adding a provider is adding a line here, and a host that
+ * meets an unknown one degrades to no artwork rather than to failures.
+ *
+ * Built per call rather than memoised: each source closes over `deps`, and
+ * TMDB's caches `/3/configuration` for the lifetime of the instance it
+ * returns. Whoever wants that cache to survive more than one media item has
+ * to hold the map they were given -- which `createArtworkJob` does, keyed
+ * on the `HostFetch` it built them with.
  */
 export function createArtworkSources(
   deps: ArtworkSourceDeps,
 ): ReadonlyMap<string, ArtworkSource> {
-  // `deps` is threaded through unused until the first provider is
-  // registered. Naming it (rather than `_deps`) keeps the signature honest
-  // about what a real provider will need -- a fetch queue and a secret
-  // resolver -- without erasable-syntax-only stripping the parameter name.
-  void deps;
-  return new Map();
+  return new Map<string, ArtworkSource>([
+    ['tmdb', createTmdbSource(deps)],
+    ['tpdb', createTpdbSource(deps)],
+  ]);
 }

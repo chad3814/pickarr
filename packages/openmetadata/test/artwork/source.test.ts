@@ -60,11 +60,32 @@ test('ties break on score, then stably', () => {
   assert.equal(bestImage(images, 'en')?.url, 'https://example.test/a.jpg');
 });
 
-test('createArtworkSources answers an empty map: no provider is registered yet', () => {
-  // This task owns only the seam and the registry's shape. Each provider's
-  // `ArtworkSource` is implemented and registered by a later task, so an
-  // empty map here is the honest answer for now -- not a permanent
-  // exclusion of any provider.
+test('createArtworkSources registers both providers openmetadata emits', () => {
+  // The registry is the only place that answers "which providers have
+  // artwork", and its first consumer (`artwork/job.ts`) silently gives an
+  // item nothing when the answer is wrong. Both keys are spelled literally
+  // here rather than derived from the map, so a rename on either side is a
+  // failure rather than a tautology.
+  const sources = createArtworkSources({
+    fetch: {
+      json: async () => {
+        throw new Error('not used by this test: building a source makes no request');
+      },
+      bytes: async () => {
+        throw new Error('not used by this test: building a source makes no request');
+      },
+    },
+    resolveSecret: async () => 'unused',
+  });
+  assert.deepEqual([...sources.keys()].toSorted(), ['tmdb', 'tpdb']);
+  assert.ok(sources.get('tmdb'), 'tmdb has a source');
+  assert.ok(sources.get('tpdb'), 'tpdb has a source');
+  // Nothing else: a third key would be a provider nobody verified against a
+  // live API, which is exactly what the seam's docblock refuses.
+  assert.equal(sources.size, 2);
+});
+
+test('a provider openmetadata does not emit has no source, and asking is not an error', () => {
   const sources = createArtworkSources({
     fetch: {
       json: async () => {
@@ -76,5 +97,5 @@ test('createArtworkSources answers an empty map: no provider is registered yet',
     },
     resolveSecret: async () => 'unused',
   });
-  assert.equal(sources.size, 0);
+  assert.equal(sources.get('tvdb'), undefined);
 });
