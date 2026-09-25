@@ -170,17 +170,25 @@ function imageInit(image: ProviderImage, bytes: Uint8Array): ImageInit {
 }
 
 /**
- * The url without its query, for a log line.
+ * One url reduced to origin and path -- no query, and no `user:pass@`
+ * either, since `URL.origin` carries neither.
  *
  * Neither provider in the registry puts a credential in an image url --
- * TMDB builds `secure_base_url + size + file_path` and both send their token
- * in an `authorization` header -- so this is not redaction of a known leak.
- * It is that these urls are third-party strings this package never
+ * TMDB builds `secure_base_url + size + file_path` and both send their
+ * token in an `authorization` header -- so this is not redaction of a known
+ * leak. It is that these urls are third-party strings this package never
  * constructs for ThePornDB (they arrive inside the scene payload), a signed
- * CDN url carries its signature in the query, and a log line is the one
- * place a future provider's could surface. `../engine.ts` has the same
- * helper for the same reason; it is private there and this package cannot
- * import `@pickarr/host`'s `redactUrl`.
+ * CDN url carries its signature in the query, and a log line is where a
+ * future provider's would surface. `../engine.ts` has the same helper for
+ * the same reason; it is private there and this package cannot import
+ * `@pickarr/host`'s `redactUrl`.
+ *
+ * **The host's own net does not cover this, which is why the helper has to
+ * be applied at every site rather than most of them.** `redactDetail`
+ * (`host/src/clients/redact.ts`) walks a detail object and runs
+ * `redactSecrets` over **string** values only -- its own docblock says so
+ * and calls itself "the net under" the caller's rule, not a licence. So a
+ * url that reaches a log inside any non-string value arrives untouched.
  */
 function loggableUrl(url: string): string {
   try {
@@ -189,6 +197,43 @@ function loggableUrl(url: string): string {
   } catch {
     return '(an unparseable url)';
   }
+}
+
+/**
+ * A caught value as a log-safe string: its message, with every url inside
+ * it put through {@link loggableUrl}.
+ *
+ * **Both halves are load-bearing and neither is ceremony.**
+ *
+ * The message rather than the error is the shape `../engine.ts`'s `logged`
+ * already uses (`error instanceof Error ? error.message : String(error)`),
+ * and here it is a correctness fix rather than a style match: `redactDetail`
+ * is string-only, so an `Error` placed in a detail object passes through the
+ * host's redaction entirely. Logging the error would have handed a raw
+ * third-party string to a sink with nothing between.
+ *
+ * Rewriting the urls inside that message is the second half, because the
+ * failure this most often carries is `ArtworkStore`'s own refusal, and that
+ * message embeds the url **verbatim**: `host/src/artwork/store.ts` throws
+ * `` `artwork store: bytes for ${url} could not be measured as an image` ``.
+ * Sanitising only the separate `url` detail while the message beside it
+ * repeated the same url with its query intact would be a guard that reads
+ * as protection and is not.
+ *
+ * What this gives up, stated rather than hidden: the stack and the `cause`
+ * chain. `ArtworkStore` attaches the `image-size` error as `cause` and only
+ * the outer message survives here. That is the same trade `logged` makes,
+ * and the diagnosis a reader needs -- which image, which url, which
+ * failure -- is in the message and the two fields beside it.
+ *
+ * The match is deliberately coarse (`https?://` up to whitespace), so a url
+ * followed immediately by punctuation keeps that punctuation on the end of
+ * its path. Cosmetic: a query is still gone, which is the property this is
+ * for.
+ */
+function loggableError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/https?:\/\/\S+/gi, (found) => loggableUrl(found));
 }
 
 export interface ArtworkJobDeps {
@@ -257,6 +302,14 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
    */
   async function store(slot: Slot, ctx: PluginContext, signal?: AbortSignal): Promise<void> {
     try {
+      // Two calls rather than one with `signal: undefined`:
+      // `exactOptionalPropertyTypes` makes an absent key and an explicit
+      // `undefined` different things, and `RequestInit.signal` is declared
+      // `AbortSignal | null` with no `undefined` in it -- the same split
+      // `../engine.ts`'s `clientFor` makes, for the same reason. The
+      // dispatcher passes a real signal tied to its per-job ceiling, so
+      // forwarding it is what lets a job downloading from a hung CDN be cut
+      // off rather than holding a worker for the whole five minutes.
       const bytes = signal === undefined
         ? await ctx.fetch.bytes(slot.image.url)
         : await ctx.fetch.bytes(slot.image.url, { signal });
@@ -274,7 +327,9 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
       ctx.log('artwork: one image could not be stored', {
         what: slot.what,
         url: loggableUrl(slot.image.url),
-        error,
+        // A string, not the `Error` -- see `loggableError`. The host's
+        // `redactDetail` would walk past an object without looking inside.
+        error: loggableError(error),
       });
     }
   }

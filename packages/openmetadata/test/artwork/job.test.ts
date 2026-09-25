@@ -57,21 +57,28 @@ function registryOf(entries: Readonly<Record<string, ArtworkSource>>) {
  * second run of the same job asks for the same urls again, and must be able
  * to get them.
  */
-function bytesFetch(table: Readonly<Record<string, Uint8Array | Error>>): { fetch: HostFetch; asked: string[] } {
+function bytesFetch(table: Readonly<Record<string, Uint8Array | Error>>): {
+  fetch: HostFetch;
+  asked: string[];
+  /** The `init` each `bytes` call was given, in the same order as `asked`. */
+  inits: (RequestInit | undefined)[];
+} {
   const asked: string[] = [];
+  const inits: (RequestInit | undefined)[] = [];
   const fetch: HostFetch = {
     async json(): Promise<never> {
       throw new Error('bytesFetch: the artwork job makes no json call of its own');
     },
-    async bytes(url: string): Promise<Uint8Array> {
+    async bytes(url: string, init?: RequestInit): Promise<Uint8Array> {
       asked.push(url);
+      inits.push(init);
       const found = table[url];
       if (found === undefined) throw new Error(`bytesFetch: nothing scripted for ${url}`);
       if (found instanceof Error) throw found;
       return found;
     },
   };
-  return { fetch, asked };
+  return { fetch, asked, inits };
 }
 
 /**
@@ -422,6 +429,85 @@ test('a query string is dropped from a logged url', async () => {
 
   const complaint = logs.find((line) => line.message.includes('could not be stored'));
   assert.equal(complaint?.detail?.['url'], 'https://cdn.test/p.jpg');
+});
+
+test('a store refusal is logged without the query string its message embeds', async () => {
+  // `ArtworkStore` builds its refusal as `bytes for ${url} could not be
+  // measured as an image` -- the url verbatim, query and all -- and the
+  // host's `redactDetail` walks **string** values only, so an `Error` put
+  // in a detail object would reach the sink untouched. Both halves have to
+  // hold for the guard beside them to be real.
+  const signed = 'https://cdn.test/poster.jpg?sig=deadbeefcafe&exp=99';
+  const { source } = scriptedSource(answer({
+    posters: [image(signed)],
+    backgrounds: [image('https://cdn.test/back.jpg')],
+  }));
+  const { fetch } = bytesFetch({ [signed]: BYTES, 'https://cdn.test/back.jpg': BYTES });
+  const writer = attachWriter();
+  writer.refuse(signed);
+  const { ctx, logs } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor()), ctx);
+
+  const complaint = logs.find((line) => line.message.includes('could not be stored'));
+  assert.ok(complaint, 'the refusal was logged');
+  // Nothing anywhere in the detail carries the signature -- not the `url`
+  // field, not the message, not a nested `Error` nobody thought to walk.
+  assert.ok(
+    !JSON.stringify(complaint.detail).includes('deadbeefcafe'),
+    'the signature must not reach the log in any field',
+  );
+  const logged = complaint.detail?.['error'];
+  assert.equal(typeof logged, 'string', 'a string, so the host\'s string-only redaction can see it');
+  assert.equal(
+    logged,
+    'artwork store: bytes for https://cdn.test/poster.jpg could not be measured as an image',
+  );
+  // And the diagnosis survives: the refusal still names which url failed.
+  assert.equal(complaint.detail?.['url'], 'https://cdn.test/poster.jpg');
+  // The backdrop is unaffected, as ever.
+  assert.deepEqual(urlsOf(writer.attached, 'background'), ['https://cdn.test/back.jpg']);
+});
+
+test('the job\'s abort signal is forwarded to every download', async () => {
+  // The dispatcher ties a signal to its per-job ceiling; a job downloading
+  // from a hung CDN can only be cut off if this forwards it. Nothing else
+  // in this file passes one, so without this the branch that builds the
+  // `init` is unexercised.
+  const { source } = scriptedSource(answer({
+    posters: [image('https://cdn.test/p.jpg')],
+    backgrounds: [image('https://cdn.test/b.jpg')],
+  }));
+  const { fetch, inits } = bytesFetch({
+    'https://cdn.test/p.jpg': BYTES,
+    'https://cdn.test/b.jpg': BYTES,
+  });
+  const writer = attachWriter();
+  const { ctx } = contextWith(fetch, writer.writer);
+  const controller = new AbortController();
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor()), ctx, controller.signal);
+
+  assert.equal(inits.length, 2);
+  // Compared as booleans, never handed to a formatter: identity is the
+  // assertion, and the *same* signal must reach both downloads.
+  assert.ok(inits.every((init) => init?.signal === controller.signal), 'every download carries the job signal');
+});
+
+test('no abort signal means no init at all, not an init holding undefined', async () => {
+  // `exactOptionalPropertyTypes` makes those different things, which is the
+  // whole reason the call site is a ternary rather than one expression.
+  const { source } = scriptedSource(answer({ posters: [image('https://cdn.test/p.jpg')] }));
+  const { fetch, inits } = bytesFetch({ 'https://cdn.test/p.jpg': BYTES });
+  const writer = attachWriter();
+  const { ctx } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor()), ctx);
+
+  assert.deepEqual(inits, [undefined]);
 });
 
 test('a source with nothing to offer stores nothing and does not fail', async () => {
