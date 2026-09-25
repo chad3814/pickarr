@@ -12,3 +12,9 @@ export type {
   PickOutcome,
   PickSubmit,
 } from './types.ts';
+export { mediaLink, personLink, providerDisplayName, providerRefId } from './links.ts';
+export type { ExternalLink } from './links.ts';
+export { DownloadTypeIcon, ProviderBadge, ImagePlaceholder } from './icons.tsx';
+export { Gallery } from './Gallery.tsx';
+export { MediaDetails, topBilled } from './MediaDetails.tsx';
+export type { MediaDetailsProps } from './MediaDetails.tsx';
