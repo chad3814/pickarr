@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
 import type { MediaItemSyncRead, PersonSyncRead, RoleSyncRead } from '@pickarr/contract';
 import { MediaDetails, topBilled } from '../src/MediaDetails.tsx';
 import type { GatheredItemView, GatheredRoleView } from '../src/types.ts';
@@ -202,4 +202,38 @@ test('one icon per distinct transport, not one per release', () => {
   assert.ok(screen.getByRole('img', { name: 'torrent' }), 'torrent shown once');
   assert.ok(screen.getByRole('img', { name: 'nzb' }), 'nzb shown');
   assert.equal(screen.getAllByRole('img', { name: 'torrent' }).length, 1, 'not once per release');
+});
+
+test('switching subjects without closing remounts the gallery instead of carrying over failed images', () => {
+  // Finding 3, fix round 2. `fireEvent.click` dispatches straight to its
+  // target with no hit-testing, and nothing here disables background
+  // content while a gallery is open -- so a cast member's button really
+  // is reachable while the media gallery is still up. The person's
+  // picture shares a url with the media gallery's background image, so a
+  // failure recorded against that url while the media gallery is open
+  // would carry over to the person's gallery if `Gallery` were not keyed
+  // per subject.
+  const sharedUrl = '/api/artwork/background/1';
+  const alice = person(7, 'Alice');
+  const aliceRole = { ...role(1, 7, 0, alice), imageUrl: sharedUrl };
+  render(<MediaDetails item={item()} gathered={gathered({ roles: [aliceRole] })} />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
+  const mediaDialog = screen.getByRole('dialog', { name: 'Blockers' });
+  const sharedImage = within(mediaDialog)
+    .getAllByAltText('Blockers')
+    .find((img) => img.getAttribute('src') === sharedUrl);
+  assert.ok(sharedImage !== undefined, 'the shared-url image is in the media gallery');
+  fireEvent.error(sharedImage);
+
+  // Without closing the media gallery, open the person's -- switching
+  // `open` to a new subject while a `Gallery` is already mounted.
+  fireEvent.click(screen.getByRole('button', { name: 'Alice' }));
+
+  const personDialog = screen.getByRole('dialog', { name: 'Alice' });
+  assert.ok(personDialog, 'the gallery switched to the person');
+  assert.ok(
+    within(personDialog).getByAltText('Alice'),
+    'the shared-url image renders again for the new subject, not still suppressed from the last one',
+  );
 });
