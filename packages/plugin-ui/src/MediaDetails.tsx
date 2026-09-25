@@ -143,6 +143,7 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
 
       {open !== undefined && (
         <Gallery
+          key={open.caption}
           urls={open.urls}
           caption={open.caption}
           onClose={() => {

@@ -45,14 +45,28 @@ function gathered(overrides: Partial<GatheredItemView> = {}): GatheredItemView {
   };
 }
 
-test('one person billed twice appears once', () => {
+test('one person billed twice keeps the better-billed row', () => {
   // A person can hold several roles on one item -- actor and director, or
   // two characters. "Five people" is five distinct persons, not five rows.
+  // Asserting the survivor's identity, not just the person id, catches an
+  // unconditional last-row-wins de-dup that a length/personId check alone
+  // would miss.
   const alice = person(7, 'Alice');
   const picked = topBilled([role(1, 7, 0, alice), role(2, 7, 1, alice)], 5);
 
   assert.equal(picked.length, 1);
-  assert.equal(picked[0]?.row.personId, 7);
+  assert.equal(picked[0]?.id, 1, 'the better-billed row (billingOrder 0) survives');
+  assert.equal(picked[0]?.row.billingOrder, 0);
+});
+
+test('the better-billed row survives even when it arrives second', () => {
+  // Neither "first wins" nor "last wins" may pass this: only rank may.
+  const alice = person(7, 'Alice');
+  const picked = topBilled([role(1, 7, 1, alice), role(2, 7, 0, alice)], 5);
+
+  assert.equal(picked.length, 1);
+  assert.equal(picked[0]?.id, 2, 'the better-billed row (billingOrder 0) survives, though it came second');
+  assert.equal(picked[0]?.row.billingOrder, 0);
 });
 
 test('billing order decides, with nulls last and name breaking ties', () => {
@@ -121,6 +135,22 @@ test('a person whose picture fails keeps their name and gets the placeholder', (
 
   assert.ok(screen.getByText('Alice'), 'the name survives');
   assert.ok(screen.getByRole('img', { name: 'No picture of Alice' }), 'the placeholder is shown');
+
+  // Review Focus 3, continued: the button's accessible name changed to the
+  // placeholder's label, but the click handler still opens the gallery for
+  // the person, not the placeholder.
+  fireEvent.click(screen.getByRole('button', { name: 'No picture of Alice' }));
+  assert.ok(screen.getByRole('dialog', { name: 'Alice' }), 'the gallery opens for Alice, not the placeholder');
+});
+
+test('a poster that fails to load keeps its button working for the item', () => {
+  render(<MediaDetails item={item()} gathered={gathered()} />);
+
+  fireEvent.error(screen.getByAltText('Blockers'));
+  assert.ok(screen.getByRole('img', { name: 'No poster for Blockers' }), 'the placeholder is shown');
+
+  fireEvent.click(screen.getByRole('button', { name: 'No poster for Blockers' }));
+  assert.ok(screen.getByRole('dialog', { name: 'Blockers' }), 'the gallery opens for the item, not the placeholder');
 });
 
 test('a person’s name links to their page on the provider', () => {
