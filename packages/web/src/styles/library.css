@@ -11,7 +11,15 @@
  * it anyway because a stylesheet is matched against the rendered document
  * rather than against a package. Counted on the tree as it stands:
  *
- * - `<img>`: `library/MediaItemCard.tsx`, once, and web still owns it.
+ * - `<img>`: four sites now, all inside the same `<article>` `MediaItemCard.tsx`
+ *   opens. `MediaItemCard.tsx` itself renders the browse-row poster; the other
+ *   three are `@pickarr/plugin-ui`'s `MediaDetails.tsx` (the detail section's
+ *   own poster and each cast thumbnail) and `Gallery.tsx` (the lightbox image),
+ *   rendered by a plugin's card inside that same `<article>` once expanded.
+ *   `article img` below reaches all four, so any rule scoped to the latter
+ *   three must override `width` and `aspect-ratio` explicitly rather than
+ *   leave either unset -- leaving one unset lets it fall through uncontested
+ *   even where that rule wins on specificity for the properties it does set.
  * - `<article>`: **two sites now, both web's.** `MediaItemCard.tsx` opens
  *   one per browse row, and `library/Unmatched.tsx` opens one per
  *   unmatched release -- the card the `article dl` rules below style. That is
@@ -106,12 +114,17 @@ article {
 }
 
 /* The poster. `--size-poster` (`tokens.css`) carries the crop reasoning now,
-   since that is where the number lives. The only `<img>` in this app.
+   since that is where the number lives. **Not the only `<img>` in this
+   app any more** -- this file's own header inventory lists the other
+   three, and because they render inside a plugin's card body, which
+   `MediaItemCard.tsx` renders inside this very `<article>`, this rule
+   reaches them too. A rule scoped to one of those three must override
+   `width` and `aspect-ratio` explicitly, or this rule's values leak
+   through uncontested.
 
    All three of `width`, `aspect-ratio` and `object-fit` are pinned in a
    browser -- see this file's own header for the spec and for what each
-   mutation computes instead. This is the rule that only reaches the poster
-   while web owns the `<article>`. */
+   mutation computes instead. */
 article img {
   display: block;
   width: var(--size-poster);
@@ -603,7 +616,10 @@ section > p {
 
 .details .poster { padding: 0; border: none; background: none; cursor: pointer; flex-shrink: 0; }
 .details .poster img,
-.details .poster .placeholder { width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; }
+.details .poster .placeholder {
+  width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
+  border: none; margin-bottom: 0;
+}
 .details .poster .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1.5rem; }
 
 .icon-row { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.5rem; }
@@ -620,7 +636,10 @@ section > p {
 .cast li { width: 72px; text-align: center; font-size: 0.75rem; }
 .cast button { padding: 0; border: none; background: none; cursor: pointer; display: block; width: 100%; }
 .cast img,
-.cast .placeholder { width: 72px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; }
+.cast .placeholder {
+  width: 72px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
+  border: none; margin-bottom: 0;
+}
 .cast .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1rem; }
 
 .details-foot { display: flex; justify-content: space-between; align-items: baseline; margin: 0; }
@@ -641,4 +660,16 @@ section > p {
   background: var(--color-surface); color: var(--color-text);
 }
 .gallery h2 { margin: 0; font-size: 1rem; }
-.gallery img { max-width: 80vw; max-height: 70vh; object-fit: contain; }
+.gallery img {
+  /* `article img` (this file, near line 109) sets `width` and
+     `aspect-ratio` for the browse-row poster, and every `<img>` this
+     section adds renders inside that same `<article>` -- Gallery included,
+     since it renders as part of a card's expanded body. Left unset here,
+     those two properties fall through uncontested even though this rule
+     wins on specificity for the properties it does declare, pinning every
+     lightbox image to the 120px poster's 2:3 box. `auto` overrides both so
+     the image sizes from its own intrinsic dimensions, clamped only by the
+     max-* pair below. */
+  width: auto; height: auto; aspect-ratio: auto;
+  max-width: 80vw; max-height: 70vh; object-fit: contain;
+}
