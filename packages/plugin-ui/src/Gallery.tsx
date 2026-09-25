@@ -14,7 +14,7 @@
  * every image fails asks to be closed: an empty frame under a caption
  * reads as a bug, and there is nothing to look at.
  */
-import type { ReactElement } from 'react';
+import type { KeyboardEvent, ReactElement } from 'react';
 import { useEffect, useId, useRef, useState } from 'react';
 
 export interface GalleryProps {
@@ -24,6 +24,9 @@ export interface GalleryProps {
   readonly onClose: () => void;
 }
 
+const FOCUSABLE_SELECTOR =
+  'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
 export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement | null {
   const headingId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -32,9 +35,16 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
   const showing = urls.filter((url) => !failed.includes(url));
 
   // Focus moves in on open so Escape and Tab reach the dialog rather than
-  // the page behind it.
+  // the page behind it, and back out on close: to the control that opened
+  // it, not the top of the document.
   useEffect(() => {
+    const opener = document.activeElement;
     dialogRef.current?.focus();
+    return () => {
+      if (opener instanceof HTMLElement && document.contains(opener)) {
+        opener.focus();
+      }
+    };
   }, []);
 
   // Every image failed: there is nothing to show. Asked for in an effect
@@ -46,6 +56,34 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
 
   if (urls.length === 0) return null;
 
+  // Keeps Tab and Shift+Tab inside the dialog: leaving its focusable
+  // elements at either end wraps to the other end instead of escaping to
+  // the page behind the backdrop, which is also where the Escape handler
+  // lives -- focus leaving the subtree would take Escape with it.
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === 'Escape') {
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    const active = document.activeElement;
+    if (event.shiftKey) {
+      if (active === first || !dialog.contains(active)) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !dialog.contains(active)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div className="gallery-backdrop" onClick={onClose}>
       <div
@@ -55,9 +93,7 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
         aria-labelledby={headingId}
         tabIndex={-1}
         ref={dialogRef}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') onClose();
-        }}
+        onKeyDown={handleKeyDown}
         // The backdrop closes on click; a click on the dialog itself must
         // not bubble up to it and close the thing being looked at.
         onClick={(event) => {
