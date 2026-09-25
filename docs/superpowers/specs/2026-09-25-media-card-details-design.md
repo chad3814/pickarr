@@ -115,8 +115,10 @@ nothing because no media item is a season.
 parse, not concatenate.** TMDB sends a composite — `tmdb:movie:335984`,
 `tmdb:tv:1399:1:1` — where TheTVDB sends a bare id and ThePornDB sends a
 bare uuid. `artwork/tmdb.ts`'s `tmdbId` and `artwork/tvdb.ts`'s `tvdbId`
-exist because this exact assumption cost 743 dead jobs; this builder
-reuses the same parse rather than repeating the mistake in the browser.
+exist because this exact assumption cost 743 dead jobs. This builder cannot
+call them -- `@pickarr/openmetadata`'s root reaches `node:sqlite` and is
+not importable from the browser -- so it carries its own parse, pinned
+by the same live-read references those modules' tests use.
 The TMDB composite is also where the media *type* comes from: the second
 segment picks `movie` or `tv`.
 
