@@ -220,36 +220,54 @@ test('one icon per distinct transport, not one per release', () => {
   assert.equal(screen.getAllByRole('img', { name: 'torrent' }).length, 1, 'not once per release');
 });
 
-test('switching subjects without closing remounts the gallery instead of carrying over failed images', () => {
-  // Finding 3, fix round 2. `fireEvent.click` dispatches straight to its
-  // target with no hit-testing, and nothing here disables background
-  // content while a gallery is open -- so a cast member's button really
-  // is reachable while the media gallery is still up. The person's
-  // picture shares a url with the media gallery's background image, so a
-  // failure recorded against that url while the media gallery is open
-  // would carry over to the person's gallery if `Gallery` were not keyed
-  // per subject.
-  const sharedUrl = '/api/artwork/background/1';
+test('re-opening the gallery at another image starts it fresh, not with the last failures', () => {
+  // The card's images are now one set, walked with arrows, so "switching
+  // subjects" means opening the same set at a different image. `Gallery`
+  // is keyed on that starting url, which is what makes each open a fresh
+  // mount rather than one long-lived instance accumulating failures.
+  //
+  // `fireEvent.click` dispatches straight to its target with no
+  // hit-testing, and nothing disables background content while a gallery
+  // is open, so a cast button really is reachable from here.
   const alice = person(7, 'Alice');
-  const aliceRole = { ...role(1, 7, 0, alice), imageUrl: sharedUrl };
-  render(<MediaDetails item={item()} gathered={gathered({ roles: [aliceRole] })} />);
+  render(<MediaDetails item={item()} gathered={gathered({ roles: [role(1, 7, 0, alice)] })} />);
 
   fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
-  const mediaDialog = screen.getByRole('dialog', { name: 'Blockers' });
-  const sharedImage = within(mediaDialog)
-    .getAllByAltText('Blockers')
-    .find((img) => img.getAttribute('src') === sharedUrl);
-  assert.ok(sharedImage !== undefined, 'the shared-url image is in the media gallery');
-  fireEvent.error(sharedImage);
+  const poster = within(screen.getByRole('dialog')).getByAltText('Blockers');
+  fireEvent.error(poster);
 
-  // Without closing the media gallery, open the person's -- switching
-  // `open` to a new subject while a `Gallery` is already mounted.
+  // Open again at the person. A carried-over failure list would still be
+  // suppressing the poster, so the set would be one short.
   fireEvent.click(screen.getByRole('button', { name: 'Alice' }));
 
-  const personDialog = screen.getByRole('dialog', { name: 'Alice' });
-  assert.ok(personDialog, 'the gallery switched to the person');
+  const dialog = screen.getByRole('dialog');
+  assert.ok(within(dialog).getByAltText('Alice'), 'it opened on the person');
   assert.ok(
-    within(personDialog).getByAltText('Alice'),
-    'the shared-url image renders again for the new subject, not still suppressed from the last one',
+    screen.getByText('4 of 4'),
+    'and all four images are back in the set, so the previous failure did not carry over',
   );
+});
+
+test('a person\'s picture is in the card\'s gallery, reachable from the poster', () => {
+  // The gallery is one set per card -- three media slots then each cast
+  // member -- so walking forward from the poster arrives at the cast
+  // rather than running out after the media images.
+  const alice = person(7, 'Alice');
+  const bob = person(8, 'Bob');
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({ roles: [role(1, 7, 0, alice), role(2, 8, 1, bob)] })}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
+
+  assert.ok(screen.getByText('1 of 5'), 'three media slots plus two people');
+  fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  assert.ok(screen.getByRole('heading', { name: 'Alice' }), 'the fourth image is the first cast member');
+  fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  assert.ok(screen.getByRole('heading', { name: 'Bob' }), 'and the fifth is the second');
 });

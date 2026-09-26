@@ -13,7 +13,7 @@
 import type { ReactElement } from 'react';
 import { useState } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import { Gallery } from './Gallery.tsx';
+import { Gallery, type GalleryImage } from './Gallery.tsx';
 import { DownloadTypeIcon, ImagePlaceholder, ProviderBadge } from './icons.tsx';
 import { mediaLink, personLink, providerDisplayName, type ExternalLink } from './links.ts';
 import type { GatheredItemView, GatheredRoleView } from './types.ts';
@@ -69,13 +69,30 @@ function rank(role: GatheredRoleView): number {
 const CAST_LIMIT = 5;
 
 /** What the gallery is currently open over, or `undefined` for closed. */
-interface OpenGallery {
-  readonly urls: readonly string[];
-  readonly caption: string;
+/**
+ * Every image this card can show, in the order the gallery walks them:
+ * the media item's own three slots first, then each cast member's.
+ *
+ * Built once and handed whole to the gallery, rather than one subject's
+ * images per click, because the attribution is per image -- the title
+ * under the poster, a person's name under theirs -- which only means
+ * anything if the arrows reach both.
+ */
+function galleryImages(
+  item: MediaItemSyncRead,
+  gathered: GatheredItemView,
+  cast: readonly GatheredRoleView[],
+): readonly GalleryImage[] {
+  const media = [gathered.artwork.poster, gathered.artwork.background, gathered.artwork.logo]
+    .map((url) => ({ url, caption: item.title }));
+  const people = cast.flatMap((role) => (
+    role.person === undefined ? [] : [{ url: role.imageUrl, caption: role.person.name }]
+  ));
+  return [...media, ...people];
 }
-
 export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsProps): ReactElement {
-  const [open, setOpen] = useState<OpenGallery | undefined>(undefined);
+  // Which image the gallery opened on, or `undefined` for closed.
+  const [openAt, setOpenAt] = useState<string | undefined>(undefined);
   const [posterFailed, setPosterFailed] = useState(false);
 
   const cast = topBilled(gathered.roles, CAST_LIMIT);
@@ -91,10 +108,7 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
           type="button"
           className="poster"
           onClick={() => {
-            setOpen({
-              urls: [gathered.artwork.poster, gathered.artwork.background, gathered.artwork.logo],
-              caption: item.title,
-            });
+            setOpenAt(gathered.artwork.poster);
           }}
         >
           {posterFailed ? (
@@ -130,7 +144,7 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
               key={role.row.personId}
               role={role}
               provider={item.provider}
-              onOpen={setOpen}
+              onOpen={setOpenAt}
             />
           ))}
         </ul>
@@ -141,13 +155,13 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
         {attribution !== undefined && <small>data provided by {attribution}</small>}
       </p>
 
-      {open !== undefined && (
+      {openAt !== undefined && (
         <Gallery
-          key={open.caption}
-          urls={open.urls}
-          caption={open.caption}
+          key={openAt}
+          images={galleryImages(item, gathered, cast)}
+          startUrl={openAt}
           onClose={() => {
-            setOpen(undefined);
+            setOpenAt(undefined);
           }}
         />
       )}
@@ -182,7 +196,7 @@ function CastMember({
 }: {
   role: GatheredRoleView;
   provider: string | null;
-  onOpen: (gallery: OpenGallery) => void;
+  onOpen: (url: string) => void;
 }): ReactElement {
   const [failed, setFailed] = useState(false);
   const name = role.person?.name ?? '';
@@ -196,7 +210,7 @@ function CastMember({
         <button
           type="button"
           onClick={() => {
-            onOpen({ urls: [role.imageUrl], caption: name });
+            onOpen(role.imageUrl);
           }}
         >
           <img

@@ -17,22 +17,48 @@
 import type { KeyboardEvent, ReactElement } from 'react';
 import { useEffect, useId, useRef, useState } from 'react';
 
-export interface GalleryProps {
-  readonly urls: readonly string[];
-  /** The media item's title or the person's name, shown as the heading. */
+/** One image and who it is of -- the attribution shown beneath it. */
+export interface GalleryImage {
+  readonly url: string;
+  /** The media item's title, or the person's name. */
   readonly caption: string;
+}
+
+export interface GalleryProps {
+  /**
+   * Every image for one card, in the order they are walked: the media
+   * item's own, then each cast member's.
+   *
+   * One list rather than one gallery per subject, because the attribution
+   * is per image -- a card's gallery shows the title under its poster and
+   * a person's name under theirs, which only means anything if both are
+   * reachable from the same set of arrows.
+   */
+  readonly images: readonly GalleryImage[];
+  /**
+   * Which image to open on, by url. A url rather than an index because
+   * images that fail to load leave the set, so an index taken before a
+   * failure points somewhere else after one. A url that is not in
+   * `images`, or has already failed, opens on the first surviving image.
+   */
+  readonly startUrl: string;
   readonly onClose: () => void;
 }
 
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
-export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement | null {
+export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactElement | null {
   const headingId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState<readonly string[]>([]);
+  const [currentUrl, setCurrentUrl] = useState(startUrl);
 
-  const showing = urls.filter((url) => !failed.includes(url));
+  const showing = images.filter((image) => !failed.includes(image.url));
+  // The image on screen, or the first surviving one when the requested
+  // url is not in the set or has since failed.
+  const index = Math.max(0, showing.findIndex((image) => image.url === currentUrl));
+  const current = showing[index];
 
   // Focus moves in on open so Escape and Tab reach the dialog rather than
   // the page behind it, and back out on close: to the control that opened
@@ -51,10 +77,16 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
   // rather than during render, because calling a parent's setter while
   // rendering is a React error.
   useEffect(() => {
-    if (urls.length > 0 && showing.length === 0) onClose();
-  }, [urls.length, showing.length, onClose]);
+    if (images.length > 0 && showing.length === 0) onClose();
+  }, [images.length, showing.length, onClose]);
 
-  if (urls.length === 0) return null;
+  if (images.length === 0 || current === undefined) return null;
+
+  /** Walks the surviving images, wrapping at both ends. */
+  function step(by: number): void {
+    const next = showing[(index + by + showing.length) % showing.length];
+    if (next !== undefined) setCurrentUrl(next.url);
+  }
 
   // Keeps Tab and Shift+Tab inside the dialog: leaving its focusable
   // elements at either end wraps to the other end instead of escaping to
@@ -63,6 +95,14 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
     if (event.key === 'Escape') {
       onClose();
+      return;
+    }
+    // Arrow keys walk the set, the same way the buttons do. Without them
+    // the only way through a gallery is the mouse, which is the gap the
+    // focus trap above exists to avoid everywhere else.
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      step(event.key === 'ArrowRight' ? 1 : -1);
       return;
     }
     if (event.key !== 'Tab') return;
@@ -100,17 +140,35 @@ export function Gallery({ urls, caption, onClose }: GalleryProps): ReactElement 
           event.stopPropagation();
         }}
       >
-        <h2 id={headingId}>{caption}</h2>
-        {showing.map((url) => (
-          <img
-            key={url}
-            src={url}
-            alt={caption}
-            onError={() => {
-              setFailed((previous) => (previous.includes(url) ? previous : [...previous, url]));
-            }}
-          />
-        ))}
+        <h2 id={headingId}>{current.caption}</h2>
+        {/*
+          One image, keyed by url so React swaps the element rather than
+          reusing it: a reused `<img>` keeps painting the previous picture
+          until the next decodes, which reads as the arrows not working.
+        */}
+        <img
+          key={current.url}
+          src={current.url}
+          alt={current.caption}
+          onError={() => {
+            const dead = current.url;
+            setFailed((previous) => (previous.includes(dead) ? previous : [...previous, dead]));
+          }}
+        />
+        <p className="gallery-controls">
+          {/*
+            Both arrows render whenever there is more than one image, and
+            wrap rather than disabling at the ends -- a disabled control a
+            keyboard user has tabbed to is a dead end with no announcement.
+          */}
+          {showing.length > 1 && (
+            <button type="button" aria-label="Previous image" onClick={() => { step(-1); }}>←</button>
+          )}
+          <span>{index + 1} of {showing.length}</span>
+          {showing.length > 1 && (
+            <button type="button" aria-label="Next image" onClick={() => { step(1); }}>→</button>
+          )}
+        </p>
         <button type="button" onClick={onClose}>Close</button>
       </div>
     </div>
