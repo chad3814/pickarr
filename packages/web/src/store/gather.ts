@@ -132,6 +132,16 @@ function artworkUrls(mediaItemId: number): ArtworkUrls {
   };
 }
 
+/**
+ * Where a person's picture is served from. Separate from `artworkUrls`
+ * because the route keys this kind on `person_id` and the other three on
+ * `media_item_id` (`host/src/api/artwork-route.ts`'s `ARTWORK_QUERY`), so
+ * one function taking a media item id could not produce it.
+ */
+function personImageUrl(personId: number): string {
+  return `/api/artwork/person/${String(personId)}`;
+}
+
 /** One download under a release, tagged by which of the two host tables it came from. */
 export type GatheredDownload =
   | { readonly table: 'torrent_download'; readonly id: number; readonly row: TorrentDownloadSyncRead }
@@ -160,6 +170,8 @@ export interface GatheredRole {
   readonly id: number;
   readonly row: RoleSyncRead;
   readonly person: PersonSyncRead | undefined;
+  /** Where this person's picture is served from; 404s for most people. */
+  readonly imageUrl: string;
 }
 
 /** Everything common to one media item -- the host's half of design spec §7's join. */
@@ -213,6 +225,7 @@ function gatherRole(
     id,
     row: value,
     person: personValue !== undefined && isPerson(personValue) ? personValue : undefined,
+    imageUrl: personImageUrl(value.personId),
   };
 }
 

@@ -47,6 +47,11 @@ const detail: SyncedTable<MovieRead> = {
       result[Number(row.id)] = {
         mediaItemId: Number(row.media_item_id),
         runtimeMinutes: row.runtime_minutes === null ? null : Number(row.runtime_minutes),
+        // Not selected above, deliberately: this test's fake projection
+        // exercises the host's id-keying seam, not imdb_id -- null is the
+        // honest value for a row this fixture never populates the column
+        // for, same as a film the lookup service gave no IMDb id.
+        imdbId: null,
         tagline: row.tagline === null ? null : String(row.tagline),
       };
     }
@@ -151,7 +156,7 @@ test('a plugin row is keyed by its row id on both cursors, and its delete names 
 
   // The payload itself stays id-free, which is the reason the op carries one.
   assert.deepEqual(walkCreate.value, {
-    mediaItemId: 1, runtimeMinutes: 166, tagline: 'Long live the fighters.',
+    mediaItemId: 1, runtimeMinutes: 166, imdbId: null, tagline: 'Long live the fighters.',
   });
 
   raw.prepare('DELETE FROM movie_detail WHERE id = 7').run();

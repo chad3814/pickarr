@@ -27,10 +27,18 @@ const NO_ROWS: PluginRows = {};
 
 /**
  * A `tv_release` row as `plugin-tv`'s card narrows it (`TvRead`'s
- * `seriesTitle`, `seasonNumber` and `episodeNumber`), under the table name
+ * `seriesTitle`, `seasonNumber` and `episodeNumber`, and -- since
+ * whole-branch review finding 1 gave `tvdbExtraLinks` a reason to read
+ * them too -- `kind` and `seriesRef`), under the table name
  * `tvBrowser.tables` declares.
  */
-function tvRows(row: { seriesTitle: string; seasonNumber: number | null; episodeNumber: number | null }): PluginRows {
+function tvRows(row: {
+  seriesTitle: string;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  kind: 'series' | 'season' | 'episode';
+  seriesRef: string;
+}): PluginRows {
   return { tv_release: [row] };
 }
 
@@ -258,7 +266,12 @@ test('closing a card tears its subscriptions down, and reopening gathers again b
   // `DOWNLOAD_TABLES`, which holds two).
   assert.equal(liveSubscriptions, 3, 'an open card watches its own row and both download tables');
 
-  fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
+  // `{ expanded: true }`, not just the name: `MediaDetails` now renders a
+  // poster `<button>` whose accessible name is also "The Thing" (from its
+  // `<img alt>`), so a bare name match resolves to two buttons once the
+  // gather has landed. `aria-expanded` is unique to the toggle `CardHeading`
+  // owns.
+  fireEvent.click(screen.getByRole('button', { name: /The Thing/, expanded: true }));
   assert.ok(!screen.queryByRole('list', { name: /releases/i }), 'the card is closed again');
   assert.equal(gathers, 1, 'collapsing gathers nothing');
   assert.equal(liveSubscriptions, 0, 'and the close tore every subscription down, which the latch could not');
@@ -282,7 +295,13 @@ test("a TV item's card is the tv plugin's, and its headline names the series and
     <MediaItemCard
       source={stubSource}
       item={summary({ id: 7, title: "Dio's World(3)" })}
-      rows={tvRows({ seriesTitle: "Jo Jo's Bizarre Adventure", seasonNumber: 2, episodeNumber: 47 })}
+      rows={tvRows({
+        seriesTitle: "Jo Jo's Bizarre Adventure",
+        seasonNumber: 2,
+        episodeNumber: 47,
+        kind: 'episode',
+        seriesRef: '184871',
+      })}
       submit={acceptsPick}
     />,
   );

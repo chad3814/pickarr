@@ -95,6 +95,8 @@ export interface MovieRead {
   /** The media item this detail row belongs to. Not this row's key; see the note above. */
   mediaItemId: number;
   runtimeMinutes: number | null;
+  /** IMDb's `tt…` id, for the card's external link. Null for a film the service gave none for. */
+  imdbId: string | null;
   tagline: string | null;
 }
 

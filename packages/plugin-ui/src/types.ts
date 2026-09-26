@@ -19,7 +19,9 @@
  */
 import type {
   NzbDownloadSyncRead,
+  PersonSyncRead,
   RequestPickRefusalCode,
+  RoleSyncRead,
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
@@ -36,19 +38,37 @@ export interface GatheredReleaseView {
   readonly downloads: readonly GatheredDownloadView[];
 }
 
+/** Mirrors `ArtworkUrls` in `web/src/store/gather.ts`. Urls, never rows -- artwork is not replicated (#79). */
+export type ArtworkUrlsView = Readonly<Record<'poster' | 'background' | 'logo', string>>;
+
+/** Mirrors `GatheredRole` in `web/src/store/gather.ts`. */
+export interface GatheredRoleView {
+  readonly id: number;
+  readonly row: RoleSyncRead;
+  /**
+   * `undefined` while the person named by this role has not replicated --
+   * log order is not group order, so a role can land before its person.
+   */
+  readonly person: PersonSyncRead | undefined;
+  readonly imageUrl: string;
+}
+
 /**
- * The one field of `GatheredItem` (`web/src/store/gather.ts`) a card's
- * release list reads.
+ * The fields of `GatheredItem` (`web/src/store/gather.ts`) a card and its
+ * detail section read.
  *
  * Deliberately narrower than `GatheredItem` itself: a plugin's `Card` gets a
  * media item's own fields from `CardProps.item` already (`plugin.ts`), so
  * this view promises only what nothing else on `CardProps` already does.
- * `GatheredItem` carries more than this -- `roles`, `artwork`, `feedIds` --
- * and stays assignable to this narrower shape precisely because TypeScript's
- * structural typing does not require the wider type to have no more fields.
+ * `GatheredItem` still carries more than this -- `mediaItem`, `pluginId`,
+ * `feedIds` -- and stays assignable to this narrower shape precisely because
+ * TypeScript's structural typing does not require the wider type to have no
+ * more fields.
  */
 export interface GatheredItemView {
   readonly releases: readonly GatheredReleaseView[];
+  readonly roles: readonly GatheredRoleView[];
+  readonly artwork: ArtworkUrlsView;
 }
 
 /**

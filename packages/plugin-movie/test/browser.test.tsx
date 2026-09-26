@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { PickSubmit } from '@pickarr/plugin-ui';
+import type { GatheredItemView, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
 import { movieBrowser, movieHeadline } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -32,6 +32,88 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  * `submit` is a required prop precisely so a test cannot forget it.
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
+
+function gathered(): GatheredItemView {
+  return {
+    releases: [],
+    roles: [],
+    artwork: {
+      poster: '/api/artwork/poster/1',
+      background: '/api/artwork/background/1',
+      logo: '/api/artwork/logo/1',
+    },
+  };
+}
+
+/**
+ * Renders the movie card already expanded, with whatever `PluginRows` the
+ * caller hands it. Expansion is real, not assumed: the card starts
+ * collapsed (`useExpansion`'s own default), so this clicks the heading's
+ * own button rather than rendering `MediaDetails` directly -- the same
+ * path a user takes.
+ */
+function renderMovieCardExpandedWithRows(rows: PluginRows): void {
+  render(
+    <Card
+      item={mediaItem()}
+      rows={rows}
+      gathered={gathered()}
+      onExpandedChange={() => {}}
+      submit={submit}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button'));
+}
+
+/** As above, with a `movie_detail` row carrying the given `imdbId`. */
+function renderMovieCardExpanded(row: { imdbId: string | null }): void {
+  renderMovieCardExpandedWithRows({
+    movie_detail: [{ mediaItemId: 1, runtimeMinutes: null, tagline: null, ...row }],
+  });
+}
+
+test('a film with an imdb id links to IMDb, and one without shows no IMDb badge', () => {
+  renderMovieCardExpanded({ imdbId: 'tt15239678' });
+  const link = screen.getByRole('link', { name: 'IMDb' });
+  assert.equal(link.getAttribute('href'), 'https://www.imdb.com/title/tt15239678/');
+
+  cleanup();
+
+  renderMovieCardExpanded({ imdbId: null });
+  assert.ok(!screen.queryByText('IMDb'), 'no badge without an id');
+});
+
+test('a movie_detail row that does not match is declined, not asserted, so no badge renders', () => {
+  // Exercises `movieRowFrom`'s decline branch directly, which the happy-path
+  // test above never reaches: every row it builds is shaped exactly like
+  // today's contract. `PluginRows` holds `unknown` precisely because a
+  // replica outlives the client build that wrote it -- these four rows are
+  // each a shape an older or malformed build could have left behind.
+
+  // The table was declared but this item has no row in it.
+  renderMovieCardExpandedWithRows({ movie_detail: [] });
+  assert.ok(!screen.queryByText('IMDb'), 'no row at all means no badge');
+  cleanup();
+
+  // A row from a build before `imdbId` existed -- the realistic case, and
+  // the one the guard is really for.
+  renderMovieCardExpandedWithRows({
+    movie_detail: [{ mediaItemId: 1, runtimeMinutes: null, tagline: null }],
+  });
+  assert.ok(!screen.queryByText('IMDb'), 'a pre-imdbId row means no badge');
+  cleanup();
+
+  // The field is present but is not a string or null.
+  renderMovieCardExpandedWithRows({
+    movie_detail: [{ mediaItemId: 1, imdbId: 42 }],
+  });
+  assert.ok(!screen.queryByText('IMDb'), 'a wrongly-typed imdbId means no badge');
+  cleanup();
+
+  // Not an object at all.
+  renderMovieCardExpandedWithRows({ movie_detail: ['nonsense'] });
+  assert.ok(!screen.queryByText('IMDb'), 'a non-object row means no badge');
+});
 
 test('a film with a release date is titled with its year, in the film-library convention', () => {
   // Spelled literally rather than built from `mediaItem(...)`'s own

@@ -173,3 +173,25 @@ test('a media item that does not match its shape reads as absent', async () => {
   assert.equal(await gatherMediaItem(db, 7), undefined);
   db.close();
 });
+
+test('a gathered role carries the url its person’s picture is served from', async () => {
+  // The url is spelled literally, never rebuilt by calling the helper that
+  // produces it: a test whose expectation is computed by the code under
+  // test cannot detect that code changing (see CLAUDE.md on `groupAnchor`,
+  // which returned a constant while 70 tests passed).
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    { op: 'upsert', table: 'person', id: 9, value: { name: 'Alice', providerRef: 'tmdb:person:9' } },
+    { op: 'upsert', table: 'role', id: 2, value: { mediaItemId: 7, personId: 9, role: 'actor' } },
+  ]);
+
+  const gathered = await gatherMediaItem(db, 7);
+
+  assert.ok(gathered !== undefined);
+  assert.equal(gathered.roles[0]?.imageUrl, '/api/artwork/person/9');
+  // The media urls keyed on the item, not on the person -- the route takes
+  // a different id column for each (`ARTWORK_QUERY`).
+  assert.equal(gathered.artwork.poster, '/api/artwork/poster/7');
+  db.close();
+});

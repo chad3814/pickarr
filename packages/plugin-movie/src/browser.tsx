@@ -12,24 +12,49 @@
  * are two pieces rather than one card component. `test/expansion.test.tsx`
  * fails if any plugin hand-writes `aria-expanded` again.
  *
- * **No `tables`.** This card reads no replica row: spec §7.2 puts
- * `MovieRead.runtimeMinutes` and `tagline` out of scope, and declaring a
- * table a card does not read would make the page fetch rows nothing uses.
- * When that content lands it goes in the body gate below.
+ * **`tables: ['movie_detail']`, for exactly one column.** Spec §7.2 puts
+ * `MovieRead.runtimeMinutes` and `tagline` out of scope, but `imdb_id` is
+ * this plugin's own external-link identity, and `MediaDetails` is shared
+ * by three plugins, two of which have no IMDb identity at all -- so the
+ * link can only be supplied from here, via `extraLinks`.
  *
- * **The year in the title needs no table either**, which is why it is here
- * and not behind a `tables` declaration: `release_date` is a `media_item`
- * column and arrives on `CardProps.item`. See {@link movieHeadline}.
+ * **The year in the title needs no table**, which is why it is here and
+ * not behind the `tables` declaration above: `release_date` is a
+ * `media_item` column and arrives on `CardProps.item`. See {@link movieHeadline}.
  */
 import type { ReactElement } from 'react';
-import { CardHeading, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
+import {
+  CardHeading,
+  MediaDetails,
+  ReleaseList,
+  useExpansion,
+  type BrowserPlugin,
+  type CardProps,
+  type PluginRows,
+} from '@pickarr/plugin-ui';
+
+/**
+ * This item's `movie_detail` row, or `undefined`.
+ *
+ * Narrowed rather than asserted: `PluginRows` holds `unknown`, and the
+ * replica outlives the build that wrote it -- a row from an older client
+ * may not carry `imdbId` at all. A row that does not match is declined,
+ * which costs an IMDb badge rather than throwing inside a card.
+ */
+function movieRowFrom(rows: PluginRows): { readonly imdbId: string | null } | undefined {
+  const row = rows['movie_detail']?.[0];
+  if (typeof row !== 'object' || row === null || !('imdbId' in row)) return undefined;
+  const { imdbId } = row;
+  if (imdbId !== null && typeof imdbId !== 'string') return undefined;
+  return { imdbId };
+}
 
 /**
  * `Title (2024)`, or the bare title when this film has no usable year.
  *
  * **The year comes from `media_item.release_date`, not from a plugin
- * table**, so this card still declares no `tables` -- the date is already
- * on `CardProps.item`.
+ * table** -- the date is already on `CardProps.item`, so it needs none of
+ * the `movie_detail` row this card declares `tables` for.
  *
  * **The first four characters, never a `Date`.** `release_date` is the
  * lookup service's own ISO `yyyy-mm-dd` string, and parsing it introduces
@@ -49,13 +74,24 @@ export function movieHeadline(title: string, releaseDate: string | null): string
   return /^[0-9]{4}$/.test(year) ? `${title} (${year})` : title;
 }
 
-function MovieCard({ item, gathered, onExpandedChange, submit }: CardProps): ReactElement {
+function MovieCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange);
+
+  // IMDb is this plugin's to supply: `imdb_id` is a `movie_detail` column,
+  // and `MediaDetails` is shared by three plugins, two of which have no
+  // IMDb identity at all.
+  const imdbId = movieRowFrom(rows)?.imdbId ?? null;
+  const extraLinks = imdbId === null ? [] : [{ label: 'IMDb', href: `https://www.imdb.com/title/${imdbId}/` }];
 
   return (
     <>
       <CardHeading headline={movieHeadline(item.title, item.releaseDate)} expanded={expanded} onToggle={toggle} />
-      {expanded && gathered !== undefined && <ReleaseList releases={gathered.releases} submit={submit} />}
+      {expanded && gathered !== undefined && (
+        <>
+          <MediaDetails item={item} gathered={gathered} extraLinks={extraLinks} />
+          <ReleaseList releases={gathered.releases} submit={submit} />
+        </>
+      )}
     </>
   );
 }
@@ -63,6 +99,6 @@ function MovieCard({ item, gathered, onExpandedChange, submit }: CardProps): Rea
 export const movieBrowser: BrowserPlugin = {
   id: 'movie',
   label: 'Movies',
-  tables: [],
+  tables: ['movie_detail'],
   Card: MovieCard,
 };
