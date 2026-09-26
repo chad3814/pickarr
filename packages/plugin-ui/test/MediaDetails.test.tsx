@@ -135,12 +135,28 @@ test('a person whose picture fails keeps their name and gets the placeholder', (
 
   assert.ok(screen.getByText('Alice'), 'the name survives');
   assert.ok(screen.getByRole('img', { name: 'No picture of Alice' }), 'the placeholder is shown');
+  assert.ok(
+    !screen.queryByRole('button', { name: 'No picture of Alice' }),
+    'no button once the picture failed -- Finding 2, below',
+  );
+});
 
-  // Review Focus 3, continued: the button's accessible name changed to the
-  // placeholder's label, but the click handler still opens the gallery for
-  // the person, not the placeholder.
-  fireEvent.click(screen.getByRole('button', { name: 'No picture of Alice' }));
-  assert.ok(screen.getByRole('dialog', { name: 'Alice' }), 'the gallery opens for Alice, not the placeholder');
+test('a cast member whose image failed opens no dialog, because it has no button to click', () => {
+  // Whole-branch review finding 2. A person's gallery holds exactly one
+  // url; once it has 404'd there is nothing left to show, so `Gallery`'s
+  // own effect would close it the instant it opened -- a modal that opens
+  // and shuts in one frame, stealing and returning focus for nothing. Most
+  // people have no picture at all, so this is the common path a card
+  // renders, not an edge case.
+  const alice = person(7, 'Alice');
+  render(
+    <MediaDetails item={item()} gathered={gathered({ roles: [role(1, 7, 0, alice)] })} />,
+  );
+
+  fireEvent.error(screen.getByAltText('Alice'));
+
+  assert.ok(!screen.queryByRole('button', { name: 'No picture of Alice' }), 'no control that would do nothing');
+  assert.ok(!screen.queryByRole('dialog'), 'no gallery flash-opened for a 404 that was never shown');
 });
 
 test('a poster that fails to load keeps its button working for the item', () => {

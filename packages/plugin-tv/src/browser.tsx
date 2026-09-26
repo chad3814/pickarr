@@ -28,8 +28,16 @@
  * and the card element; a plugin owns everything below it (design spec §2).
  */
 import type { ReactElement } from 'react';
-import type { TvRead } from '@pickarr/contract';
-import { CardHeading, MediaDetails, ReleaseList, useExpansion, type BrowserPlugin, type CardProps } from '@pickarr/plugin-ui';
+import type { MediaItemSyncRead, TvRead } from '@pickarr/contract';
+import {
+  CardHeading,
+  MediaDetails,
+  ReleaseList,
+  useExpansion,
+  type BrowserPlugin,
+  type CardProps,
+  type ExternalLink,
+} from '@pickarr/plugin-ui';
 import { tvHeadline } from './headline.ts';
 
 /**
@@ -48,14 +56,17 @@ const TV_RELEASE_TABLE = 'tv_release';
  * declines here instead of reaching `tvHeadline` and throwing (Global
  * Constraint).
  *
- * **Checks only the fields `tvHeadline` dereferences -- `seriesTitle`,
- * `seasonNumber` and `episodeNumber` -- and no more**, the same restraint
- * `store/gather.ts`'s own predicates take
+ * **Checks only the fields this module dereferences, and no more**, the
+ * same restraint `store/gather.ts`'s own predicates take
  * (`packages/web/src/store/gather.ts:79`: "Each predicate checks the fields
- * this module itself dereferences, and no more"). `TvRead.kind` is not
- * checked, for the reason `headline.ts`'s own docblock gives: nothing on
- * this card's path reads it either, so checking it would be a second
- * statement of a rule this module does not use.
+ * this module itself dereferences, and no more"). That used to be
+ * `seriesTitle`, `seasonNumber` and `episodeNumber` alone -- `tvHeadline`'s
+ * own three -- with `TvRead.kind` and `seriesRef` left unchecked because
+ * nothing on this card's path read them either. Whole-branch review finding
+ * 1 gave `tvdbExtraLinks` below a reason to read both, so both are checked
+ * here now too: a row a build before that finding wrote may lack them, and
+ * a card built on a badly-typed `kind` would rather render no badge than
+ * guess one from `undefined`.
  */
 function isTvRelease(value: unknown): value is TvRead {
   return (
@@ -63,6 +74,10 @@ function isTvRelease(value: unknown): value is TvRead {
     value !== null &&
     'seriesTitle' in value &&
     typeof value.seriesTitle === 'string' &&
+    'seriesRef' in value &&
+    typeof value.seriesRef === 'string' &&
+    'kind' in value &&
+    (value.kind === 'series' || value.kind === 'season' || value.kind === 'episode') &&
     'seasonNumber' in value &&
     (value.seasonNumber === null || typeof value.seasonNumber === 'number') &&
     'episodeNumber' in value &&
@@ -83,12 +98,59 @@ function tvRelease(rows: CardProps['rows']): TvRead | undefined {
   return (rows[TV_RELEASE_TABLE] ?? []).find(isTvRelease);
 }
 
+/** A TheTVDB id is bare decimal digits. Anything else is refused rather than built into a url that 404s. */
+const TVDB_BARE_ID = /^[0-9]+$/;
+
+/**
+ * The TVDB badge for this item, or `[]` -- whole-branch review finding 1.
+ *
+ * `mediaLink` in `@pickarr/plugin-ui`'s `links.ts` returns `undefined` for
+ * every `tvdb` reference, and its own doc says why: a bare TVDB id is
+ * shape-indistinguishable between a series and an episode, so the shared
+ * component cannot tell which route to build. This plugin can, from
+ * `TvRead.kind`:
+ *
+ * - `episode` -- `item.providerRef` is the episode's *own* bare id, and
+ *   `dereferrer/episode/{id}` is the route that takes it (verified live;
+ *   `dereferrer/series/{id}` 404s for the same id).
+ * - `series` -- `item.providerRef` is the series' own bare id, and
+ *   `dereferrer/series/{id}` takes it directly.
+ * - `season` -- `item.providerRef` is the *season's* own composite ref
+ *   (`184871:s14`), and no dereferrer route takes that shape at all
+ *   (`dereferrer/season/1` is also a verified 404). `seriesRef` is used
+ *   instead -- the series' own bare id (`tv_series.provider_ref`, joined in
+ *   as `TvRead.seriesRef` by `sync.ts`), routed through `dereferrer/series/`
+ *   the same as the `series` case.
+ *
+ * **Only when `item.provider === 'tvdb'`.** A tv item TMDB resolved keeps
+ * its one badge from `mediaLink`'s own `tmdb` arm; adding a second one here
+ * for that item would give it two.
+ *
+ * **A tvdb-provided movie gets no badge after this branch, and that is
+ * deliberate.** `plugin-movie` has no `TvRead.kind` to disambiguate a bare
+ * id by, so it has no equivalent of this function -- no link beats a 404,
+ * and nothing had a badge before this branch existed either.
+ *
+ * The chosen id is validated as bare digits before a url is built from it:
+ * a malformed or future reference shape yields no link, never one assembled
+ * from something this function did not actually parse.
+ */
+function tvdbExtraLinks(item: MediaItemSyncRead, release: TvRead | undefined): readonly ExternalLink[] {
+  if (item.provider !== 'tvdb' || release === undefined) return [];
+  const id = release.kind === 'season' ? release.seriesRef : item.providerRef;
+  if (id === null || !TVDB_BARE_ID.test(id)) return [];
+  const path = release.kind === 'episode' ? 'episode' : 'series';
+  return [{ label: 'TVDb', href: `https://thetvdb.com/dereferrer/${path}/${id}` }];
+}
+
 /**
  * The expander is `@pickarr/plugin-ui`'s, not this card's (issue #106).
  * `useExpansion` owns the state and the rule that every transition is
  * reported to web, closing included; `CardHeading` owns the `<h2>` and its
  * announcement. What is left here is the only thing that differs between
- * the three shipped cards: which string the headline is.
+ * the three shipped cards: which string the headline is, and -- since
+ * finding 1 -- the TVDb link `tvdbExtraLinks` supplies through the same
+ * `extraLinks` seam `plugin-movie` uses for IMDb.
  */
 function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange);
@@ -97,13 +159,14 @@ function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): 
   // renders `item.title` alone -- there is no series or episode number to
   // build a headline out of.
   const headline = release === undefined ? item.title : tvHeadline(release, item.title);
+  const extraLinks = tvdbExtraLinks(item, release);
 
   return (
     <>
       <CardHeading headline={headline} expanded={expanded} onToggle={toggle} />
       {expanded && gathered !== undefined && (
         <>
-          <MediaDetails item={item} gathered={gathered} />
+          <MediaDetails item={item} gathered={gathered} extraLinks={extraLinks} />
           <ReleaseList releases={gathered.releases} submit={submit} />
         </>
       )}

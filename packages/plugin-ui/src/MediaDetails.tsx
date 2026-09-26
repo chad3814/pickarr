@@ -161,6 +161,21 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
  *
  * Its own component because it holds per-person state -- whether that
  * picture failed -- which a `map` in the parent cannot.
+ *
+ * **No button once the picture has failed, whole-branch review finding
+ * 2.** A person's gallery holds exactly one url (`role.imageUrl`, unlike
+ * the media gallery's three), so once that url has 404'd there is nothing
+ * left for the gallery to show. `Gallery`'s own effect closes itself the
+ * instant it finds no image showing -- which fires the same render pass it
+ * mounts in, since the 404 this button's own `onError` reacted to is
+ * already cached -- so a button that still opened it would flash a dialog
+ * open and shut in one frame, stealing and returning focus for nothing.
+ * Most people on a card have no picture at all (the person artwork route
+ * 404s for all but a few), so this is the common path, not an edge case.
+ * A control that opens nothing is worse than no control, so the button is
+ * dropped rather than kept as a no-op -- unlike the poster's own button
+ * just below, which keeps opening even once its poster has failed, because
+ * that gallery also holds a background and a logo that may still resolve.
  */
 function CastMember({
   role, provider, onOpen,
@@ -175,15 +190,15 @@ function CastMember({
 
   return (
     <li>
-      <button
-        type="button"
-        onClick={() => {
-          onOpen({ urls: [role.imageUrl], caption: name });
-        }}
-      >
-        {failed ? (
-          <ImagePlaceholder label={`No picture of ${name}`} />
-        ) : (
+      {failed ? (
+        <ImagePlaceholder label={`No picture of ${name}`} />
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            onOpen({ urls: [role.imageUrl], caption: name });
+          }}
+        >
           <img
             src={role.imageUrl}
             alt={name}
@@ -191,8 +206,8 @@ function CastMember({
               setFailed(true);
             }}
           />
-        )}
-      </button>
+        </button>
+      )}
       {href === undefined
         ? <span>{name}</span>
         : <a href={href} target="_blank" rel="noreferrer noopener">{name}</a>}

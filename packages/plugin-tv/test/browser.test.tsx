@@ -1,8 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
-import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { PickSubmit, PluginRows } from '@pickarr/plugin-ui';
+import type { MediaItemSyncRead, TvRead } from '@pickarr/contract';
+import type { GatheredItemView, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
 import { tvBrowser } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -26,12 +26,63 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
 }
 
 /**
- * Never called: no test in this file renders `gathered`, so `Card` never
- * reaches `ReleaseList` and never calls this. Spelled out anyway rather
- * than defaulted, for the reason `ReleaseList.tsx`'s own docblock gives --
- * `submit` is a required prop precisely so a test cannot forget it.
+ * Not called by any test that never expands the card: `Card` reaches
+ * `ReleaseList` only once expanded and `gathered` is defined
+ * (`TvCard`'s own body). Spelled out anyway rather than defaulted, for the
+ * reason `ReleaseList.tsx`'s own docblock gives -- `submit` is a required
+ * prop precisely so a test cannot forget it. The finding-1 tests below do
+ * expand the card, but none of them clicks a Pick button, so this stays
+ * unreached even there.
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
+
+/** A `GatheredItemView` with no releases and placeholder artwork urls -- enough to expand the card. */
+function gathered(): GatheredItemView {
+  return {
+    releases: [],
+    roles: [],
+    artwork: {
+      poster: '/api/artwork/poster/1',
+      background: '/api/artwork/background/1',
+      logo: '/api/artwork/logo/1',
+    },
+  };
+}
+
+/** A `TvRead` with everything but `kind` and `seriesRef` defaulted. */
+function tvRelease(over: Partial<TvRead> = {}): TvRead {
+  return {
+    mediaItemId: 1,
+    kind: 'episode',
+    seriesTitle: 'Jo Jo’s Bizarre Adventure',
+    seriesRef: '184871',
+    seasonNumber: null,
+    episodeNumber: null,
+    ...over,
+  };
+}
+
+/**
+ * Renders the tv card already expanded, with the given item and (optional)
+ * `tv_release` row. Expansion is real, not assumed: the card starts
+ * collapsed (`useExpansion`'s own default), so this clicks the heading's
+ * own button rather than rendering `MediaDetails` directly -- the same path
+ * a user takes, and the same pattern `plugin-movie/test/browser.test.tsx`
+ * uses for its own IMDb-link tests.
+ */
+function renderTvCardExpanded(item: Partial<MediaItemSyncRead>, release: TvRead | undefined): void {
+  const rows: PluginRows = { tv_release: release === undefined ? [] : [release] };
+  render(
+    <Card
+      item={mediaItem(item)}
+      rows={rows}
+      gathered={gathered()}
+      onExpandedChange={() => {}}
+      submit={submit}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button'));
+}
 
 test('the headline renders in the expander button’s accessible name, before anything is expanded', () => {
   const rows: PluginRows = {
@@ -115,4 +166,61 @@ test('every expand and every collapse is reported, with the state the card moved
   fireEvent.click(button);
   fireEvent.click(button);
   assert.deepEqual(reported, [true, false, true], 'open, close, open -- each reported once, in order');
+});
+
+// Whole-branch review finding 1. `@pickarr/plugin-ui`'s `mediaLink` refuses
+// every `tvdb` reference -- a bare id cannot be typed as series or episode
+// from its shape alone -- so this plugin supplies the badge itself, via
+// `extraLinks`, using `TvRead.kind` to pick the right dereferrer route.
+
+test('a tvdb episode links to its own dereferrer/episode route, not /series/', () => {
+  // The defect this finding fixed: every episode used to get
+  // `/dereferrer/series/{episode id}`, a verified 404.
+  renderTvCardExpanded(
+    { provider: 'tvdb', providerRef: '10019744' },
+    tvRelease({ kind: 'episode', seriesRef: '184871', seasonNumber: 2, episodeNumber: 47 }),
+  );
+  const link = screen.getByRole('link', { name: 'TVDb' });
+  assert.equal(link.getAttribute('href'), 'https://thetvdb.com/dereferrer/episode/10019744');
+});
+
+test('a tvdb series links to its own dereferrer/series route', () => {
+  renderTvCardExpanded(
+    { provider: 'tvdb', providerRef: '184871' },
+    tvRelease({ kind: 'series', seriesRef: '184871' }),
+  );
+  const link = screen.getByRole('link', { name: 'TVDb' });
+  assert.equal(link.getAttribute('href'), 'https://thetvdb.com/dereferrer/series/184871');
+});
+
+test('a tvdb season links to its series via seriesRef, not its own composite ref', () => {
+  // `item.providerRef` for a season is `184871:s14` -- the season's own
+  // ref -- and no dereferrer route takes that shape (`dereferrer/season/1`
+  // is also a verified 404). `seriesRef` is the series' own bare id and is
+  // what must be used instead.
+  renderTvCardExpanded(
+    { provider: 'tvdb', providerRef: '184871:s14' },
+    tvRelease({ kind: 'season', seriesRef: '184871', seasonNumber: 14, episodeNumber: null }),
+  );
+  const link = screen.getByRole('link', { name: 'TVDb' });
+  assert.equal(link.getAttribute('href'), 'https://thetvdb.com/dereferrer/series/184871');
+});
+
+test('a tmdb-provided tv item still gets exactly one badge, from the shared mediaLink path', () => {
+  // `item.provider === 'tmdb'` here, not `'tvdb'` -- `tvdbExtraLinks` must
+  // contribute nothing, or this item would carry two badges.
+  renderTvCardExpanded(
+    { provider: 'tmdb', providerRef: 'tmdb:tv:1399:1:1' },
+    tvRelease({ kind: 'episode', seriesRef: '184871' }),
+  );
+  assert.equal(screen.getAllByRole('link', { name: 'TMDb' }).length, 1, 'exactly one badge');
+  assert.ok(!screen.queryByText('TVDb'), 'no second badge from this plugin');
+});
+
+test('a malformed tvdb providerRef yields no badge at all', () => {
+  renderTvCardExpanded(
+    { provider: 'tvdb', providerRef: 'not-an-id' },
+    tvRelease({ kind: 'series', seriesRef: '184871' }),
+  );
+  assert.ok(!screen.queryByText('TVDb'), 'no url built from a reference this function could not parse');
 });

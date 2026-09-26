@@ -27,10 +27,18 @@ const NO_ROWS: PluginRows = {};
 
 /**
  * A `tv_release` row as `plugin-tv`'s card narrows it (`TvRead`'s
- * `seriesTitle`, `seasonNumber` and `episodeNumber`), under the table name
+ * `seriesTitle`, `seasonNumber` and `episodeNumber`, and -- since
+ * whole-branch review finding 1 gave `tvdbExtraLinks` a reason to read
+ * them too -- `kind` and `seriesRef`), under the table name
  * `tvBrowser.tables` declares.
  */
-function tvRows(row: { seriesTitle: string; seasonNumber: number | null; episodeNumber: number | null }): PluginRows {
+function tvRows(row: {
+  seriesTitle: string;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  kind: 'series' | 'season' | 'episode';
+  seriesRef: string;
+}): PluginRows {
   return { tv_release: [row] };
 }
 
@@ -287,7 +295,13 @@ test("a TV item's card is the tv plugin's, and its headline names the series and
     <MediaItemCard
       source={stubSource}
       item={summary({ id: 7, title: "Dio's World(3)" })}
-      rows={tvRows({ seriesTitle: "Jo Jo's Bizarre Adventure", seasonNumber: 2, episodeNumber: 47 })}
+      rows={tvRows({
+        seriesTitle: "Jo Jo's Bizarre Adventure",
+        seasonNumber: 2,
+        episodeNumber: 47,
+        kind: 'episode',
+        seriesRef: '184871',
+      })}
       submit={acceptsPick}
     />,
   );

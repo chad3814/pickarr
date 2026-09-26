@@ -68,6 +68,21 @@ export function providerDisplayName(provider: string): string | undefined {
  * build -- an unclaimed item (`provider` and `providerRef` are null
  * together), a provider with no pattern, or a reference this build cannot
  * read. Never a url assembled from an unparsed reference.
+ *
+ * **No `tvdb` arm, deliberately.** A media reference is a *bare* id for
+ * this provider (`184871`), and that shape is worn identically by a series
+ * and by an episode -- an episode's own id, not its series' (verified live:
+ * `dereferrer/series/10019744` is a 404, `dereferrer/episode/10019744`
+ * redirects). Nothing in `provider`/`providerRef` alone says which one a
+ * given bare id names, so this shared function cannot build a correct url
+ * from them and must not guess `series` the way the first version of this
+ * file did. Only the plugin that resolved the item knows: `plugin-tv`'s
+ * `TvRead.kind` says series, season or episode, and `plugin-tv/src/browser.tsx`
+ * supplies the right link through `MediaDetails`'s `extraLinks`, the same
+ * seam `plugin-movie` already uses for IMDb. A `tvdb` movie therefore gets
+ * no badge at all -- `plugin-movie` has no `kind` to disambiguate by either
+ * -- which is accepted: no link beats a 404, and nothing had a badge before
+ * this branch existed.
  */
 export function mediaLink(provider: string | null, providerRef: string | null): ExternalLink | undefined {
   if (provider === null || providerRef === null) return undefined;
@@ -79,9 +94,6 @@ export function mediaLink(provider: string | null, providerRef: string | null): 
     return type === undefined
       ? undefined
       : { label: 'TMDb', href: `https://www.themoviedb.org/${type}/${id}` };
-  }
-  if (provider === 'tvdb') {
-    return { label: 'TVDb', href: `https://thetvdb.com/dereferrer/series/${id}` };
   }
   if (provider === 'tpdb') {
     return { label: 'TPDb', href: `https://theporndb.net/scenes/${id}` };

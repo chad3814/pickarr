@@ -17,9 +17,14 @@
  *   own poster and each cast thumbnail) and `Gallery.tsx` (the lightbox image),
  *   rendered by a plugin's card inside that same `<article>` once expanded.
  *   `article img` below reaches all four, so any rule scoped to the latter
- *   three must override `width` and `aspect-ratio` explicitly rather than
- *   leave either unset -- leaving one unset lets it fall through uncontested
- *   even where that rule wins on specificity for the properties it does set.
+ *   three must override `width`, `aspect-ratio`, `border`, `border-radius`
+ *   and `margin-bottom` explicitly rather than leave any unset -- leaving
+ *   one unset lets it fall through uncontested even where that rule wins on
+ *   specificity for the properties it does set. `.gallery img` missed
+ *   `border`, `border-radius` and `margin-bottom` until this review: the
+ *   lightbox image carried a hairline frame and an uneven gap that neither
+ *   `.details .poster img` nor `.cast img` leaves behind, because both of
+ *   those already override all five.
  * - `<article>`: **two sites now, both web's.** `MediaItemCard.tsx` opens
  *   one per browse row, and `library/Unmatched.tsx` opens one per
  *   unmatched release -- the card the `article dl` rules below style. That is
@@ -33,13 +38,17 @@
  *   and all three plugins' `browser.tsx` before the rules below were
  *   keyed on them.
  * - `ul[aria-label='releases']`: `@pickarr/plugin-ui`'s `ReleaseList.tsx`.
- * - `<h2>`: **two shapes, across five sites.** Each of the three plugins'
+ * - `<h2>`: **two shapes, across six sites.** Each of the three plugins'
  *   `browser.tsx` renders one holding the expander button, `Unmatched.tsx`
  *   renders a fifth of that same shape through the same shared
- *   `CardHeading`, and `MediaItemCard.tsx` renders a plain one on its
+ *   `CardHeading`, `MediaItemCard.tsx` renders a plain one on its
  *   unknown-plugin fallback path -- an item whose `pluginId` the registry
- *   has no card for gets a title and no expander. So `article h2` below
- *   styles both shapes, and `article h2 button` reaches only the first.
+ *   has no card for gets a title and no expander -- and `@pickarr/plugin-ui`'s
+ *   `Gallery.tsx` renders a sixth, plain like the fallback's: the lightbox
+ *   heading, inside the same `<article>` once a plugin's card opens a
+ *   gallery over it. So `article h2` below styles both sites of the plain
+ *   shape as much as the four of the button-holding one, and
+ *   `article h2 button` reaches only the latter.
  *
  * That is the coupling to know about before editing either side: a plugin
  * renaming its heading element silently drops `article h2 button`, and the
@@ -83,8 +92,12 @@
  * paragraph was written -- `Category`'s and `Unmatched`'s empty-list
  * states, and `Shell`'s store-failure explanation. There are **18** in
  * `packages/web/src` now, counted on this tree; the four settings screens
- * brought the other fifteen, and `section > p`'s own comment below accounts
- * for the eight that rule reaches and the ten it does not.
+ * brought the other fifteen. `packages/web/src` is not the whole count any
+ * more, though -- `section > p`'s own comment below has why -- and that
+ * comment accounts for the nine direct-child `<p>`s across
+ * `packages/web/src` and `@pickarr/plugin-ui` together, the eight the rule
+ * matches, the one it deliberately excludes, and the ten that are not
+ * direct children at all.
  * 1.x's six deleted component stylesheets (`git show
  * bbce069:packages/web/src/styles/card.css` and its five siblings) were
  * tuned against these same tokens and are worth reading before touching this
@@ -119,8 +132,8 @@ article {
    three, and because they render inside a plugin's card body, which
    `MediaItemCard.tsx` renders inside this very `<article>`, this rule
    reaches them too. A rule scoped to one of those three must override
-   `width` and `aspect-ratio` explicitly, or this rule's values leak
-   through uncontested.
+   `width`, `aspect-ratio`, `border`, `border-radius` and `margin-bottom`
+   explicitly, or this rule's values leak through uncontested.
 
    All three of `width`, `aspect-ratio` and `object-fit` are pinned in a
    browser -- see this file's own header for the spec and for what each
@@ -559,9 +572,17 @@ ul[aria-label='releases'] li > [role='alert'] {
  * different state from one still in flight, not as an ordinary line of
  * text about to be followed by more.
  *
- * **What this rule reaches, audited on this tree rather than inferred.**
- * `packages/web/src` holds 18 `<p>`, and eight of them are direct children
- * of a `<section>`:
+ * **What this rule reaches, audited on this tree rather than inferred --
+ * and the audit's own blind spot, found by this same review.** This
+ * comment used to count only `packages/web/src`'s own eighteen `<p>`
+ * elements, eight of them direct children of a `<section>`. A stylesheet
+ * is matched against the rendered document, not against a package
+ * (this file's own header makes the same point about `<img>` and `<h2>`),
+ * so a `<p>` `@pickarr/plugin-ui` renders inside one of web's `<section>`s
+ * counts too, and one does: `MediaDetails.tsx`'s `<p className="details-foot">`
+ * sits directly inside `<section className="details">`, making **nine**
+ * direct children now, not eight. Audited across both `packages/web/src`
+ * and `@pickarr/plugin-ui`'s own rendered markup, the nine are:
  *
  * - `Category`'s "Nothing here yet." and `Unmatched`'s "Everything has been
  *   matched." -- the two empty-list states the rule was written for.
@@ -574,6 +595,10 @@ ul[aria-label='releases'] li > [role='alert'] {
  *   plugin's library folder, the sentence about braces not being escapable
  *   in a path shape, and "Reading saved destinations…", the first-read
  *   still-running line.
+ * - `MediaDetails.tsx`'s `.details-foot`, the release-date/attribution line
+ *   under an expanded card's cast -- ordinary primary text, not a
+ *   dim-italic empty state, and not this rule's to reach; see the
+ *   dedicated exclusion below.
  *
  * The other ten are not direct children and this rule does not reach them:
  * a listed feed's url and a listed client's implementation, address,
@@ -602,8 +627,16 @@ ul[aria-label='releases'] li > [role='alert'] {
  * (`Shell.tsx`'s `StoreFailed`, and `CLAUDE.md`'s hazard on asserting a
  * `role` instead of a visible heading), and this line is the remedy rather
  * than the alarm.
+ *
+ * **`.details-foot` is excluded by selector, rather than given an
+ * overriding rule of its own -- a decision, not the default.** Letting it
+ * match and then fighting the result with a second, more specific rule
+ * would leave two rules disagreeing about the same element with nothing
+ * beside either one to say why; `:not(.details-foot)` states the exception
+ * at the one rule that would otherwise cause it, where the next editor of
+ * this selector will already be looking.
  */
-section > p {
+section > p:not(.details-foot) {
   color: var(--color-text-dim);
   font-size: var(--text-meta);
   font-style: italic;
@@ -624,6 +657,27 @@ section > p {
 
 .icon-row { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.5rem; }
 .icon-row .icon { width: 1.1rem; height: 1.1rem; color: var(--color-text-dim); }
+
+/*
+ * Whole-branch review finding 5. `base.css`'s `a { color: var(--color-accent-text); }`
+ * is beaten here on specificity alone -- `.icon-row .badge` is two classes
+ * against one type selector -- and `.icon-row a { text-decoration: none; }`
+ * removes the underline too, so a provider badge (every one of which is
+ * rendered inside an `<a>`, `MediaDetails.tsx`'s own `links.map`) had no
+ * affordance left but the cursor.
+ *
+ * **Quiet by default, on hover/focus rather than always -- the same choice
+ * `base.css`'s `nav a` makes, and for the same reason its own comment
+ * gives.** `nav a` stays `--color-text-dim` at rest and only moves toward
+ * `--color-text` on `:hover`; a whole row of accent-coloured badges would
+ * read as a row of calls to action, which is louder than "this is a link"
+ * needs to be. `:focus-visible` alongside `:hover` so the same affordance
+ * reaches keyboard use, not only a mouse.
+ */
+.icon-row a:is(:hover, :focus-visible) .badge {
+  color: var(--color-accent-text);
+  text-decoration: underline;
+}
 .icon-row .badge {
   font-size: 0.75rem; padding: 0.1rem 0.35rem; border-radius: 3px;
   border: 1px solid var(--color-text-dim); color: var(--color-text-dim);
@@ -661,15 +715,21 @@ section > p {
 }
 .gallery h2 { margin: 0; font-size: 1rem; }
 .gallery img {
-  /* `article img` (this file, near line 109) sets `width` and
-     `aspect-ratio` for the browse-row poster, and every `<img>` this
-     section adds renders inside that same `<article>` -- Gallery included,
-     since it renders as part of a card's expanded body. Left unset here,
-     those two properties fall through uncontested even though this rule
-     wins on specificity for the properties it does declare, pinning every
-     lightbox image to the 120px poster's 2:3 box. `auto` overrides both so
-     the image sizes from its own intrinsic dimensions, clamped only by the
-     max-* pair below. */
+  /* `article img` (this file, near line 109) sets `width`, `aspect-ratio`,
+     `border`, `border-radius` and `margin-bottom` for the browse-row
+     poster, and every `<img>` this section adds renders inside that same
+     `<article>` -- Gallery included, since it renders as part of a card's
+     expanded body. Left unset here, those five properties fall through
+     uncontested even though this rule wins on specificity for the
+     properties it does declare, pinning every lightbox image to the 120px
+     poster's 2:3 box, hairline border and bottom margin. `auto` overrides
+     the first two so the image sizes from its own intrinsic dimensions,
+     clamped only by the max-* pair below; the other three are reset
+     outright, the same way `.details .poster img` and `.cast img` already
+     reset them, so a lightbox image carries neither a frame nor a gap
+     underneath it that this dialog's own centred layout already provides
+     with `gap` instead. */
   width: auto; height: auto; aspect-ratio: auto;
+  border: none; border-radius: 0; margin-bottom: 0;
   max-width: 80vw; max-height: 70vh; object-fit: contain;
 }

@@ -28,8 +28,7 @@ test('a reference this build cannot read yields no link, rather than a url that 
 });
 
 test('media links are the id-addressable route each provider actually serves', () => {
-  // Spelled literally. `thetvdb.com/series/184871` is a **404** -- TheTVDB's
-  // pages are slug-based and `/dereferrer/<type>/<id>` is the id route.
+  // Spelled literally.
   // Verified by status code, not inferred from TMDB's shape.
   assert.deepEqual(mediaLink('tmdb', 'tmdb:movie:335984'), {
     label: 'TMDb', href: 'https://www.themoviedb.org/movie/335984',
@@ -37,12 +36,20 @@ test('media links are the id-addressable route each provider actually serves', (
   assert.deepEqual(mediaLink('tmdb', 'tmdb:tv:1399:1:1'), {
     label: 'TMDb', href: 'https://www.themoviedb.org/tv/1399',
   });
-  assert.deepEqual(mediaLink('tvdb', '184871'), {
-    label: 'TVDb', href: 'https://thetvdb.com/dereferrer/series/184871',
-  });
   assert.deepEqual(mediaLink('tpdb', '5e8911b9-8e6d-4fa9-af95-f4788281551e'), {
     label: 'TPDb', href: 'https://theporndb.net/scenes/5e8911b9-8e6d-4fa9-af95-f4788281551e',
   });
+});
+
+test('a tvdb media reference builds no link here, whatever shape it is', () => {
+  // Whole-branch review finding 1. `thetvdb.com/dereferrer/series/10019744`
+  // is a **404** for an episode's own bare id -- verified live -- and a
+  // bare id is shape-indistinguishable between a series and an episode, so
+  // `mediaLink` cannot tell them apart and must not guess `series` the way
+  // it used to. Only `plugin-tv`, which holds `TvRead.kind`, can build the
+  // right url; it does so through `extraLinks` (`plugin-tv/test/browser.test.tsx`).
+  assert.equal(mediaLink('tvdb', '184871'), undefined, 'a bare id could be a series or an episode');
+  assert.equal(mediaLink('tvdb', '10019744'), undefined, 'an episode id specifically must not become /series/');
 });
 
 test('person links reach each provider’s own person page', () => {
