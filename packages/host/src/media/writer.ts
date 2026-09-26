@@ -75,6 +75,69 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
     return rows.map((row) => String((row as { path: unknown }).path));
   }
 
+  /**
+   * The rows to drop, and the files to unlink, once a slot's new image is
+   * in: every other row this owner has in that table.
+   *
+   * **A slot holds one image, and until this existed it accumulated them.**
+   * Each `attach*` upserts on `(owner, url)`, which makes a re-run of the
+   * *same* url idempotent -- the reason that key was chosen -- but makes a
+   * *better* url a second row rather than a correction. Every
+   * `ARTWORK_QUERY` in `api/artwork-route.ts` then serves
+   * `ORDER BY id ASC LIMIT 1`, the oldest row, so the new picture was
+   * written to disk and never served. Re-running the artwork job to
+   * improve artwork could not work, which is how a batch of square
+   * performer crops survived a deliberate re-fetch.
+   *
+   * Two SQL statements per table, spelled literally rather than built from
+   * a table name in a variable: `scripts/check-test-hygiene.ts` reads this
+   * file for reads of named tables, and an interpolated name is not one.
+   * The same reason `sync/tables.ts` spells its own.
+   *
+   * Widening a slot to hold several images is issue #79. When that lands
+   * this is what has to change, and the route's `LIMIT 1` with it -- the
+   * two are one policy stated in two places.
+   */
+  const OTHER_ARTWORK_SQL: Readonly<Record<string, { readonly paths: string; readonly drop: string }>> = {
+    poster: {
+      paths: 'SELECT path FROM poster WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
+      drop: 'DELETE FROM poster WHERE media_item_id = ? AND url <> ?',
+    },
+    background: {
+      paths: 'SELECT path FROM background WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
+      drop: 'DELETE FROM background WHERE media_item_id = ? AND url <> ?',
+    },
+    logo: {
+      paths: 'SELECT path FROM logo WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
+      drop: 'DELETE FROM logo WHERE media_item_id = ? AND url <> ?',
+    },
+    person_image: {
+      paths: 'SELECT path FROM person_image WHERE person_id = ? AND url <> ? AND path IS NOT NULL',
+      drop: 'DELETE FROM person_image WHERE person_id = ? AND url <> ?',
+    },
+  };
+
+  /**
+   * Leaves `keptUrl` as the owner's only image in `table`.
+   *
+   * Rows first, then files, the same order and for the same reason
+   * `dropMediaItem` gives: a failed unlink after the row is gone leaks a
+   * file, where a failed delete after the unlink leaves a row pointing at
+   * nothing that something will try to serve. The unlink is best-effort
+   * for that reason -- `artwork.remove` swallowing a missing file is what
+   * makes a re-run of this safe.
+   */
+  async function keepOnly(table: string, ownerId: number, keptUrl: string): Promise<void> {
+    const sql = OTHER_ARTWORK_SQL[table];
+    if (sql === undefined) return;
+    const stale = raw.prepare(sql.paths).all(ownerId, keptUrl);
+    if (stale.length === 0) return;
+    raw.prepare(sql.drop).run(ownerId, keptUrl);
+    await Promise.all(
+      stale.map((row) => artwork.remove(String((row as { path: unknown }).path))),
+    );
+  }
+
   return {
     async createMediaItem(init: MediaItemInit): Promise<number> {
       const at = now();
@@ -238,6 +301,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
           SET title = excluded.title, language = excluded.language,
               width = excluded.width, height = excluded.height, path = excluded.path
       `).run(mediaItemId, poster.title, poster.language, poster.url, width, height, path, at);
+      await keepOnly('poster', mediaItemId, poster.url);
     },
 
     async attachBackground(mediaItemId: number, background: ImageInit): Promise<void> {
@@ -255,6 +319,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
           SET title = excluded.title, language = excluded.language,
               width = excluded.width, height = excluded.height, path = excluded.path
       `).run(mediaItemId, background.title, background.language, background.url, width, height, path, at);
+      await keepOnly('background', mediaItemId, background.url);
     },
 
     async attachLogo(mediaItemId: number, logo: ImageInit): Promise<void> {
@@ -273,6 +338,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
           SET title = excluded.title, language = excluded.language,
               width = excluded.width, height = excluded.height, path = excluded.path
       `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, at);
+      await keepOnly('logo', mediaItemId, logo.url);
     },
 
     async attachPersonImage(personId: number, image: ImageInit): Promise<void> {
@@ -297,6 +363,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
           SET title = excluded.title, language = excluded.language,
               width = excluded.width, height = excluded.height, path = excluded.path
       `).run(personId, image.title, image.language, image.url, width, height, path, at);
+      await keepOnly('person_image', personId, image.url);
     },
 
     async upsertPerson(person: PersonInit): Promise<number> {
