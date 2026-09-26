@@ -655,7 +655,7 @@ test('an adult card shows its site at the far right of the title, dimmed', async
   expect(siteBox.x - titleTextEnd, 'and starts far from where the title stops').toBeGreaterThan(50);
 });
 
-test('a TV card reads its series and episode before anyone expands it, under a cropped poster', async ({ page, harness }) => {
+test('a TV card reads its series and episode before anyone expands it', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
@@ -695,24 +695,20 @@ test('a TV card reads its series and episode before anyone expands it, under a c
   // another package -- see this spec's own comment, point 3.
   await expect(headline).toHaveCSS('text-align', 'left');
 
-  // `library.css`'s `article img`, reaching the poster web kept. All three
-  // declarations, because all three are what "a 96px frame at 2:3, cropped"
-  // means and any one of them alone leaves the other two free to drift.
-  // `96px` is `--size-poster`'s `6rem` against an unchanged root font size;
-  // the seeded bytes are 1x1, so every number here comes from the rule and
-  // none from the image.
-  const poster = card.getByRole('img', { name: TV_ITEM_TITLE });
-  await expect(poster).toHaveCSS('width', '96px');
-  await expect(poster).toHaveCSS('aspect-ratio', '2 / 3');
-  await expect(poster).toHaveCSS('object-fit', 'cover');
-
-  // And the card is poster-led: the plugin's body starts below the poster
-  // rather than beside or behind it. `boxOf` rather than `boundingBox()` --
-  // see that helper's own doc; this page scrolls and viewport coordinates
-  // are not a property to depend on.
-  const posterBox = await boxOf(poster, 'the poster');
-  const headlineBox = await boxOf(headline, 'the card headline');
-  expect(headlineBox.y).toBeGreaterThanOrEqual(posterBox.y + posterBox.height);
+  // **This spec used to end by measuring a browse-row poster, and that
+  // poster is gone** -- an expanded card was showing the same image twice,
+  // so `MediaItemCard` stopped rendering one and `library.css`'s
+  // `article img` went with it. A collapsed row is text.
+  //
+  // What that costs, enumerated rather than assumed: the deleted half
+  // pinned `article img` reaching across packages into a plugin's card.
+  // The `text-align` assertion above pins the same cross-package reach
+  // through `article h2 button`, which is the property this spec is
+  // named for, and `media-details.spec.ts` measures the detail poster's
+  // geometry inside the same web-owned `<article>`. So the reach is
+  // still pinned twice; only the browse poster's own framing is not,
+  // and there is no longer a browse poster to frame.
+  await expect(card.locator('img'), 'a collapsed row renders no artwork').toHaveCount(0);
 });
 
 /*
@@ -770,7 +766,7 @@ const BARE_ITEM_TITLE = 'No Art Tonight';
  * for the observed output. A browser spec belongs here the day a person
  * appears on a screen, and not before.
  */
-test('a cached poster is decoded in the browser, and an item with none ends up with no <img> at all', async ({ page, harness }) => {
+test('a cached poster is decoded in the browser, and an item with none shows a placeholder', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
@@ -795,12 +791,20 @@ test('a cached poster is decoded in the browser, and an item with none ends up w
     withPoster: false,
   });
 
-  // Both cards on screen first, so the count assertion at the end is
-  // reading a settled page rather than a half-rendered list. Cards render
-  // in one commit, `<img>` included, so after this the browser has asked
-  // for two posters and the only thing left to happen is that one of them
-  // fails.
   await expect(page.getByRole('article')).toHaveCount(2, { timeout: 15_000 });
+
+  // **Both cards have to be expanded, and that is new.** A browse row
+  // carried a poster until the detail section landed; `MediaItemCard`
+  // renders no artwork now, so the only `<img>` that loads from
+  // `/api/artwork/poster/:id` is the detail section's, inside the
+  // expanded body. This spec is the only place in the suite that proves
+  // that route serves real bytes end to end --
+  // `media-details.spec.ts` intercepts it with a fixture -- so the proof
+  // moved here rather than being dropped with the poster.
+  for (const title of [TV_ITEM_TITLE, BARE_ITEM_TITLE]) {
+    await page.getByRole('button', { name: title, expanded: false }).click();
+  }
+  await expect(page.locator('section.details')).toHaveCount(2, { timeout: 15_000 });
 
   // The whole path, in one number. `naturalWidth` is the decoded image's
   // intrinsic width, so `1` requires the `poster` row to be found, its
@@ -812,13 +816,20 @@ test('a cached poster is decoded in the browser, and an item with none ends up w
   await expect(poster, 'the seeded poster decoded to its real 1x1').toHaveJSProperty('naturalWidth', 1, { timeout: 15_000 });
   await expect(poster, 'and both intrinsic dimensions came from the file, not the frame').toHaveJSProperty('naturalHeight', 1);
 
-  // The control. Two cards, two `<img>` elements painted, one 404 -- and
-  // `onError` takes that one out for good. One image left is what proves
-  // the assertion above is about loading and not about presence.
+  // The control, and it reads differently now. The item with no poster
+  // row still 404s, but `MediaDetails` swaps a placeholder in where
+  // `MediaItemCard` used to remove the element outright -- so "one
+  // `<img>` left" becomes "one `<img>`, and one placeholder beside it".
+  // Both halves, because the count alone would also pass if the second
+  // card had failed to render anything at all.
   await expect(
-    page.locator('article img'),
-    'the item with no poster row loses its image, so only the seeded one is left',
+    page.locator('section.details .poster img'),
+    'only the seeded item keeps a real image',
   ).toHaveCount(1, { timeout: 15_000 });
+  await expect(
+    page.getByRole('img', { name: `No poster for ${BARE_ITEM_TITLE}` }),
+    'and the item with no poster row shows the placeholder rather than nothing',
+  ).toBeVisible();
 });
 
 test('the empty state reads as an aside, not as content waiting to be filled in', async ({ page, harness }) => {

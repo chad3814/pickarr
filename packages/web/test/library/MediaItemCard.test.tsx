@@ -312,7 +312,7 @@ test("a TV item's card is the tv plugin's, and its headline names the series and
   assert.equal(heading.textContent, "Jo Jo's Bizarre Adventure S02E47 Dio's World(3)");
 });
 
-test('an item whose plugin this build does not carry still shows its poster and its title', () => {
+test('an item whose plugin this build does not carry still shows its title', () => {
   // **A defensive branch, pinned as one**, and the fixture below says so:
   // `pluginId: 'book'` is a value no screen in this build can deliver.
   // `Category` gets its `pluginId` from the registry and `useMediaItems`
@@ -332,8 +332,12 @@ test('an item whose plugin this build does not carry still shows its poster and 
   render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} />);
 
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the row is still identifiable');
-  assert.ok(screen.getByRole('img', { name: 'The Thing' }), 'and web still renders the poster it owns');
   assert.ok(!screen.queryByRole('button'), 'with no expander, because there is no card body to expand into');
+  // This line used to assert web still rendered a poster here. It does
+  // not render one anywhere now -- an expanded card was showing the same
+  // image twice, so the browse-row poster went. The fallback is the
+  // title alone, which is what keeps the row identifiable.
+  assert.ok(!screen.queryByRole('img'), 'and no artwork, which web no longer owns');
 });
 
 test('a release shows its resolution and its download status', async () => {
@@ -384,22 +388,22 @@ test('a release with no download row shows no status rather than a blank one', a
   assert.ok(!/status/i.test(release.textContent ?? ''), 'no status label with nothing to put in it');
 });
 
-test('a card whose artwork 404s still renders', () => {
-  // Artwork is not replicated: the client asks `/api/artwork/:kind/:id` and
-  // handles a 404 (host `sync/tables.ts`). Most items will have no poster for
-  // a while, so a missing one must not blank the card.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
-  const image = screen.getByRole('img', { name: /The Thing/ });
-  fireEvent.error(image);
-  assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the card survives its poster failing');
-  // Review round 1: the heading assertion above holds whether or not the
-  // image is ever removed, since the heading is never conditioned on it --
-  // deleting `onError`/`posterFailed` outright left every test green. This
-  // observes what the handling actually does: the failed `<img>` comes out
-  // of the DOM rather than sitting there broken. A boolean comparison, never
-  // `assert.equal(image, ...)` against the live node itself (`CLAUDE.md`).
-  assert.ok(screen.queryByRole('img', { name: /The Thing/ }) === null, 'the failed poster is removed, not left broken');
-});
+/*
+ * **`a card whose artwork 404s still renders` lived here and has moved.**
+ * It drove `MediaItemCard`'s own `<img>` through `onError` and asserted
+ * the failed poster left the DOM rather than sitting broken. There is no
+ * such `<img>` any more.
+ *
+ * The behaviour it protected did not disappear with it, and this is the
+ * enumeration of where it went rather than an assumption that it is fine:
+ * `@pickarr/plugin-ui`'s `MediaDetails.test.tsx` fires the same error at
+ * the detail poster and at a cast thumbnail and asserts a placeholder
+ * takes each one's place, and `shell.spec.ts` now expands two cards in a
+ * real browser to check that a seeded poster decodes while an item with
+ * no `poster` row shows the placeholder. Between them they cover more
+ * than this test did: it only ever proved the element was removed, and
+ * said nothing about what replaced it.
+ */
 
 test('the submit a card is handed is the one its Pick button calls', async () => {
   // `Shell` wires `postPick` and `Category` forwards it; neither calls it,

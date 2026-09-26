@@ -180,6 +180,56 @@ test('falls back to the embedded performer\'s parent when its own image fields a
   );
 });
 
+test('a person ref matches the performer\'s PARENT id, which is the one openmetadata sends', async () => {
+  // **The shape that made every xxx performer picture-less.** Read live
+  // from ThePornDB: a scene's `performers[].id` is a scene-specific
+  // record, and the id openmetadata hands over as `people[].providerRef`
+  // is `performers[].parent.id`, the canonical performer. Matching on
+  // `id` alone therefore never matched anything, so no adult release ever
+  // stored a cast picture.
+  //
+  // Both uuids below are the real pair for one performer on one real
+  // scene, copied rather than invented:
+  //   openmetadata ref / parent.id  7a7a5268-c6be-48fb-9e27-96f9f9144201
+  //   performers[].id               bb98a9ae-2d8f-492a-8198-f6349d9d194e
+  const canonicalRef = '7a7a5268-c6be-48fb-9e27-96f9f9144201';
+  const sceneSpecificId = 'bb98a9ae-2d8f-492a-8198-f6349d9d194e';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer(sceneSpecificId, {
+          face: 'https://cdn.test/scene-face.jpg',
+          parent: { id: canonicalRef, image: null, thumbnail: null, face: null },
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [canonicalRef], []);
+
+  assert.deepEqual(
+    answer.people.get(canonicalRef),
+    [{ url: 'https://cdn.test/scene-face.jpg', language: null, score: 0 }],
+    'the picture is keyed by the ref openmetadata sent, not by the scene-specific id',
+  );
+});
+
+test('a performer whose own id IS the ref still matches, so nothing that worked stops working', async () => {
+  const ref = 'c0ffee00-2222-2222-2222-222222222222';
+  const { fetch } = recordingFetch([
+    sceneBody({ performers: [performer(ref, { face: 'https://cdn.test/own.jpg' })] }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [ref], []);
+
+  assert.deepEqual(
+    answer.people.get(ref),
+    [{ url: 'https://cdn.test/own.jpg', language: null, score: 0 }],
+  );
+});
+
 test('a person whose embedded entry has no image anywhere -- own or parent -- omits the key', async () => {
   const personRef = 'no-picture-0000-0000-0000-000000000000';
   const missingRef = 'not-in-the-cast-0000-0000-000000000000';

@@ -35,20 +35,20 @@
  * the plugin's card reports itself expanded -- which it does through
  * `CardProps.onExpandedChange`, on the way down as well as up.
  *
- * **Artwork is not replicated** (design spec §1.2, #79). The poster below is
- * a request to `/api/artwork/poster/:mediaItemId`, which 404s for most items
- * for a long while yet; `onError` swaps it out rather than letting a broken
- * image blank the rest of the card.
+ * **This component renders no artwork of its own, and used to.** It held a
+ * browse-row poster until the detail section landed, at which point an
+ * expanded card showed the same image twice -- once above the heading and
+ * once inside the section. The browse one was removed outright rather than
+ * hidden while expanded, so a collapsed row is now text.
  *
- * **`posterFailed` is a latch, and nothing resets it.** One failed request
- * takes the `<img>` out of the DOM for the life of the card, so artwork
- * that arrives later does not bring it back until the list remounts. That
- * is the right trade for a product where most items have no poster -- the
- * alternative is retrying a 404 on every render -- but it is also why an
- * end-to-end test that wants to measure the poster has to have the bytes on
- * disk *before* the item reaches the replica, which is what
- * `packages/e2e/src/harness-2.ts`'s `seedTvRelease` does in one synchronous
- * call for exactly this reason.
+ * Two things went with it. `library.css`'s `article img` rule existed for
+ * that poster, so the images `@pickarr/plugin-ui` renders into this
+ * `<article>` now size themselves rather than overriding it. And the
+ * end-to-end proof that `/api/artwork/poster/:id` serves real bytes moved
+ * to `packages/e2e/tests/shell.spec.ts`'s expanded card: the detail poster
+ * is the only `<img>` left that loads from the real route instead of an
+ * intercepted one, which is why that spec still seeds bytes to disk before
+ * the item reaches the replica (`harness-2.ts`'s `seedTvRelease`).
  */
 import { useCallback, useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
@@ -100,7 +100,6 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
    * has the contract reasoning.
    */
   const [expanded, setExpanded] = useState(false);
-  const [posterFailed, setPosterFailed] = useState(false);
   const gathered = useGatheredItem(source, item.id, expanded);
 
   // `useCallback` so the plugin's card gets the same function every render.
@@ -115,15 +114,6 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
 
   return (
     <article>
-      {!posterFailed && (
-        <img
-          src={`/api/artwork/poster/${String(item.id)}`}
-          alt={item.title}
-          onError={() => {
-            setPosterFailed(true);
-          }}
-        />
-      )}
       {/*
         An item whose `pluginId` no plugin in the registry claims renders
         its title and nothing else.

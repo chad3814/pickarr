@@ -15,11 +15,21 @@
  *   medium, small}`, and a `performers` array. There is no logo anywhere in
  *   the payload and no endpoint that would answer one.
  * - `GET /performers/{ref}` for a `people[].providerRef` openmetadata gave
- *   us answers 404 -- that ref is a scene-specific performer record, not a
- *   canonical one, and has no standalone fetch behind it at all. But the
- *   scene's own `performers[]` embeds that exact ref as `id`, with `image`,
- *   `thumbnail` and `face` populated, which is the whole reason this source
- *   needs only the one request.
+ *   us **answers 200**, and an earlier revision of this docblock claimed a
+ *   404. That 404 came from asking with a scene-specific `performers[].id`,
+ *   which openmetadata never sends; the ref it does send is the canonical
+ *   performer and the endpoint serves it. Reading the cast out of the scene
+ *   payload is still right -- it costs no extra request where a per-person
+ *   fetch would cost one each -- but the reason is economy, not a 404. The
+ *   mis-attributed 404 is what hid the matching bug below for a whole
+ *   release: it made `performers[].id` look like the only usable key.
+ * - **A scene's `performers[].id` is not the ref openmetadata sends.** It
+ *   is a scene-specific record; the ref arrives as `performers[].parent.id`.
+ *   Measured on one real scene: openmetadata's ref for its lead performer
+ *   is `7a7a5268-…`, and the embedded `performers[].id` is `bb98a9ae-…`.
+ *   Both are populated with `image`, `thumbnail` and `face`, which is why
+ *   one request still answers the whole cast -- but only if the match is
+ *   made on the parent. See the loop in `imagesFor`.
  *
  * One shape is tolerated on the strength of a recorded observation rather
  * than a live check: 1.x's design doc records records where the outer
@@ -138,21 +148,30 @@ function pickPersonUrl(images: TpdbPersonImages): string | null {
 }
 
 interface TpdbPerformer {
+  /** The scene-specific performer record's id. **Not** the ref openmetadata sends. */
   readonly id: string;
+  /**
+   * The canonical performer's id, which **is** the ref openmetadata sends.
+   *
+   * Nullable because a parent object need not carry one, and because a
+   * performer may have no parent at all.
+   */
+  readonly parentId: string | null;
   readonly own: TpdbPersonImages;
-  /** `null` on the sample this task read live; populated on the shape 1.x recorded and this reads defensively. */
   readonly parent: TpdbPersonImages | null;
 }
 
 function readPerformer(value: unknown, field: string): TpdbPerformer {
   const raw = object(value, field);
   const parentValue = raw['parent'];
+  const parent = parentValue === null || parentValue === undefined
+    ? null
+    : object(parentValue, `${field}.parent`);
   return {
     id: string(raw['id'], `${field}.id`),
+    parentId: parent === null ? null : nullableString(parent['id'], `${field}.parent.id`),
     own: readPersonImages(raw, field),
-    parent: parentValue === null || parentValue === undefined
-      ? null
-      : readPersonImages(object(parentValue, `${field}.parent`), `${field}.parent`),
+    parent: parent === null ? null : readPersonImages(parent, `${field}.parent`),
   };
 }
 
@@ -250,7 +269,15 @@ export function createTpdbSource(deps: ArtworkSourceDeps): ArtworkSource {
       // because there is nothing to request against.
       const people = new Map<string, readonly ProviderImage[]>();
       for (const ref of personRefs) {
-        const performer = scene.performers.find((entry) => entry.id === ref);
+        // **`parentId` first, and that ordering is the whole fix.** See
+        // `TpdbPerformer`: the ref openmetadata sends is the canonical
+        // performer's id, which lives at `performers[].parent.id`, while
+        // `performers[].id` is a scene-specific record. Matching only the
+        // latter matched nothing, so no adult release ever stored a cast
+        // picture. `id` is still accepted, for a performer with no parent.
+        const performer = scene.performers.find(
+          (entry) => entry.parentId === ref || entry.id === ref,
+        );
         if (performer === undefined) continue;
         const personUrl = pickPersonUrl(performer.own)
           ?? (performer.parent === null ? null : pickPersonUrl(performer.parent));

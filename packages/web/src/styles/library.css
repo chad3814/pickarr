@@ -11,20 +11,25 @@
  * it anyway because a stylesheet is matched against the rendered document
  * rather than against a package. Counted on the tree as it stands:
  *
- * - `<img>`: four sites now, all inside the same `<article>` `MediaItemCard.tsx`
- *   opens. `MediaItemCard.tsx` itself renders the browse-row poster; the other
- *   three are `@pickarr/plugin-ui`'s `MediaDetails.tsx` (the detail section's
- *   own poster and each cast thumbnail) and `Gallery.tsx` (the lightbox image),
- *   rendered by a plugin's card inside that same `<article>` once expanded.
- *   `article img` below reaches all four, so any rule scoped to the latter
- *   three must override `width`, `aspect-ratio`, `border`, `border-radius`
- *   and `margin-bottom` explicitly rather than leave any unset -- leaving
- *   one unset lets it fall through uncontested even where that rule wins on
- *   specificity for the properties it does set. `.gallery img` missed
- *   `border`, `border-radius` and `margin-bottom` until this review: the
- *   lightbox image carried a hairline frame and an uneven gap that neither
- *   `.details .poster img` nor `.cast img` leaves behind, because both of
- *   those already override all five.
+ * - `<img>`: **three sites, none of them web's.** All three come from
+ *   `@pickarr/plugin-ui` -- `MediaDetails.tsx`'s detail poster and cast
+ *   thumbnails, and `Gallery.tsx`'s lightbox image -- rendered by a
+ *   plugin's card inside the `<article>` `MediaItemCard.tsx` opens, once
+ *   expanded. `MediaItemCard.tsx` used to render a fourth, the browse-row
+ *   poster, and no longer does: an expanded card showed the same image
+ *   twice.
+ *
+ *   **There is no longer an `article img` rule, and that is a
+ *   simplification bought by the removal.** While the browse poster
+ *   existed, that rule reached all four images, so every rule scoped to
+ *   the other three had to override `width`, `aspect-ratio`, `border`,
+ *   `border-radius` and `margin-bottom` *explicitly* -- leaving one unset
+ *   let it fall through uncontested even where the narrower rule won on
+ *   specificity. `.gallery img` missed three of the five and pinned every
+ *   lightbox image to the 120px poster's box, which is the Critical the
+ *   whole-branch review found. With the browse poster gone the rule had
+ *   nothing left to size, so it went too, and each of the three now
+ *   states its own geometry with nothing to fight.
  * - `<article>`: **two sites now, both web's.** `MediaItemCard.tsx` opens
  *   one per browse row, and `library/Unmatched.tsx` opens one per
  *   unmatched release -- the card the `article dl` rules below style. That is
@@ -138,15 +143,13 @@ article {
    All three of `width`, `aspect-ratio` and `object-fit` are pinned in a
    browser -- see this file's own header for the spec and for what each
    mutation computes instead. */
-article img {
-  display: block;
-  width: var(--size-poster);
-  aspect-ratio: 2 / 3;
-  object-fit: cover;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-sm);
-  margin-bottom: var(--space-2);
-}
+/* `article img` lived here, sizing the browse-row poster. That poster is
+   gone -- `MediaItemCard` renders no artwork now, because an expanded card
+   showed the same image twice -- and with it the rule, which by then
+   reached only the images `@pickarr/plugin-ui` renders into this
+   `<article>`: the detail poster, the cast thumbnails and the gallery.
+   Each of those sizes itself, so nothing below overrides an inherited
+   frame any more; what it sets is what it gets. */
 
 article h2 { margin: 0; font-size: var(--text-title); font-weight: 600; }
 
@@ -650,10 +653,14 @@ section > p:not(.details-foot) {
 .details .poster { padding: 0; border: none; background: none; cursor: pointer; flex-shrink: 0; }
 .details .poster img,
 .details .poster .placeholder {
-  width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
-  border: none; margin-bottom: 0;
+  display: block; width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
 }
-.details .poster .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1.5rem; }
+/* `box-sizing: border-box` so the padding insets the glyph instead of
+   inflating the box past the 120px the image beside it occupies. */
+.details .poster .placeholder {
+  box-sizing: border-box; padding: 1.5rem;
+  color: var(--color-text-dim); background: var(--color-surface-2);
+}
 
 .icon-row { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.5rem; }
 .icon-row .icon { width: 1.1rem; height: 1.1rem; color: var(--color-text-dim); }
@@ -691,10 +698,14 @@ section > p:not(.details-foot) {
 .cast button { padding: 0; border: none; background: none; cursor: pointer; display: block; width: 100%; }
 .cast img,
 .cast .placeholder {
-  width: 72px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
-  border: none; margin-bottom: 0;
+  display: block; width: 72px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px;
 }
-.cast .placeholder { color: var(--color-text-dim); background: var(--color-surface-2); padding: 1rem; }
+/* `box-sizing: border-box`, or the 1rem of padding adds 32px to a 72px
+   box and a person with no picture sits wider and taller than one with. */
+.cast .placeholder {
+  box-sizing: border-box; padding: 1rem;
+  color: var(--color-text-dim); background: var(--color-surface-2);
+}
 
 .details-foot { display: flex; justify-content: space-between; align-items: baseline; margin: 0; }
 .details-foot small { color: var(--color-text-dim); }
@@ -713,23 +724,30 @@ section > p:not(.details-foot) {
   padding: 1rem; border-radius: 6px;
   background: var(--color-surface); color: var(--color-text);
 }
+/* The carousel's controls: one row under the image, arrows either side of
+   the position. `justify-content: center` rather than `space-between`, so
+   a two-image gallery does not fling its arrows to the viewport edges. */
+.gallery-controls {
+  display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+  margin: 0; color: var(--color-text-dim); font-size: var(--text-meta);
+}
+.gallery-controls button {
+  padding: 0.15rem 0.6rem; font-size: 1.1rem; line-height: 1;
+  border: 1px solid var(--color-line); border-radius: var(--radius-sm);
+  background: none; color: var(--color-text); cursor: pointer;
+}
+.gallery-controls button:hover { border-color: var(--color-line-strong); }
+
 .gallery h2 { margin: 0; font-size: 1rem; }
+/* This rule once carried six reset declarations to escape `article img`,
+   which sized the browse-row poster and reached every image inside the
+   card. That rule is gone with the poster, so a lightbox image now sizes
+   from its own intrinsic dimensions with nothing to override -- clamped
+   only by the max-* pair, which is what keeps a 2000px poster inside the
+   viewport. `packages/e2e/tests/media-details.spec.ts` measures this: an
+   open gallery's image must be far wider than the 96px the old rule
+   imposed, and that assertion is what caught the leak in the first place. */
 .gallery img {
-  /* `article img` (this file, near line 109) sets `width`, `aspect-ratio`,
-     `border`, `border-radius` and `margin-bottom` for the browse-row
-     poster, and every `<img>` this section adds renders inside that same
-     `<article>` -- Gallery included, since it renders as part of a card's
-     expanded body. Left unset here, those five properties fall through
-     uncontested even though this rule wins on specificity for the
-     properties it does declare, pinning every lightbox image to the 120px
-     poster's 2:3 box, hairline border and bottom margin. `auto` overrides
-     the first two so the image sizes from its own intrinsic dimensions,
-     clamped only by the max-* pair below; the other three are reset
-     outright, the same way `.details .poster img` and `.cast img` already
-     reset them, so a lightbox image carries neither a frame nor a gap
-     underneath it that this dialog's own centred layout already provides
-     with `gap` instead. */
-  width: auto; height: auto; aspect-ratio: auto;
-  border: none; border-radius: 0; margin-bottom: 0;
+  display: block;
   max-width: 80vw; max-height: 70vh; object-fit: contain;
 }
