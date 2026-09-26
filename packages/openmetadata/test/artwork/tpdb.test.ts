@@ -133,7 +133,7 @@ test('maps a scene\'s posters and background, preferring large over medium and f
   }
 });
 
-test('matches a person by ref against the embedded performer, preferring face over thumbnail and image', async () => {
+test('matches a person by ref against the embedded performer, preferring the full image over the crops', async () => {
   const personRef = 'db2a49dc-0000-0000-0000-000000000000';
   const { fetch } = recordingFetch([
     sceneBody({
@@ -150,9 +150,45 @@ test('matches a person by ref against the embedded performer, preferring face ov
 
   const answer = await source.imagesFor('scene', SCENE_REF, [personRef], []);
 
+  // **`image`, not `face`, and this expectation was the other way round.**
+  // Measured on one real performer: `image` is 633x950 at 74 KB, `face` is
+  // a 500x500 smart crop at 46 KB. Preferring `face` put a square head in
+  // the gallery where the provider shows a portrait, for 28 KB -- and
+  // `job.ts`'s 8 MiB cap is what actually bounds a download.
   assert.deepEqual(
     answer.people.get(personRef),
-    [{ url: 'https://cdn.test/person-face.jpg', language: null, score: 0 }],
+    [{ url: 'https://cdn.test/person-image.jpg', language: null, score: 0 }],
+  );
+});
+
+test('a performer with no full image falls back to the thumbnail, and only then to the square crop', async () => {
+  // The order matters below `image` too: `thumbnail` is 200x300 -- small
+  // but the right shape -- where `face` is a square crop. A crop of the
+  // right person still beats no picture, so it stays last rather than
+  // being dropped.
+  const thumbRef = 'db2a49dc-3333-3333-3333-333333333333';
+  const faceRef = 'db2a49dc-4444-4444-4444-444444444444';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer(thumbRef, { image: null, thumbnail: 'https://cdn.test/t.jpg', face: 'https://cdn.test/f.jpg' }),
+        performer(faceRef, { image: null, thumbnail: null, face: 'https://cdn.test/only-face.jpg' }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [thumbRef, faceRef], []);
+
+  assert.deepEqual(
+    answer.people.get(thumbRef),
+    [{ url: 'https://cdn.test/t.jpg', language: null, score: 0 }],
+    'the thumbnail beats the crop',
+  );
+  assert.deepEqual(
+    answer.people.get(faceRef),
+    [{ url: 'https://cdn.test/only-face.jpg', language: null, score: 0 }],
+    'and the crop is still better than nothing',
   );
 });
 

@@ -83,7 +83,14 @@ function galleryImages(
   gathered: GatheredItemView,
   cast: readonly GatheredRoleView[],
 ): readonly GalleryImage[] {
-  const media = [gathered.artwork.poster, gathered.artwork.background, gathered.artwork.logo]
+  // Poster and background only. **The logo is deliberately not here**,
+  // though `artwork` still carries its url and the job still fetches and
+  // stores it: a wordmark on a transparent background is a thing a card
+  // might one day draw *with*, not a picture anyone opens a lightbox to
+  // look at. Dropping it also spares the carousel a slot that is empty
+  // for most items, since a logo is the artwork providers supply least
+  // often.
+  const media = [gathered.artwork.poster, gathered.artwork.background]
     .map((url) => ({ url, caption: item.title }));
   const people = cast.flatMap((role) => (
     role.person === undefined ? [] : [{ url: role.imageUrl, caption: role.person.name }]

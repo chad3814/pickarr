@@ -45,6 +45,30 @@ export interface GalleryProps {
   readonly onClose: () => void;
 }
 
+/**
+ * The url to show once `dead` is gone: the next image after it that has
+ * not already failed, wrapping past the end.
+ *
+ * Walks `images` rather than the surviving subset so the answer is
+ * positional in the list the caller built -- media slots then cast -- and
+ * not in a list that is about to change shape. Answers `undefined` when
+ * `dead` was the last survivor, which is the case the all-failed effect
+ * closes on.
+ */
+function nextSurvivor(
+  images: readonly GalleryImage[],
+  failed: readonly string[],
+  dead: string,
+): string | undefined {
+  const from = images.findIndex((image) => image.url === dead);
+  for (let step = 1; step <= images.length; step += 1) {
+    const candidate = images[(from + step + images.length) % images.length];
+    if (candidate === undefined) continue;
+    if (candidate.url !== dead && !failed.includes(candidate.url)) return candidate.url;
+  }
+  return undefined;
+}
+
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -55,9 +79,23 @@ export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactEleme
   const [currentUrl, setCurrentUrl] = useState(startUrl);
 
   const showing = images.filter((image) => !failed.includes(image.url));
-  // The image on screen, or the first surviving one when the requested
-  // url is not in the set or has since failed.
-  const index = Math.max(0, showing.findIndex((image) => image.url === currentUrl));
+  /**
+   * Where in the surviving set the image on screen sits.
+   *
+   * **`-1` is handled by moving on, never by falling back to 0**, and the
+   * difference is a reported bug. This used to be
+   * `Math.max(0, findIndex(...))`, so the moment the current url left the
+   * set -- which is exactly what stepping onto a missing image does, since
+   * rendering it fires `error` -- the lookup answered `-1` and the gallery
+   * snapped back to the first image. With a logo missing, walking forward
+   * went poster, background, poster, background, losing one image per lap
+   * and never reaching the cast. The failure handler now names the next
+   * survivor before dropping the dead url, so `currentUrl` is always a url
+   * that is still in the set and this only ever falls back on a `startUrl`
+   * the caller got wrong.
+   */
+  const found = showing.findIndex((image) => image.url === currentUrl);
+  const index = found === -1 ? 0 : found;
   const current = showing[index];
 
   // Focus moves in on open so Escape and Tab reach the dialog rather than
@@ -152,6 +190,15 @@ export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactEleme
           alt={current.caption}
           onError={() => {
             const dead = current.url;
+            // Move first, drop second. The next survivor is chosen from
+            // `images` -- the full list, in its original order -- rather
+            // than from `showing`, because `showing` still contains the
+            // dead url at this point and will not a render later. Picking
+            // from the full list means the position survives the removal
+            // instead of being re-derived from a set the current url has
+            // just left.
+            const next = nextSurvivor(images, failed, dead);
+            if (next !== undefined) setCurrentUrl(next);
             setFailed((previous) => (previous.includes(dead) ? previous : [...previous, dead]));
           }}
         />

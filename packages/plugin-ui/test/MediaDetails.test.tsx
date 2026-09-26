@@ -243,8 +243,8 @@ test('re-opening the gallery at another image starts it fresh, not with the last
   const dialog = screen.getByRole('dialog');
   assert.ok(within(dialog).getByAltText('Alice'), 'it opened on the person');
   assert.ok(
-    screen.getByText('4 of 4'),
-    'and all four images are back in the set, so the previous failure did not carry over',
+    screen.getByText('3 of 3'),
+    'and all three images are back in the set, so the previous failure did not carry over',
   );
 });
 
@@ -263,11 +263,13 @@ test('a person\'s picture is in the card\'s gallery, reachable from the poster',
 
   fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
 
-  assert.ok(screen.getByText('1 of 5'), 'three media slots plus two people');
+  // Two media slots, not three: the logo is fetched and stored but kept
+  // out of the carousel -- a wordmark is not a picture anyone opens a
+  // lightbox for.
+  assert.ok(screen.getByText('1 of 4'), 'poster and background plus two people');
   fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
   fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  assert.ok(screen.getByRole('heading', { name: 'Alice' }), 'the third image is the first cast member');
   fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
-  assert.ok(screen.getByRole('heading', { name: 'Alice' }), 'the fourth image is the first cast member');
-  fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
-  assert.ok(screen.getByRole('heading', { name: 'Bob' }), 'and the fifth is the second');
+  assert.ok(screen.getByRole('heading', { name: 'Bob' }), 'and the fourth is the second');
 });
