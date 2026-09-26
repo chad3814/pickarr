@@ -138,13 +138,29 @@ function readPersonImages(raw: Readonly<Record<string, unknown>>, field: string)
 }
 
 /**
- * `face` is a 500x500 crop -- the bounded choice, for the same reason a
- * sized scene image beats `original`. `thumbnail`, then `image`, in that
- * order, only when the smaller ones this provider bothered to crop are
- * missing.
+ * `image` first, and this order was reversed.
+ *
+ * It used to prefer `face`, on the reasoning that a 500x500 crop is "the
+ * bounded choice, for the same reason a sized scene image beats
+ * `original`". Measured on one real performer, that reasoning does not
+ * survive the numbers:
+ *
+ * - `image`     633x950, 74 KB -- the full portrait
+ * - `thumbnail` 200x300, 21 KB
+ * - `face`      500x500, 46 KB -- url literally `/500x500/smart/`
+ *
+ * So `face` was buying 28 KB against the full image while cropping the
+ * subject's body out of the frame, and a gallery showed a square head
+ * where the provider shows a portrait. It is not a bound worth having:
+ * `./job.ts` caps every download at 8 MiB regardless, which is what
+ * actually protects the host, and 74 KB is nowhere near it.
+ *
+ * `thumbnail` is the middle choice at 200x300 -- small, but the right
+ * shape -- and `face` stays last rather than being dropped, because a
+ * cropped picture of the right person still beats no picture.
  */
 function pickPersonUrl(images: TpdbPersonImages): string | null {
-  return images.face ?? images.thumbnail ?? images.image;
+  return images.image ?? images.thumbnail ?? images.face;
 }
 
 interface TpdbPerformer {
