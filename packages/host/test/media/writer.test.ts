@@ -618,6 +618,70 @@ test('attaching a person\'s picture twice leaves one row and one file', async ()
   });
 });
 
+test('attaching a person\'s picture at a NEW url replaces the old one, row and file', async () => {
+  // **The bug this fixes, and it made re-running artwork pointless.** The
+  // upsert is keyed on `(person_id, url)`, so a better url was a second
+  // row rather than a correction -- and `ARTWORK_QUERY.person` serves
+  // `ORDER BY id ASC LIMIT 1`, the *oldest* row. So a re-fetch wrote the
+  // new picture to disk, kept the old one, and went on serving the old
+  // one for ever. Reported as "all the old square ones are still on
+  // disk" after a deliberate re-run.
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
+
+    await writer.attachPersonImage(personId, {
+      title: null, language: null,
+      url: 'https://images.test/500x500/smart/headshot.gif', bytes: gifBytes(500, 500),
+    });
+    await writer.attachPersonImage(personId, {
+      title: null, language: null,
+      url: 'https://images.test/full/headshot.gif', bytes: gifBytes(633, 950),
+    });
+
+    const rows = raw.prepare('SELECT url, width, height FROM person_image WHERE person_id = ? ORDER BY id ASC')
+      .all(personId) as { url: unknown; width: unknown; height: unknown }[];
+    assert.equal(rows.length, 1, 'one slot, one row -- the crop must not linger with a lower id');
+    assert.equal(rows[0]?.url, 'https://images.test/full/headshot.gif');
+    // The dimensions, not just the url: this is what a reader actually
+    // gets, and the route picks by id rather than by url.
+    assert.equal(rows[0]?.width, 633);
+    assert.equal(rows[0]?.height, 950);
+
+    const files = await readdir(dir);
+    assert.equal(files.length, 1, 'and the superseded file is unlinked rather than left on disk');
+  });
+});
+
+test('attaching a poster at a new url replaces the old one too', async () => {
+  // The same accumulation applies to all three media slots: `bestImage`
+  // can pick differently once a provider adds artwork, and every route
+  // query serves the lowest id.
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork);
+    const mediaItemId = await writer.createMediaItem({
+      pluginId: 'movie', title: 'A Film', releaseDate: null, description: null,
+    });
+
+    await writer.attachPoster(mediaItemId, {
+      title: null, language: null, url: 'https://images.test/old.gif', bytes: gifBytes(300, 450),
+    });
+    await writer.attachPoster(mediaItemId, {
+      title: null, language: null, url: 'https://images.test/new.gif', bytes: gifBytes(600, 900),
+    });
+
+    const rows = raw.prepare('SELECT url FROM poster WHERE media_item_id = ? ORDER BY id ASC')
+      .all(mediaItemId) as { url: unknown }[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.url, 'https://images.test/new.gif');
+    assert.equal((await readdir(dir)).length, 1, 'the superseded poster file is gone');
+  });
+});
+
 test('a person and a media item that share an id and a url get two files, not one', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
