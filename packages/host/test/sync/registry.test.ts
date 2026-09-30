@@ -139,6 +139,19 @@ test('assertIntegerIdKey refuses a table with a composite primary key', () => {
   assert.throws(() => { assertIntegerIdKey(raw, 'tv_composite'); }, /tv_composite/);
 });
 
+/**
+ * A table that does not exist at all answers zero rows from
+ * `PRAGMA table_info`, the same as a real table with no primary key -- but
+ * this one must not throw here: `api/server.test.ts` drops a host synced
+ * table on purpose to force a genuine query failure later, and relies on
+ * `createSyncRegistry` (below) not refusing a database in that state before
+ * the query it is testing ever runs.
+ */
+test('assertIntegerIdKey is a no-op for a table that does not exist, leaving that failure to the query itself', () => {
+  const raw = open();
+  assert.doesNotThrow(() => { assertIntegerIdKey(raw, 'tv_never_created'); });
+});
+
 // Narrowed from "...before any trigger is installed": `createSyncRegistry`
 // never installs a trigger itself, and this test never builds one -- the
 // claim this file can actually prove is about the registry's own

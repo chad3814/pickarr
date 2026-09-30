@@ -58,8 +58,22 @@ function hostSchemaTableNames(): ReadonlySet<string> {
  * changes. Checking here means that failure happens at declaration, in a
  * place a developer is looking, rather than at a write nobody suspected
  * (design spec §7.16).
+ *
+ * **A no-op for a table that does not exist at all, since issue #102 widened
+ * this to run on every `HOST_SYNCED_TABLES` entry too.** `PRAGMA table_info`
+ * on a missing table answers zero rows -- indistinguishable, from here, from
+ * a real table with no declared primary key -- but a missing table already
+ * fails its own way, undisguised: `CREATE TRIGGER ... ON <table>` and any
+ * query against it throw SQLite's own `no such table`, which names the exact
+ * problem with no help needed. This guard's job is the table that exists and
+ * is keyed wrong, not the one that is not there yet --
+ * `sync/tables.ts`'s `readHostRows` draws the same line, for the same
+ * reason, with its own early return for an empty id list.
  */
 export function assertIntegerIdKey(raw: DatabaseSync, table: string): void {
+  const exists = raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table);
+  if (!exists) return;
   const pk = raw.prepare(`PRAGMA table_info(${table})`).all()
     .filter((row) => Number((row as { pk: unknown }).pk) > 0)
     .map((row) => String((row as { name: unknown }).name));
