@@ -5,7 +5,7 @@ import type { PluginContext } from '@pickarr/contract';
 import { ARTWORK_JOB } from '../src/artwork/job.ts';
 import { applyEnvelope } from '../src/engine.ts';
 import { lookupTable, lookupTableMigration } from '../src/table.ts';
-import { createTestHarness, refusedEnvelope, resolvedEnvelope, unresolvedEnvelope } from '../src/testing.ts';
+import { createTestHarness, refusedEnvelope, resolvedEnvelope, unresolvedEnvelope, withResolution } from '../src/testing.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { Media } from '../src/types.ts';
 
@@ -187,9 +187,12 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   );
 
   const methods = harness.media.calls.map((call) => call.method);
-  assert.deepEqual(methods.slice(0, 4), ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem']);
+  assert.deepEqual(
+    methods.slice(1, 5),
+    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem'],
+  );
   assert.equal(harness.media.items.has(1), false, 'the row that lost is gone');
-  assert.deepEqual(harness.media.calls[3]?.args, [rssItemId, 99]);
+  assert.deepEqual(harness.media.calls[4]?.args, [rssItemId, 99]);
   assert.equal(applied[0]?.mediaItemId, 99, 'the plugin writes against the winner');
   assert.equal(stateRow(harness)?.['media_item_id'], 99);
 });
@@ -270,8 +273,8 @@ test('a plugin that cannot represent the answer refuses it before a single share
 
   assert.deepEqual(
     harness.media.calls.map((call) => call.method),
-    [],
-    'no media item, no claim, no relink, no lookup state',
+    ['setVideoResolution'],
+    'no media item, no claim, no relink, no lookup state -- the resolution write happens before check() runs',
   );
   assert.equal(applied.length, 0, 'and the plugin was never asked to write its own rows');
   assert.equal(stateRow(harness)?.['media_item_id'], null);
@@ -470,4 +473,14 @@ test('a failing enqueue does not fail the lookup', async () => {
   const logged = harness.logs.filter((entry) => entry.detail?.['error'] === 'the job queue is unavailable');
   assert.equal(logged.length, 1, 'and the failure is logged rather than swallowed');
   assert.equal(logged[0]?.detail?.['mediaItemId'], 1);
+});
+
+test('a resolved answer records its parsed video resolution too', async () => {
+  const { harness, deps, rssItemId } = fixture();
+  await applyEnvelope(
+    withResolution(resolvedEnvelope({ lookupId: 'lookup-r', media: movieMedia() }), '2160p'),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+  assert.equal(harness.media.videoResolutions.get(rssItemId), '2160p');
 });

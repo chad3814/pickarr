@@ -28,6 +28,7 @@ import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
 import { lookupTable, lookupTableMigration } from './table.ts';
 import { lookupJsonFor } from './lookupJson.ts';
+import { videoResolutionOf } from './quality.ts';
 import { isPlaced, recordPlacement } from './placement.ts';
 import { select } from './select.ts';
 import type { Expectation } from './select.ts';
@@ -301,6 +302,13 @@ export async function applyEnvelope(
   await deps.db.update(deps.table)
     .set({ lookupId: envelope.lookupId, updatedAt: deps.now })
     .where(eq(deps.table.rssItemId, target.rssItemId));
+
+  // The video resolution the answer parsed (issue #98), recorded here for
+  // the same reason `lookupId` is recorded above: before the branch below
+  // decides anything, so no outcome -- a refusal, a partial answer, the ten
+  // minutes of polling that end `unresolved` -- can skip it. A later answer
+  // for the same release overwrites it; the latest parse is the one kept.
+  await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
 
   // 1. Not here yet -- read FIRST, and per answer rather than per response. A
   //    batch always answers HTTP 200, and a partial entry carries the state it

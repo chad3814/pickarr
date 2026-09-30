@@ -85,6 +85,11 @@ export function pendingEnvelope(fields: { lookupId: string }): LookupEnvelope {
   return { ...BASE, lookupId: fields.lookupId, state: 'pending' };
 }
 
+/** `envelope` with the parse the live service sends for a name stating `resolution` -- the shape `videoResolutionOf` reads. */
+export function withResolution(envelope: LookupEnvelope, resolution: unknown): LookupEnvelope {
+  return { ...envelope, parsed: { quality: { resolution } } };
+}
+
 export interface FakeLookupScript {
   /** Keyed by filename. A name asked about but absent here is a test bug, not an answer. */
   batch: ReadonlyMap<string, LookupEnvelope>;

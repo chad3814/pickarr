@@ -17,8 +17,9 @@ import {
   pendingEnvelope,
   refusedEnvelope,
   unresolvedEnvelope,
+  withResolution,
 } from '../src/testing.ts';
-import type { Media } from '../src/types.ts';
+import type { LookupEnvelope, Media } from '../src/types.ts';
 
 const PLUGIN_ID = 'tv';
 const NOW = 1_700_000_000_000;
@@ -239,5 +240,25 @@ test('every outcome records the service lookup id, not only the resolved one', a
     // need no normalising — see `rows()` in the flow test for the other case.
     assert.equal(row?.['lookup_id'], envelope.lookupId, `the ${outcome} outcome records its lookup id`);
     assert.equal(row?.['updated_at'], NOW, `the ${outcome} outcome stamps the row from the injected clock`);
+  }
+});
+
+test('every non-resolved outcome records the video resolution the answer parsed, before the branch decides anything', async () => {
+  // One write at the top rather than one per branch, so no terminal branch
+  // can forget it -- and a partial answer that already carries a parse
+  // records it too. The resolved outcome is `engine-resolved.test.ts`'s.
+  const cases: readonly [string, LookupEnvelope, string | null][] = [
+    ['unresolved', withResolution(unresolvedEnvelope({ lookupId: 'b' }), '720p'), '720p'],
+    ['refused', refusedEnvelope({ lookupId: 'c', refusal: 'a sidecar' }), null],
+    ['partial', withResolution(partialEnvelope({ lookupId: 'd' }), '2160p'), '2160p'],
+    ['pending', pendingEnvelope({ lookupId: 'e' }), null],
+    ['malformed', withResolution(unresolvedEnvelope({ lookupId: 'f' }), '4K'), null],
+  ];
+  for (const [name, envelope, expected] of cases) {
+    const { harness, deps, rssItemId } = fixture();
+    // eslint-disable-next-line no-await-in-loop -- one fresh fixture per case, in order
+    await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
+    assert.ok(harness.media.videoResolutions.has(rssItemId), `${name}: written`);
+    assert.equal(harness.media.videoResolutions.get(rssItemId), expected, `${name}: value`);
   }
 });
