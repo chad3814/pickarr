@@ -1,6 +1,4 @@
-import type { AddFeedInput } from '../feeds/add.ts';
-import type { AddDownloadClientInput } from '../clients/add.ts';
-import type { AddMappingInput, EditMappingInput } from '../clients/mappings.ts';
+import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMappingInput } from '@pickarr/contract';
 import type { SaveDestinationInput } from '../media/destinations.ts';
 
 /**

@@ -23,23 +23,29 @@
  * render of this form holds nothing.
  *
  * **What is mirrored from the host and what is imported.**
- * {@link ADD_DOWNLOAD_CLIENT_REFUSALS} is imported from
- * `@pickarr/contract`, because a refusal code is the wire's shared
- * vocabulary and a second spelling of it drifts silently -- the feeds slice
- * shipped one and the final review measured a host-side rename leaving all
- * 100 web tests green. {@link IMPLEMENTATIONS} and
- * {@link AUTH_STRATEGIES} are mirrored from `clients/config.ts` and
- * `clients/add.ts`'s `planCredential` instead, on `AddFeed.tsx`'s own
- * distinction: they are host *policy* this widget hints at. If the host
- * grew a third implementation and this select still offered two, an
- * operator would simply not see the new one here, and anything this form
- * did offer that the host does not support comes back as
- * `unknown-implementation` -- the right sentence, from the right authority.
- * A drifting refusal code, by contrast, makes this form say the wrong
- * thing with nothing to notice it.
+ * {@link ADD_DOWNLOAD_CLIENT_REFUSALS} and `AddDownloadClientInput` are
+ * both imported from `@pickarr/contract`, because a refusal code and a
+ * write input are both the wire's shared vocabulary and a second spelling
+ * of either drifts silently -- the feeds slice shipped a hand-copied
+ * `AddFeedInput` and the follow-up review measured a host-side field
+ * rename leaving the entire web suite green (issue #88).
+ * {@link IMPLEMENTATIONS} and {@link AUTH_STRATEGIES} are mirrored from
+ * `clients/config.ts` and `clients/add.ts`'s `planCredential` instead, on
+ * `AddFeed.tsx`'s own distinction: they are host *policy* this widget
+ * hints at. If the host grew a third implementation and this select still
+ * offered two, an operator would simply not see the new one here, and
+ * anything this form did offer that the host does not support comes back
+ * as `unknown-implementation` -- the right sentence, from the right
+ * authority. A drifting refusal code or input field, by contrast, makes
+ * this form say the wrong thing, or fail every submission, with nothing
+ * to notice it at the type level.
  */
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, type AddDownloadClientRefusalCode } from '@pickarr/contract';
+import {
+  ADD_DOWNLOAD_CLIENT_REFUSALS,
+  type AddDownloadClientInput,
+  type AddDownloadClientRefusalCode,
+} from '@pickarr/contract';
 
 /**
  * The implementations `clients/config.ts`'s `isImplementation` resolves --
@@ -100,34 +106,6 @@ const AUTH_STRATEGY_LABELS: Readonly<Record<AuthStrategy, string>> = {
   'api-key': 'Api key',
   login: 'Username and password',
 };
-
-/**
- * The wire shape `POST /api/download-clients` needs -- mirrored from
- * `packages/host/src/clients/add.ts`'s own `AddDownloadClientInput` rather
- * than imported, for the reason `AddFeed.tsx`'s twin gives: this package
- * ships to a browser and only needs to agree with the host on the JSON that
- * crosses the wire.
- *
- * **Every credential field is present on every request, and an unsupplied
- * one is `''`.** The host reads a blank field as "this strategy sends no
- * such credential" and decides the auth shape from which of the three are
- * blank, so omitting one would arrive as `undefined` and be read as a shape
- * the operator never chose (`api/server.ts`'s `isDownloadClientBody`).
- *
- * **`type` is absent and is never sent.** The host derives it from
- * `implementation` (design spec §4, §8.3), because `readClientConfig`
- * treats a mismatch as fatal -- so sending one would be offering to build a
- * row that can never work.
- */
-export interface AddDownloadClientInput {
-  name: string;
-  implementation: string;
-  url: string;
-  category: string;
-  apiKey: string;
-  username: string;
-  password: string;
-}
 
 /** A refusal the host actually sent, carrying one of the four codes `@pickarr/contract` declares -- the same declaration `clients/add.ts`'s own `AddDownloadClientRefusal` is built from, so the two cannot drift. */
 export interface AddDownloadClientRefusal {
@@ -228,6 +206,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * disabled and nothing on screen. Never reads `error` or any field beyond
  * `id`/`refusal`: a server-authored message never reaches a human here
  * (Global Constraint).
+ *
+ * `AddDownloadClientInput` is `@pickarr/contract`'s now (issue #88) --
+ * that module's own doc has the full reasoning, including the credential
+ * and `type`-omission rules this function relies on to build the request
+ * body.
  */
 export async function postDownloadClient(input: AddDownloadClientInput): Promise<AddDownloadClientOutcome> {
   let body: unknown;

@@ -140,13 +140,19 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Auth } from '../auth/instance.ts';
 import { redactText } from '../clients/redact.ts';
-import type { AddDownloadClientInput, AddDownloadClientRefusal } from '../clients/add.ts';
-import type { AddMappingInput, EditMappingInput, MappingRefusal } from '../clients/mappings.ts';
+import type { AddDownloadClientRefusal } from '../clients/add.ts';
+import type { MappingRefusal } from '../clients/mappings.ts';
 import type { RetryLookupOutcome } from '../media/retry.ts';
-import type { DestinationRefusalBody } from '@pickarr/contract';
+import type {
+  AddDownloadClientInput,
+  AddFeedInput,
+  AddMappingInput,
+  DestinationRefusalBody,
+  EditMappingInput,
+} from '@pickarr/contract';
 import type { DestinationRefusal, SaveDestinationInput } from '../media/destinations.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
-import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
+import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';

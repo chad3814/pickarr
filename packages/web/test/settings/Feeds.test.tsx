@@ -9,7 +9,8 @@ import { listByTable } from '../../src/store/rows.ts';
 import { subscribeTable } from '../../src/store/notify.ts';
 import type { FeedRemovalSubmit } from '../../src/settings/postFeedRemoval.ts';
 import { Feeds, type FeedsSource } from '../../src/settings/Feeds.tsx';
-import type { AddFeedInput, AddFeedOutcome } from '../../src/settings/AddFeed.tsx';
+import type { AddFeedOutcome } from '../../src/settings/AddFeed.tsx';
+import type { AddFeedInput } from '@pickarr/contract';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test

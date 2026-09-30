@@ -28,9 +28,9 @@
  * the host already stripped.
  */
 import { useState, type ReactElement } from 'react';
-import type { RssFeedSyncRead } from '@pickarr/contract';
+import type { AddFeedInput, RssFeedSyncRead } from '@pickarr/contract';
 import { useFeeds, type FeedsSource } from './useFeeds.ts';
-import { AddFeed, type AddFeedInput, type AddFeedOutcome } from './AddFeed.tsx';
+import { AddFeed, type AddFeedOutcome } from './AddFeed.tsx';
 import {
   removalMessage,
   FEED_REFUSAL_MESSAGES,

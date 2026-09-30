@@ -46,7 +46,9 @@
  * erased before anything reaches a bundle. So "the client cannot import
  * it" is true of the host and false of the contract, and the two halves of
  * the `rss_feed` wire are both in the contract now: `RssFeedSyncRead` for
- * the read, {@link ADD_FEED_REFUSALS} for the write.
+ * the read, {@link ADD_FEED_REFUSALS} and {@link AddFeedInput} for the
+ * write -- the latter once hand-copied here and, per issue #88, now
+ * declared once and imported on both sides.
  *
  * The poll-interval bounds and the two download types stay mirrored, and
  * that is a different call rather than an oversight. A refusal *code* is
@@ -59,7 +61,7 @@
  * the second loosens a hint. Only the first is worth a shared declaration.
  */
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { ADD_FEED_REFUSALS, type AddFeedRefusalCode } from '@pickarr/contract';
+import { ADD_FEED_REFUSALS, type AddFeedInput, type AddFeedRefusalCode } from '@pickarr/contract';
 import { CATEGORIES } from '../shell/useCounts.ts';
 
 /** Mirrors `packages/host/src/feeds/add.ts`'s own bounds -- see this file's docblock on why mirrored rather than imported. */
@@ -70,21 +72,6 @@ const DEFAULT_POLL_INTERVAL_S = 300;
 /** Mirrors `feeds/add.ts`'s own `TRANSPORTS`. */
 const DOWNLOAD_TYPES: readonly string[] = ['torrent', 'nzb'];
 const DEFAULT_DOWNLOAD_TYPE = 'torrent';
-
-/**
- * The wire shape `POST /api/feeds` needs -- mirrored from
- * `packages/host/src/feeds/add.ts`'s own `AddFeedInput` rather than
- * imported: this package ships to a browser and only needs to agree with
- * the host on the JSON shape that crosses the wire, not on a shared module
- * (`store/wire.ts`'s `SyncOp` doc gives the identical reasoning).
- */
-export interface AddFeedInput {
-  pluginId: string;
-  name: string;
-  url: string;
-  downloadType: string;
-  pollIntervalS: number;
-}
 
 /**
  * A refusal the host actually sent, carrying one of the four codes

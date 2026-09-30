@@ -1,8 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADD_FEED_REFUSALS } from '@pickarr/contract';
+import { ADD_FEED_REFUSALS, type AddFeedInput } from '@pickarr/contract';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
-import { AddFeed, postFeed, REFUSAL_MESSAGES, type AddFeedInput } from '../../src/settings/AddFeed.tsx';
+import { AddFeed, postFeed, REFUSAL_MESSAGES } from '../../src/settings/AddFeed.tsx';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
 
 /**

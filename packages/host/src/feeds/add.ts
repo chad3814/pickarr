@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { AddFeedRefusalCode } from '@pickarr/contract';
+import type { AddFeedInput, AddFeedRefusalCode } from '@pickarr/contract';
 
 /** A feed's poll interval must be at least this many seconds. */
 export const MIN_POLL_INTERVAL_S = 60;
@@ -11,26 +11,6 @@ export const MIN_POLL_INTERVAL_S = 60;
  * days between polls, which would look identical to the feed being dead.
  */
 export const MAX_POLL_INTERVAL_S = 86_400;
-
-/**
- * What `Host.addFeed` needs to create a feed.
- *
- * `downloadType` is `string`, not `@pickarr/contract`'s `Transport`
- * (`'torrent' | 'nzb'`), on purpose: this value arrives unchecked -- the
- * route in front of this (a later task) hands it straight out of a JSON
- * request body -- and this function is the validator that narrows it, not a
- * caller that has already done so. Typing it `Transport` would tell the
- * compiler a check `addFeed` itself performs at runtime (see
- * `TRANSPORTS.has` below) is already guaranteed, which is false the moment
- * a caller is anything other than trusted code.
- */
-export interface AddFeedInput {
-  pluginId: string;
-  name: string;
-  url: string;
-  downloadType: string;
-  pollIntervalS: number;
-}
 
 /**
  * Why `Host.addFeed` declined to create the row, returned as a value rather

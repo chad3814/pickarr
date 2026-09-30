@@ -11,13 +11,12 @@ import { ClientMappings } from '../../src/settings/ClientMappings.tsx';
 import type { ClientMappingsSource } from '../../src/settings/useClientMappings.ts';
 import {
   MAPPING_REFUSAL_MESSAGES,
-  type AddMappingInput,
   type AddMappingOutcome,
-  type EditMappingInput,
   type EditMappingOutcome,
   type MappingSubmit,
   type RemoveMappingOutcome,
 } from '../../src/settings/postMapping.ts';
+import type { AddMappingInput, EditMappingInput } from '@pickarr/contract';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test

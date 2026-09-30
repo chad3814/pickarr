@@ -1,85 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AddDownloadClientRefusalCode } from '@pickarr/contract';
+import type { AddDownloadClientInput, AddDownloadClientRefusalCode } from '@pickarr/contract';
 import { isImplementation } from './config.ts';
 import type { ClientType, Implementation } from './config.ts';
-
-/**
- * What `Host.addDownloadClient` needs to create a download client.
- *
- * **Every field is a primitive, and none is a union or optional**, for the
- * reason `feeds/add.ts`'s `AddFeedInput` gives at length: these values
- * arrive unchecked out of a JSON request body, and this module is the
- * validator that narrows them, not a caller that has already done so.
- * `implementation` is `string` rather than `Implementation` for exactly
- * that reason -- typing it as the union would tell the compiler a check
- * this module performs at runtime is already guaranteed.
- *
- * **`type` is absent, deliberately**, and cannot be sent. It is derived
- * from `implementation` here (see {@link TYPE_FOR_IMPLEMENTATION}), because
- * `readClientConfig` treats a `type`/`implementation` mismatch as a fatal
- * misconfiguration -- so accepting both from a browser would be accepting
- * the ability to construct a row that can never work.
- *
- * **`apiKey`, `username` and `password` are `string`, not `string | null`**,
- * and an empty one means "not supplied". That is not a convenience: `''` is
- * what a blank form field sends, and `readClientConfig`'s `optionalText`
- * already folds a blank column to absent on the way back out, so a single
- * spelling of "absent" across the write and the read is one fewer place the
- * two can disagree. What this module writes to the row for a blank field is
- * `null`, not `''` -- see `nullIfBlank`.
- *
- * The two credential fields cross the wire here and nowhere else. Neither is
- * ever written to a column, a log line, an error message or a response body.
- *
- * **Those four are the channels inside the product, and they are not the
- * whole list.** A credential typed into the browser form by an end-to-end
- * test is recorded in cleartext by Playwright's trace -- in the `fill`
- * action's parameters, in the action log, in the step title, in the POST
- * body resource, and in the DOM snapshot, which serialises a
- * `type="password"` input's `value` unredacted. `packages/e2e`'s
- * `playwright.config.ts` keeps that trace on failure and `ci.yml:96-103`
- * uploads it as a build artifact with 7-day retention, so a red build
- * publishes it.
- *
- * Nothing in this file can prevent that and no change here would: the
- * channel is the test harness, not the code under test, and it exists for
- * any form field a browser test fills. It is enumerated here because this
- * docblock is where someone goes to find out where a credential can end up,
- * and a list that stops at the product boundary reads as exhaustive when it
- * is not. The constraint that keeps it harmless -- every credential the
- * e2e suite types is a literal committed to this repo -- lives with the
- * credentials, in `packages/e2e/tests/shell.spec.ts`'s module docblock.
- *
- * **`category` may be `''`, and that is a configuration rather than a
- * missing value** -- which is why there is no refusal code for it and why
- * none is wanted. An empty category means "file downloads under no
- * category", and every consumer already understands it:
- * `reconcile-job.ts:287` folds `config.category` through
- * `normalizeClientCategory`, which maps `''` (and the literal `'None'`) to
- * `null`, so a reconcile for a blank category asks for everything rather
- * than for a category named "". qBittorrent's adapter folds it again on the
- * send side (`qbittorrent.ts`'s `normalizeCategory`), omitting the
- * `?category=` parameter entirely. SABnzbd's adapter deliberately does
- * **not** normalise on the way out -- it sends `cat=` verbatim, and
- * `sabnzbd.ts`'s own comment explains at length why normalising there would
- * file a download under a category no operator configured; it folds on the
- * way back instead.
- *
- * So `''` is written to the column as-is. Note this is the one field where
- * `''` is *not* run through `nullIfBlank`: the column is `NOT NULL`, and
- * unlike the credential fields a blank category is a real answer rather
- * than an absent one.
- */
-export interface AddDownloadClientInput {
-  name: string;
-  implementation: string;
-  url: string;
-  category: string;
-  apiKey: string;
-  username: string;
-  password: string;
-}
 
 /**
  * Why `Host.addDownloadClient` declined to create the row, returned as a

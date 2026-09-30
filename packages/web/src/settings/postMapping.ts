@@ -47,37 +47,12 @@
  * this one. Nothing here trims, normalises or flips a separator -- a
  * writer stricter than the consumer refuses mappings that work.
  */
-import { MAPPING_REFUSALS, type MappingRefusalCode } from '@pickarr/contract';
-
-/**
- * The wire shape `POST /api/mappings` needs -- mirrored from
- * `packages/host/src/clients/mappings.ts`'s own `AddMappingInput` rather
- * than imported, for the reason `AddDownloadClient.tsx`'s twin gives: this
- * package ships to a browser and only needs to agree with the host on the
- * JSON that crosses the wire.
- */
-export interface AddMappingInput {
-  downloadClientId: number;
-  fromPath: string;
-  toPath: string;
-}
-
-/**
- * The wire shape `PATCH /api/mappings/:id` needs: both paths, and no
- * `downloadClientId`.
- *
- * The client a mapping belongs to is not editable at all -- a mapping is
- * meaningless away from its client (design spec §8) -- and the id is the
- * path segment rather than a body field, so there is no way for a body to
- * name one row while the url names another. Both paths are required
- * rather than optional because the host replaces both columns and an
- * omitted field would be a second spelling of "leave it alone"
- * (`api/server.ts`'s `isMappingEditBody`).
- */
-export interface EditMappingInput {
-  fromPath: string;
-  toPath: string;
-}
+import {
+  type AddMappingInput,
+  type EditMappingInput,
+  MAPPING_REFUSALS,
+  type MappingRefusalCode,
+} from '@pickarr/contract';
 
 /**
  * Every way one of these three writes can fail to do what was asked.
@@ -150,7 +125,14 @@ function outcomeFromBody(body: unknown): AddMappingOutcome {
   return { refusal: 'unrecognised' };
 }
 
-/** Adds a mapping to `input.downloadClientId`. See this file's docblock; in particular, this never throws. */
+/**
+ * Adds a mapping to `input.downloadClientId`. See this file's docblock;
+ * in particular, this never throws.
+ *
+ * `AddMappingInput` and `EditMappingInput` are `@pickarr/contract`'s now
+ * (issue #88) -- that module's own doc has the full reasoning, including
+ * why `EditMappingInput` requires both paths rather than a sparse patch.
+ */
 export async function postMapping(input: AddMappingInput): Promise<AddMappingOutcome> {
   let body: unknown;
   try {

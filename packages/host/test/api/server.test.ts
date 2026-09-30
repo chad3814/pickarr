@@ -12,10 +12,15 @@ import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
-import type { AddFeedInput } from '../../src/feeds/add.ts';
-import type { AddDownloadClientInput } from '../../src/clients/add.ts';
 import type { MappingRefusal } from '../../src/clients/mappings.ts';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, DESTINATION_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
+import {
+  ADD_DOWNLOAD_CLIENT_REFUSALS,
+  type AddDownloadClientInput,
+  type AddFeedInput,
+  DESTINATION_REFUSALS,
+  MAPPING_REFUSALS,
+  REQUEST_PICK_REFUSALS,
+} from '@pickarr/contract';
 import type { DestinationRefusalCode } from '@pickarr/contract';
 import { shippedPlugins } from '../../src/main.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';

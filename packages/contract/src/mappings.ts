@@ -43,6 +43,54 @@
  */
 
 /**
+ * The wire shape `POST /api/mappings` needs, and what `Host.addMapping`
+ * (`packages/host/src/clients/mappings.ts`) accepts to create a mapping.
+ *
+ * **Declared once, here, rather than mirrored on each side of the wire** --
+ * `./feeds.ts`'s `AddFeedInput` doc has the measurement of what mirroring
+ * a write input costs (issue #88). A rename here is now a compile error in
+ * `@pickarr/web`, not a silent divergence.
+ *
+ * **Every field is a primitive and none is optional**, for the reason
+ * `AddDownloadClientInput` gives at length: these values arrive unchecked
+ * out of a JSON request body and `addMapping` is the validator that
+ * narrows them, not a caller that has already done so. `downloadClientId`
+ * is a plain `number` for the same reason `requestPick`'s `rssItemId` is --
+ * the route's shape guard establishes it is a number, and whether that
+ * number names a row is the `unknown-client` refusal's business rather
+ * than a type's.
+ */
+export interface AddMappingInput {
+  downloadClientId: number;
+  fromPath: string;
+  toPath: string;
+}
+
+/**
+ * The wire shape `PATCH /api/mappings/:id` needs, and what
+ * `Host.editMapping` replaces a mapping's two mutable columns with.
+ *
+ * Declared once, here, for the same reason {@link AddMappingInput} is.
+ *
+ * **Both fields, always, rather than a patch of whichever the caller cares
+ * about.** The route is a `PATCH` because it addresses one existing row,
+ * not because the body is sparse: a two-field body with one field optional
+ * gives "leave it alone" and "set it to the same value" two spellings that
+ * the host would have to tell apart, and `exactOptionalPropertyTypes`
+ * makes the absent case a third thing again.
+ *
+ * **`downloadClientId` is absent, and cannot be sent.** A mapping belongs
+ * to exactly one client by foreign key and is meaningless away from it
+ * (design spec §8), so moving one between clients is not an edit; it is a
+ * remove and an add, and the `unknown-client` refusal exists on the add
+ * alone because of it.
+ */
+export interface EditMappingInput {
+  fromPath: string;
+  toPath: string;
+}
+
+/**
  * Every way the three mapping write paths can decline.
  *
  * Written in the order design spec §6's "Refusals" paragraph lists them,

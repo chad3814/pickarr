@@ -35,6 +35,37 @@
  */
 
 /**
+ * The wire shape `POST /api/feeds` needs, and what `Host.addFeed`
+ * (`packages/host/src/feeds/add.ts`) accepts to create a feed.
+ *
+ * **Declared once, here, rather than mirrored on each side of the wire.**
+ * It used to be declared twice -- once as `feeds/add.ts`'s own
+ * `AddFeedInput`, and again as a hand-copied interface in
+ * `packages/web`'s `AddFeed.tsx` -- with no test asserting the two
+ * spellings agreed. Measured: renaming `pollIntervalS` to `pollSeconds` on
+ * the host alone reddened every host test and left the whole web suite
+ * green, so the client kept posting the old field name and every
+ * submission came back `bad-poll-interval` wrapped in the catch-all
+ * sentence. A rename here is now a compile error in `@pickarr/web`, not a
+ * silent divergence (issue #88).
+ *
+ * `downloadType` is `string`, not `Transport` (`'torrent' | 'nzb'`), on
+ * purpose: this value arrives unchecked off a JSON request body, and
+ * `addFeed` is the validator that narrows it, not a caller that has
+ * already done so. Typing it `Transport` would tell the compiler a check
+ * `addFeed` itself performs at runtime (`TRANSPORTS.has`, in that same
+ * module) is already guaranteed, which is false the moment a caller is
+ * anything other than trusted code.
+ */
+export interface AddFeedInput {
+  pluginId: string;
+  name: string;
+  url: string;
+  downloadType: string;
+  pollIntervalS: number;
+}
+
+/**
  * Every way `addFeed` can decline to create a feed.
  *
  * Ordered as `feeds/add.ts` checks them, which is the order this list was

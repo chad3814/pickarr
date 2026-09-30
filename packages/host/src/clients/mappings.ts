@@ -71,49 +71,7 @@
  * wrapping them are `async` only because the interface they satisfy is.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { MappingRefusalCode } from '@pickarr/contract';
-
-/**
- * What `Host.addMapping` needs to create a mapping.
- *
- * **Every field is a primitive and none is optional**, for the reason
- * `AddDownloadClientInput` gives at length: these values arrive unchecked
- * out of a JSON request body and this module is the validator that narrows
- * them, not a caller that has already done so. `downloadClientId` is a
- * plain `number` for the same reason `requestPick`'s `rssItemId` is -- the
- * route's shape guard establishes it is a number, and whether that number
- * names a row is the `unknown-client` refusal's business rather than a
- * type's.
- */
-export interface AddMappingInput {
-  downloadClientId: number;
-  fromPath: string;
-  toPath: string;
-}
-
-/**
- * What `Host.editMapping` replaces a mapping's two mutable columns with.
- *
- * **Both fields, always, rather than a patch of whichever the caller cares
- * about.** The route is a `PATCH` because it addresses one existing row,
- * not because the body is sparse: a two-field body with one field optional
- * gives "leave it alone" and "set it to the same value" two spellings that
- * this module would have to tell apart, and `exactOptionalPropertyTypes`
- * makes the absent case a third thing again. Sending both is also what the
- * edit case design spec §9's acceptance 4 describes actually does -- fixing
- * a typo in `to_path` and resubmitting the `from_path` unchanged -- which
- * is why a no-op `from_path` has a test of its own.
- *
- * **`downloadClientId` is absent, and cannot be sent.** A mapping belongs
- * to exactly one client by foreign key and is meaningless away from it
- * (design spec §8), so moving one between clients is not an edit; it is a
- * remove and an add, and the `unknown-client` refusal exists on the add
- * alone because of it.
- */
-export interface EditMappingInput {
-  fromPath: string;
-  toPath: string;
-}
+import type { AddMappingInput, EditMappingInput, MappingRefusalCode } from '@pickarr/contract';
 
 /**
  * Why a mapping write declined, returned as a value rather than thrown --
@@ -229,6 +187,10 @@ function emptyPathRefusal(fromPath: string, toPath: string): MappingRefusal | un
  * `created_at` and `updated_at` take the same `now()` on an insert, the
  * shape `clients/add.ts` and `feeds/add.ts` both use: a row that has never
  * been edited was last modified when it was created.
+ *
+ * `AddMappingInput` is `@pickarr/contract`'s now (issue #88) -- that
+ * module's own doc has the full reasoning for why it is declared once
+ * rather than mirrored.
  */
 export function addMapping(
   deps: { raw: DatabaseSync; now: () => number },
@@ -290,6 +252,12 @@ export function addMapping(
  * Binding it here is the whole of the guard, and
  * `test/clients/mappings.test.ts` moves its clock between the insert and
  * the edit so that a writer which forgot could not pass.
+ *
+ * `EditMappingInput` is `@pickarr/contract`'s now (issue #88) -- that
+ * module's own doc has the full reasoning for why it is declared once
+ * rather than mirrored, including why sending both fields always (rather
+ * than a sparse patch) is what design spec §9's acceptance 4 describes
+ * actually doing.
  */
 export function editMapping(
   deps: { raw: DatabaseSync; now: () => number },

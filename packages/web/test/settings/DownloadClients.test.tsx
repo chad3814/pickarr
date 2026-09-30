@@ -9,11 +9,8 @@ import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { DownloadClients, type DownloadClientsListSource } from '../../src/settings/DownloadClients.tsx';
 import type { MappingSubmit } from '../../src/settings/postMapping.ts';
-import {
-  REFUSAL_MESSAGES,
-  type AddDownloadClientInput,
-  type AddDownloadClientOutcome,
-} from '../../src/settings/AddDownloadClient.tsx';
+import { REFUSAL_MESSAGES, type AddDownloadClientOutcome } from '../../src/settings/AddDownloadClient.tsx';
+import type { AddDownloadClientInput } from '@pickarr/contract';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test

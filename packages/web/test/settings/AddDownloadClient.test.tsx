@@ -1,12 +1,11 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS } from '@pickarr/contract';
+import { ADD_DOWNLOAD_CLIENT_REFUSALS, type AddDownloadClientInput } from '@pickarr/contract';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import {
   AddDownloadClient,
   postDownloadClient,
   REFUSAL_MESSAGES,
-  type AddDownloadClientInput,
   type AddDownloadClientOutcome,
 } from '../../src/settings/AddDownloadClient.tsx';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
