@@ -8,20 +8,10 @@
  * `releaseDate` join the first group here, because both come from the
  * shared `media_item` row rather than from any plugin's table.
  *
- * **`resolution` is gone, and §3 is wrong about it** (issue #98). There is
- * an `rss_item.resolution` column and it is not a video resolution: it is
- * the lookup state, `'pending' | 'resolved' | 'refused' | 'unresolved'`
- * (`contract`'s `Resolution`, written by `MediaWriter.setResolution`,
- * inserted as the literal `'pending'` by `feeds/reader.ts`). 2.0 records no
- * video resolution anywhere -- searched for one across the host, the
- * contract, this package, all three plugins and the web client before
- * concluding it; the only `QualityTokens.resolution` in the repository is
- * 1.x's `packages/plugin-api`, which 2.0 shares no schema with. This
- * package briefly shipped `resolveResolution` answering `null` so the
- * declared token stayed declared; a token that can only ever resolve to
- * nothing is a shape an operator can type and never get anything from, so
- * the three lists dropped it and `{resolution}` is now `unknown-token` on
- * save. It comes back the day something stores one.
+ * **`resolution` is back, and reads a real video resolution** (issue #98).
+ * §3 took it from `rss_item.resolution`, which was the lookup state; that
+ * column is now `lookup_state`, and the engine records the service's parse
+ * in `rss_item.video_resolution`, which is what `resolveResolution` reads.
  *
  * **Shared implementations, but never a shared list.** Each plugin still
  * writes out every key it declares -- `{ title: resolveTitle, … }`, not
@@ -188,6 +178,18 @@ export const resolveReleaseDate: TokenResolver = async (file, ctx) => {
   const item = await mediaItem(file, ctx);
   return item?.releaseDate ?? null;
 };
+
+/**
+ * `rss_item.video_resolution`: the lookup service's parse of the release's
+ * video resolution (`1080p`), recorded by the engine on every answer and
+ * already normalized to a scan height and letter, so it can hold no
+ * separator. `null` -- a hole the shape drops -- for a name that stated none.
+ *
+ * Read by the release, not the media item: two releases of one film can be
+ * two resolutions, and the file being placed came from exactly one of them.
+ */
+export const resolveResolution: TokenResolver = async (file, ctx) =>
+  queryText(ctx, 'SELECT video_resolution FROM rss_item WHERE id = ?', file.rssItemId);
 
 /** The year of {@link resolveReleaseDate}, which is what a film library is named by. */
 export const resolveYear: TokenResolver = async (file, ctx) => {

@@ -51,18 +51,14 @@
  * gives: one array is the whole answer to "what may a shape of this kind
  * say", with nothing a reader has to go and find.
  *
- * ## `resolution` is not here, and design spec §3 is wrong about it
+ * ## `resolution` is the video resolution, not the lookup state
  *
- * §3 lists `resolution` among the tokens that "come from `rss_item`".
- * `rss_item.lookup_state` is the **lookup state** -- `'pending' | 'resolved' |
- * 'refused' | 'unresolved'`, `./media.ts`'s `LookupState`, inserted as the
- * literal `'pending'` by `host/src/feeds/reader.ts` -- not a video
- * resolution, and 2.0 stores a video resolution nowhere. Interpolating it
- * would name an episode `The Bear - S03E01 resolved.mkv`, permanently,
- * since §10 puts re-importing out of scope. `{resolution}` is therefore
- * `unknown-token` on save. Issue #98 tracks it, and the day something does
- * record one, the name comes back here and the resolver goes in the
- * plugins.
+ * §3 listed `resolution` among the tokens that "come from `rss_item`",
+ * meaning `rss_item.resolution` -- which was the lookup state, and would have
+ * named an episode `The Bear - S03E01 resolved.mkv`. Issue #98 renamed that
+ * column `lookup_state` and added `video_resolution`, the lookup service's
+ * own parse, normalized by `normalizeVideoResolution`. `{resolution}` reads
+ * the latter, and is on every list because every release has one.
  */
 import type { TokenResolver } from './plugin.ts';
 
@@ -91,7 +87,7 @@ export type TokensFor<Name extends string> = Readonly<Record<Name, TokenResolver
  * named after itself.
  */
 export const TV_TOKEN_NAMES = [
-  'series', 'season', 'episode', 'title', 'releaseDate', 'filename', 'ext',
+  'series', 'season', 'episode', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
 ] as const;
 
 /** One of {@link TV_TOKEN_NAMES}. */
@@ -109,7 +105,7 @@ export type TvTokenName = (typeof TV_TOKEN_NAMES)[number];
  * refused on save.
  */
 export const MOVIE_TOKEN_NAMES = [
-  'title', 'year', 'releaseDate', 'collection', 'filename', 'ext',
+  'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
 ] as const;
 
 /** One of {@link MOVIE_TOKEN_NAMES}. */
@@ -123,7 +119,7 @@ export type MovieTokenName = (typeof MOVIE_TOKEN_NAMES)[number];
  * where a film library's convention wants the year alone.
  */
 export const XXX_TOKEN_NAMES = [
-  'site', 'title', 'releaseDate', 'filename', 'ext',
+  'site', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
 ] as const;
 
 /** One of {@link XXX_TOKEN_NAMES}. */

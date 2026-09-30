@@ -23,6 +23,7 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
   resolveYear,
 } from '@pickarr/openmetadata';
@@ -43,6 +44,7 @@ export const MOVIE_TOKENS: TokensFor<MovieTokenName> = {
   year: resolveYear,
   releaseDate: resolveReleaseDate,
   collection: resolveCollection,
+  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };

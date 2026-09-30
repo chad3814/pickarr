@@ -27,6 +27,7 @@ export {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
   resolveYear,
 } from './tokens.ts';

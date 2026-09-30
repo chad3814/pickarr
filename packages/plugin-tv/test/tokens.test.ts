@@ -120,6 +120,10 @@ test('every declared token resolves, and the whole map is what a television shap
     episode: '01',
     title: 'Tomorrow',
     releaseDate: '2024-06-26',
+    // No `rss_item` row exists for this harness's `rssItemId` (7), so the
+    // resolver's own hole -- a row that is gone -- is what shows here, not
+    // a stored value; `openmetadata/test/tokens.test.ts` pins the stored case.
+    resolution: null,
     filename: 'The.Bear.S03E01',
     ext: 'mkv',
   });

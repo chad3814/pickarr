@@ -73,19 +73,19 @@ function tokenNames(plugin: MediaPlugin): string[] {
 
 test('the television plugin declares the tokens a television path may name', () => {
   assert.deepEqual(tokenNames(pluginById('tv')), [
-    'series', 'season', 'episode', 'title', 'releaseDate', 'filename', 'ext',
+    'series', 'season', 'episode', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
   ]);
 });
 
 test('the film plugin declares the tokens a film path may name', () => {
   assert.deepEqual(tokenNames(pluginById('movie')), [
-    'title', 'year', 'releaseDate', 'collection', 'filename', 'ext',
+    'title', 'year', 'releaseDate', 'collection', 'resolution', 'filename', 'ext',
   ]);
 });
 
 test('the xxx plugin declares the tokens an xxx path may name', () => {
   assert.deepEqual(tokenNames(pluginById('xxx')), [
-    'site', 'title', 'releaseDate', 'filename', 'ext',
+    'site', 'title', 'releaseDate', 'resolution', 'filename', 'ext',
   ]);
 });
 
@@ -111,27 +111,20 @@ test('every shipped plugin declares the tokens that come from the shared row and
   // plugin missing one would be refusing a shape the host can in fact
   // resolve.
   for (const plugin of shipped().values()) {
-    for (const shared of ['title', 'releaseDate', 'filename', 'ext']) {
+    for (const shared of ['title', 'releaseDate', 'resolution', 'filename', 'ext']) {
       assert.ok(tokenNames(plugin).includes(shared), `"${plugin.id}" does not declare "${shared}"`);
     }
   }
 });
 
-test('no plugin declares {resolution}, because nothing in 2.0 records one', () => {
-  // Design spec §3 lists it; issue #98 removes it. `rss_item.resolution` is
-  // the *lookup* state -- inserted as the literal `'pending'` by
-  // `feeds/reader.ts` -- so interpolating it would name an episode
-  // `The Bear - S03E01 resolved.mkv`, permanently (§10 puts re-importing
-  // out of scope). It briefly shipped as a resolver answering `null`, which
-  // is a token an operator can type and never get anything from.
-  //
-  // Asserted here rather than in a plugin package, because the property is
-  // that *no* plugin has it -- which no test inside one plugin can see.
+test('every shipped plugin declares {resolution}, now that the lookup engine records one', () => {
+  // Issue #98 removed it while `rss_item.resolution` was the lookup state,
+  // which would have named an episode `… resolved.mkv`. The token now reads
+  // `rss_item.video_resolution`, which every plugin's releases carry, so it
+  // is declared by all three -- asserted here because no test inside one
+  // plugin can see the other two.
   for (const plugin of shipped().values()) {
-    assert.ok(
-      !tokenNames(plugin).includes('resolution'),
-      `"${plugin.id}" declares "resolution", which resolves to nothing`,
-    );
+    assert.ok(tokenNames(plugin).includes('resolution'), `"${plugin.id}" does not declare "resolution"`);
   }
 });
 

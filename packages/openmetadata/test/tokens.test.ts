@@ -15,6 +15,7 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
   resolveYear,
 } from '../src/tokens.ts';
@@ -131,4 +132,14 @@ test('a token resolved for a release nothing matched is a hole, not a query for 
   assert.equal(await resolveYear(unmatched, ctx), null);
   // The two that come from the path are unaffected by the match.
   assert.equal(await resolveExtension(unmatched, ctx), 'mkv');
+});
+
+test('{resolution} is the release\'s stored video resolution, and null when there is none', async () => {
+  const harness = createTestHarness();
+  const known = harness.insertRssItem('Film.2023.1080p.mkv');
+  const unknown = harness.insertRssItem('Film.2023.mkv');
+  harness.raw.prepare("UPDATE rss_item SET video_resolution = '1080p' WHERE id = ?").run(known);
+  assert.equal(await resolveResolution(downloaded({ rssItemId: known }), harness.ctx), '1080p');
+  assert.equal(await resolveResolution(downloaded({ rssItemId: unknown }), harness.ctx), null);
+  assert.equal(await resolveResolution(downloaded({ rssItemId: 9999 }), harness.ctx), null, 'a release that is gone is a hole, not a throw');
 });

@@ -182,16 +182,16 @@ test('the shared tokens are accepted by every plugin', () => {
   }
 });
 
-test('{resolution} is refused by every plugin, because nothing in 2.0 records one', () => {
-  // Issue #98: design spec §3 lists `resolution` and `rss_item.resolution`
-  // is the *lookup* state, not a video resolution. It briefly shipped as a
-  // declared token resolving to `null`; a shape naming it now fails where
-  // it is typed rather than silently dropping a segment at every import.
+test('{resolution} is accepted by every plugin, now that it reads a real video resolution', () => {
+  // Issue #98: design spec §3 named `resolution` for `rss_item.resolution`,
+  // which was the lookup state. That column is now `lookup_state`, and the
+  // lookup engine's own parse lives in `rss_item.video_resolution` -- which
+  // every plugin's releases carry, so a shape naming it saves rather than
+  // refusing `unknown-token`.
   const { save } = setup();
   for (const pluginId of ['tv', 'movie', 'xxx']) {
-    assert.deepEqual(
-      save(pluginId, { shape: '{title} {resolution}.{ext}' }),
-      { refusal: 'unknown-token', token: 'resolution' },
+    assert.ok(
+      !('refusal' in save(pluginId, { shape: '{title} {resolution}.{ext}' })),
       pluginId,
     );
   }

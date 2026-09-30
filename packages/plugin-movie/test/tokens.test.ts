@@ -73,6 +73,10 @@ test('every declared token resolves, and the whole map is what a film shape may 
     year: '2024',
     releaseDate: '2024-03-01',
     collection: 'Dune Collection',
+    // No `rss_item` row exists for this harness's `rssItemId` (7), so the
+    // resolver's own hole -- a row that is gone -- is what shows here, not
+    // a stored value; `openmetadata/test/tokens.test.ts` pins the stored case.
+    resolution: null,
     filename: 'Dune.Part.Two.2024.2160p',
     ext: 'mkv',
   });

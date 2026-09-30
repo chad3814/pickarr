@@ -73,6 +73,10 @@ test('every declared token resolves, and the whole map is what a scene shape may
     site: 'A Site',
     title: 'A Scene',
     releaseDate: '2026-01-15',
+    // No `rss_item` row exists for this harness's `rssItemId` (7), so the
+    // resolver's own hole -- a row that is gone -- is what shows here, not
+    // a stored value; `openmetadata/test/tokens.test.ts` pins the stored case.
+    resolution: null,
     filename: 'A.Site.26.01.15.A.Scene.XXX.1080p',
     // Lowercased from `MP4`, so two spellings of one release cannot land as
     // two files.
