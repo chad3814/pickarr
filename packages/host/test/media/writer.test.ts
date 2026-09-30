@@ -463,6 +463,25 @@ test('setVideoResolution stores a normalized value or null, and moves updated_at
   assert.equal(storedVideoResolution(raw, itemId), null, 'null clears it');
 });
 
+test('setVideoResolution writes nothing when the stored value already matches', async () => {
+  // A poll or retry that re-reads the same parse must not move `updated_at`:
+  // `/unmatched`'s Retry button reads an advance as "the retry landed", and
+  // every rewrite is another row in the sync log for nothing.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
+  let clock = 1000;
+  const writer = createMediaWriter(db, () => clock, unusedArtwork);
+
+  await writer.setVideoResolution(itemId, '1080p');
+  assert.equal(readRssItem(raw, itemId)?.updated_at, 1000);
+  clock = 2000;
+  await writer.setVideoResolution(itemId, '1080p');
+  assert.equal(readRssItem(raw, itemId)?.updated_at, 1000, 'the unchanged value left updated_at at the first write');
+  await writer.setVideoResolution(itemId, '720p');
+  assert.equal(readRssItem(raw, itemId)?.updated_at, 2000, 'a changed value still moves it');
+});
+
 test('setVideoResolution refuses a value the contract would not normalize to itself', async () => {
   // The writer is shared by every plugin and closes over no plugin id, so it
   // is the one place a caller that skipped `normalizeVideoResolution` is caught.

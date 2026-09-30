@@ -418,8 +418,11 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       if (value !== null && normalizeVideoResolution(value) !== value) {
         throw new TypeError('media writer: not a video resolution Pickarr stores');
       }
-      raw.prepare('UPDATE rss_item SET video_resolution = ?, updated_at = ? WHERE id = ?')
-        .run(value, now(), rssItemId);
+      // `IS NOT`, not `!=`, so `null` compares as a value: an unchanged
+      // resolution writes nothing, which keeps `updated_at` -- the Retry
+      // button's "landed" signal and the sync log's cursor -- still.
+      raw.prepare('UPDATE rss_item SET video_resolution = ?, updated_at = ? WHERE id = ? AND video_resolution IS NOT ?')
+        .run(value, now(), rssItemId, value);
     },
   };
 }

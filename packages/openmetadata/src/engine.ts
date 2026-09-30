@@ -304,13 +304,6 @@ export async function applyEnvelope(
     .set({ lookupId: envelope.lookupId, updatedAt: deps.now })
     .where(eq(deps.table.rssItemId, target.rssItemId));
 
-  // The video resolution the answer parsed (issue #98), recorded here for
-  // the same reason `lookupId` is recorded above: before the branch below
-  // decides anything, so no outcome -- a refusal, a partial answer, the ten
-  // minutes of polling that end `unresolved` -- can skip it. A later answer
-  // for the same release overwrites it; the latest parse is the one kept.
-  await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
-
   // 1. Not here yet -- read FIRST, and per answer rather than per response. A
   //    batch always answers HTTP 200, and a partial entry carries the state it
   //    *expects* to reach, so neither the response arriving nor this entry's
@@ -320,7 +313,9 @@ export async function applyEnvelope(
     if (polls > MAX_POLLS) {
       // The service never finished, so the last envelope it sent is the only
       // record of how far it got -- `lookupJsonFor` is what a reader of
-      // `/unmatched` sees instead of a bare "gave up" sentence.
+      // `/unmatched` sees instead of a bare "gave up" sentence, and its parse
+      // is the best video resolution there is (issue #98).
+      await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
       await ctx.media.setLookupState(
         target.rssItemId,
         'unresolved',
@@ -337,6 +332,16 @@ export async function applyEnvelope(
     // The lookup state stays `pending`: nothing is known about this item yet.
     return;
   }
+
+  // The video resolution the answer parsed (issue #98), recorded once here
+  // so every terminal outcome below -- refused (always `null`), unresolved
+  // and resolved -- writes it and none can forget to; the expiry above
+  // writes its own. Not before the block above: any write to `rss_item`
+  // moves its `updated_at`, which `/unmatched`'s Retry button reads as "the
+  // retry landed", so recording a partial answer would re-enable the button
+  // while polling continues and rewrite the row on every poll. A later
+  // answer for the same release overwrites it; the latest parse is kept.
+  await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
 
   // 2. A non-media file, successfully identified. Terminal: folding this into
   //    `unresolved` would retry a subtitle forever and show it to a reader as

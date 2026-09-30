@@ -213,6 +213,11 @@ export interface MediaWriter {
    * unchanged. This writer is shared by every plugin (see this interface's
    * docblock), so it is the one place a caller that skipped the
    * normalization is caught before the value can reach a library path.
+   *
+   * **A no-op when the stored value already equals `value`** (`null`
+   * included): the row and its `updated_at` are left as they were, so
+   * re-reading an unchanged parse neither signals a change to a reader of
+   * `updatedAt` nor adds a row to the sync log.
    */
   setVideoResolution(rssItemId: number, value: string | null): Promise<void>;
 }

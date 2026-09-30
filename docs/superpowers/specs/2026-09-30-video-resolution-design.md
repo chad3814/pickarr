@@ -147,11 +147,20 @@ Every reader and writer of the old names moves with it: `host/src/media/writer.t
   `packages/openmetadata`. It reads `parsed.quality.resolution` by narrowing,
   never by casting, and passes it through `normalizeVideoResolution`.
 - `applyEnvelope` calls `ctx.media.setVideoResolution(target.rssItemId,
-  videoResolutionOf(envelope))` once, beside the existing "recorded before
-  the branch below decides anything" `lookupId` update. So every outcome
-  writes it -- resolved, unresolved, refused (always `null`), and a
-  pending/partial answer that already carries a parse -- and no terminal
-  branch can forget to.
+  videoResolutionOf(envelope))` once, just after the partial/pending block.
+  So every terminal outcome writes it -- resolved, unresolved and refused
+  (always `null`) -- and none can forget to. The MAX_POLLS expiry inside
+  that block makes the same call, because the service's last envelope is
+  the best parse there is.
+- A partial or pending answer that polls again writes nothing to
+  `rss_item`, even when it already carries a parse. Every write there moves
+  `updated_at`, and `/unmatched`'s Retry button reads an advance as "the
+  retry landed": writing on a partial answer would re-enable the button
+  while polling continues, and rewrite the row -- one more sync-log entry
+  per client -- on every poll.
+- `setVideoResolution` is a no-op when the stored value already equals the
+  new one (`... WHERE id = ? AND video_resolution IS NOT ?`), so re-reading
+  an unchanged parse leaves `updated_at` alone for the same two reasons.
 - A later answer for the same release, such as a retry from `/unmatched`,
   overwrites the value. The service's latest parse is the one kept.
 
@@ -254,8 +263,8 @@ Every item below is a test written to fail first.
     `null`.
   - A resolved row stays `null`.
   - `sync.generation` changes.
-- `setVideoResolution` writes and logs, and throws on a value outside the
-  pattern.
+- `setVideoResolution` writes and logs, throws on a value outside the
+  pattern, and leaves `updated_at` alone when the value is unchanged.
 - `sync/tables.ts`' key-set test carries the three new names and neither
   old one.
 - `tokens.test.ts` counts become 8/7/6. `{resolution}` saves in a shape and
@@ -268,8 +277,9 @@ Every item below is a test written to fail first.
 **openmetadata**
 - `videoResolutionOf` accepts the pattern. It rejects a missing `parsed`, a
   missing `quality`, a non-string, and a string outside the pattern.
-- `applyEnvelope` writes the resolution on each of the five outcomes, and
-  refused writes `null`.
+- `applyEnvelope` writes the resolution on each terminal outcome and at
+  MAX_POLLS expiry, refused writes `null`, and a partial or pending answer
+  that polls again writes nothing.
 - The backfill migration:
   - It marks resolved rows only.
   - It inserts the job only when something was marked.
