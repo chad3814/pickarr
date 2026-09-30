@@ -45,44 +45,13 @@
  * spelling drifts silently, because renaming one half reddens only that
  * half's tests.
  */
-import { DESTINATION_REFUSALS, type DestinationRefusalCode } from '@pickarr/contract';
+import {
+  DESTINATION_REFUSALS,
+  type DestinationRefusalCode,
+  type SaveDestinationRequest,
+} from '@pickarr/contract';
 
-/**
- * The wire shape `PUT /api/destinations/:pluginId` needs -- mirrored from
- * `packages/host/src/media/destinations.ts`'s own `SaveDestinationInput`
- * rather than imported, for the reason `postMapping.ts`'s twin gives: this
- * package ships to a browser and only needs to agree with the host on the
- * JSON that crosses the wire.
- *
- * The plugin id is **not** in here. It is the path segment, so there is no
- * way for a body to name one plugin while the url names another.
- */
-export interface SaveDestinationInput {
-  /**
-   * Absolute, and spelled as it resolves: the host refuses
-   * `not-absolute-root` without a leading `/`, and `unusable-root` for `/`
-   * itself or for any value holding an empty, `.` or `..` segment. Whether
-   * it *exists* is still not checked -- design spec §7 is explicit that a
-   * root which does not exist is a misconfiguration to see, not a
-   * directory to invent, so that one surfaces in the host's log at import
-   * rather than here.
-   */
-  root: string;
-  /** The `{token}` template, validated on save against the declaring plugin's own list. */
-  shape: string;
-  /**
-   * Where a release that matched nothing lands, relative to `root`.
-   *
-   * **Optional, and the absence is load-bearing.** `api/server.ts`'s
-   * `destinationBodyFrom` reads an absent `unmatchedDir` as "use the host's
-   * own default" -- design spec §6's `_unmatched`, which lives in
-   * `media/destinations.ts` as a constant and deliberately not in the DDL --
-   * and reads an empty string as the `empty-path` refusal. So a field the
-   * operator left blank must be **omitted**, not sent as `''`, or the
-   * documented default becomes unreachable and answers a refusal instead.
-   */
-  unmatchedDir?: string;
-}
+export type { SaveDestinationRequest };
 
 /**
  * Every way the save can fail to do what was asked.
@@ -111,7 +80,7 @@ export interface DestinationRefusal {
    *
    * Required-but-nullable rather than optional, matching the host's own
    * `DestinationRefusal` and for the reason
-   * {@link SaveDestinationInput.unmatchedDir} gives about
+   * {@link SaveDestinationRequest.unmatchedDir} gives about
    * `exactOptionalPropertyTypes`: absent and explicitly null would be two
    * spellings of one thing.
    */
@@ -133,7 +102,7 @@ export type SaveDestinationOutcome = { id: number } | DestinationRefusal;
  */
 export type DestinationSubmit = (
   pluginId: string,
-  input: SaveDestinationInput,
+  input: SaveDestinationRequest,
 ) => Promise<SaveDestinationOutcome>;
 
 /** The codes this client recognises, built from the contract's list rather than spelled again here. */
@@ -159,7 +128,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export async function putDestination(
   pluginId: string,
-  input: SaveDestinationInput,
+  input: SaveDestinationRequest,
 ): Promise<SaveDestinationOutcome> {
   let body: unknown;
   try {
@@ -168,7 +137,7 @@ export async function putDestination(
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
       // `JSON.stringify` drops an `undefined` member, which is exactly the
-      // omission `SaveDestinationInput.unmatchedDir` documents -- so a
+      // omission `SaveDestinationRequest.unmatchedDir` documents -- so a
       // caller that leaves it unset sends no field rather than an empty
       // one. Pinned by `postDestination.test.tsx` rather than left to this
       // comment, because it is a property of `JSON.stringify` and not of
@@ -288,7 +257,7 @@ export const DESTINATION_REFUSAL_MESSAGES: Record<
   /**
    * **Not reachable from this form, and that is a property of the form
    * rather than of the rule.** A blank unmatched-folder field means "use the
-   * default" here and is omitted from the body (`SaveDestinationInput`), so
+   * default" here and is omitted from the body (`SaveDestinationRequest`), so
    * this client never sends the `''` the host refuses. `ClientMappings.tsx`
    * keeps its two inputs un-`required` for the opposite reason -- there,
    * blank has no second meaning and marking them required would make the

@@ -41,7 +41,11 @@ export type { RequestPickRefusalCode, RetryLookupRefusalCode } from './picks.ts'
 export { REQUEST_PICK_REFUSALS, RETRY_LOOKUP_REFUSALS } from './picks.ts';
 export type { AddMappingInput, EditMappingInput, MappingRefusalCode } from './mappings.ts';
 export { MAPPING_REFUSALS } from './mappings.ts';
-export type { DestinationRefusalBody, DestinationRefusalCode } from './destinations.ts';
+export type {
+  DestinationRefusalBody,
+  DestinationRefusalCode,
+  SaveDestinationRequest,
+} from './destinations.ts';
 export { DESTINATION_REFUSALS } from './destinations.ts';
 export type { MovieTokenName, TokensFor, TvTokenName, XxxTokenName } from './tokens.ts';
 export {

@@ -82,7 +82,7 @@
  * because the interface it satisfies is.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { DestinationRefusalCode } from '@pickarr/contract';
+import type { DestinationRefusalCode, SaveDestinationRequest } from '@pickarr/contract';
 import { canonicalRoot, unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
@@ -117,7 +117,20 @@ export const DEFAULT_UNMATCHED_DIR = '_unmatched';
 export const SHAPE_PROBE_VALUE = 'x';
 
 /**
- * What `Host.saveDestination` needs to write one plugin's destination.
+ * What `Host.saveDestination` needs to write one plugin's destination:
+ * `@pickarr/contract`'s `SaveDestinationRequest`, parsed.
+ *
+ * **Derived from the wire shape, not a second hand-copy of it.** Issue #88
+ * moved `AddFeedInput`, `AddDownloadClientInput`, `AddMappingInput` and
+ * `EditMappingInput` into `@pickarr/contract` and left this one behind,
+ * because this is where the two sides of the wire genuinely disagree
+ * rather than merely repeat each other: `unmatchedDir` is optional on the
+ * wire and required-but-nullable here (see below). Two *names* -- this one
+ * and `SaveDestinationRequest` -- still have to mean the same three
+ * fields, so this type is written as a transform of that one rather than
+ * copied from it: renaming, adding or removing a field there is a compile
+ * error here too, without either side's optionality claim about
+ * `unmatchedDir` being lost.
  *
  * **Every field is a primitive and none is optional**, for the reason
  * `AddDownloadClientInput` and `AddMappingInput` each give at length: these
@@ -131,16 +144,27 @@ export const SHAPE_PROBE_VALUE = 'x';
  * forwarding a value it read off a body, and there is only one thing they
  * could mean here -- use the default.
  *
+ * **Written as three indexed-access fields, not a mapped type over
+ * `Required<SaveDestinationRequest>`.** The mapped-type spelling was tried
+ * first and types this file's own uses correctly, but loses the
+ * `| undefined` half of `unmatchedDir` the moment something else maps over
+ * *this* type in turn -- `test/media/destinations.test.ts`'s
+ * `Partial<SaveDestinationInput>` did, and `exactOptionalPropertyTypes`
+ * then refused the test's own `unmatchedDir: undefined` probes. A mapped
+ * type remembers modifiers, not values, when nested; indexed access on
+ * each field name does not have that failure mode, and still turns a
+ * rename, addition or removal on `SaveDestinationRequest` into a compile
+ * error here (`SaveDestinationRequest['unmatchedDir']` stops resolving).
+ *
  * The plugin id is **not** a field. It comes from the request path, so
  * putting it in the body too would give one request two places to name a
  * plugin and a way for them to disagree; `editMapping` keeps its `id` out of
  * `EditMappingInput` for the same reason.
  */
 export interface SaveDestinationInput {
-  root: string;
-  shape: string;
-  /** `undefined` means {@link DEFAULT_UNMATCHED_DIR}; `''` is refused. */
-  unmatchedDir: string | undefined;
+  root: SaveDestinationRequest['root'];
+  shape: SaveDestinationRequest['shape'];
+  unmatchedDir: SaveDestinationRequest['unmatchedDir'];
 }
 
 /**

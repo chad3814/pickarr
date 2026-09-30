@@ -17,7 +17,7 @@ import { pluginFor } from '../../src/plugins/registry.ts';
 import {
   DESTINATION_REFUSAL_MESSAGES,
   type DestinationSubmit,
-  type SaveDestinationInput,
+  type SaveDestinationRequest,
   type SaveDestinationOutcome,
 } from '../../src/settings/postDestination.ts';
 import { gone } from '../dom.ts';
@@ -278,7 +278,7 @@ test('the form tells the operator that a shape cannot contain a literal brace', 
 
 test('a save sends this row\'s own values, addressed to this row\'s own plugin', async () => {
   const db = await freshDb();
-  const calls: { pluginId: string; input: SaveDestinationInput }[] = [];
+  const calls: { pluginId: string; input: SaveDestinationRequest }[] = [];
   await renderDestinations(db, (pluginId, input) => {
     calls.push({ pluginId, input });
     return Promise.resolve({ id: 1 });
@@ -304,7 +304,7 @@ test('a blank unmatched folder is sent as no field at all, so the host applies i
   // Sending `''` would turn the default this row advertises into a
   // refusal.
   const db = await freshDb();
-  const calls: SaveDestinationInput[] = [];
+  const calls: SaveDestinationRequest[] = [];
   await renderDestinations(db, (_pluginId, input) => {
     calls.push(input);
     return Promise.resolve({ id: 1 });
