@@ -128,9 +128,9 @@ export const SHAPE_PROBE_VALUE = 'x';
  * wire and required-but-nullable here (see below). Two *names* -- this one
  * and `SaveDestinationRequest` -- still have to mean the same three
  * fields, so this type is written as a transform of that one rather than
- * copied from it: renaming, adding or removing a field there is a compile
- * error here too, without either side's optionality claim about
- * `unmatchedDir` being lost.
+ * copied from it: renaming or removing a field there is a compile error
+ * here too (see below for why adding one also is), without either side's
+ * optionality claim about `unmatchedDir` being lost.
  *
  * **Every field is a primitive and none is optional**, for the reason
  * `AddDownloadClientInput` and `AddMappingInput` each give at length: these
@@ -153,8 +153,16 @@ export const SHAPE_PROBE_VALUE = 'x';
  * then refused the test's own `unmatchedDir: undefined` probes. A mapped
  * type remembers modifiers, not values, when nested; indexed access on
  * each field name does not have that failure mode, and still turns a
- * rename, addition or removal on `SaveDestinationRequest` into a compile
- * error here (`SaveDestinationRequest['unmatchedDir']` stops resolving).
+ * rename or removal on `SaveDestinationRequest` into a compile error here
+ * (`SaveDestinationRequest['unmatchedDir']` stops resolving).
+ *
+ * **Indexed access alone does not catch a field added to
+ * `SaveDestinationRequest`.** Three named fields read off it type-check
+ * whether or not a fourth exists; an addition there would silently stay
+ * unparsed and unwritten here. {@link saveDestinationKeysMatch} below is
+ * the other half: a type-level assertion that the two interfaces' key sets
+ * are exactly equal, so an added field fails the build here too instead of
+ * only failing quietly at runtime.
  *
  * The plugin id is **not** a field. It comes from the request path, so
  * putting it in the body too would give one request two places to name a
@@ -166,6 +174,31 @@ export interface SaveDestinationInput {
   shape: SaveDestinationRequest['shape'];
   unmatchedDir: SaveDestinationRequest['unmatchedDir'];
 }
+
+/**
+ * The other half of {@link SaveDestinationInput}'s field-parity claim:
+ * every key of `SaveDestinationRequest` is a key of `SaveDestinationInput`
+ * and back again.
+ *
+ * **Why indexed access alone is not enough.** `SaveDestinationInput`'s three
+ * fields are each written as `SaveDestinationRequest['<name>']`, which is a
+ * compile error the moment a named field is renamed or removed -- the
+ * indexed type stops resolving. It is not a compile error when a field is
+ * *added* to `SaveDestinationRequest`: nothing here reads it, so nothing
+ * here notices. This type computes `never` unless the two interfaces'
+ * key sets are identical, and assigning it to `true` below is what turns
+ * that into a build failure rather than a silent gap -- add a field to one
+ * side without the other and this line stops type-checking.
+ */
+type SaveDestinationKeysMatch = [
+  Exclude<keyof SaveDestinationRequest, keyof SaveDestinationInput>,
+  Exclude<keyof SaveDestinationInput, keyof SaveDestinationRequest>,
+] extends [never, never]
+  ? true
+  : never;
+const saveDestinationKeysMatch: SaveDestinationKeysMatch = true;
+// Referenced so a linter does not flag this type-only assertion as unused.
+void saveDestinationKeysMatch;
 
 /**
  * Why a destination write declined, returned as a value rather than thrown

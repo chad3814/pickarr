@@ -54,9 +54,9 @@ export function feedIdFrom(pathname: string): number | undefined {
  * is not one.
  *
  * **Read back off the pathname by index, never bound**, which is the shape
- * `artworkAnswer` above established and the reason `Route.path` carries a
- * `:name` segment at all: the template exists so `matchesPath` can compare
- * segment counts, and the value is this function's to recover.
+ * `server.ts`'s `artworkAnswer` established and the reason `Route.path`
+ * carries a `:name` segment at all: the template exists so `matchesPath` can
+ * compare segment counts, and the value is this function's to recover.
  *
  * Every segment is checked rather than `!`-asserted:
  * `noUncheckedIndexedAccess` types each one `string | undefined`, and a
@@ -69,10 +69,10 @@ export function feedIdFrom(pathname: string): number | undefined {
  * `1e+30`, `1.5`, `-1` and `2**53` to both the `DELETE` and the `UPDATE`
  * **without throwing**, each reporting `changes: 0`. So without this check
  * the host answers `404 { refusal: 'unknown-mapping' }`, not a 500. The
- * sentence was copied from `artworkAnswer`'s docblock above, which makes
- * the same claim about the same binding and is wrong in the same way; that
- * one is left for whoever owns that route, but nothing here now rests on
- * it.
+ * sentence was copied from `server.ts`'s `artworkAnswer` docblock, which
+ * makes the same claim about the same binding and is wrong in the same way;
+ * that one is left for whoever owns that route, but nothing here now rests
+ * on it.
  *
  * Two real reasons remain, and both are measured.
  *

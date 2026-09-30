@@ -1,7 +1,7 @@
 /**
  * The one `fetch` every write path in the client makes (issue #94).
  *
- * Eight `post*` functions used to each hold their own copy of the same
+ * Eleven `post*` functions used to each hold their own copy of the same
  * `try { fetch; response.json() } catch { offline }` block, inherited on
  * purpose because two earlier fix rounds learned that such a helper must
  * never throw. The copies carried a defect along with the lesson: none of
@@ -17,7 +17,7 @@
  *   `postDownloadClient` makes at length: every answer `api/server.ts` can
  *   produce under `/api` is JSON, so unparseable bytes came from something
  *   in front of Pickarr and the request did not reach the host. This is
- *   exactly what seven of the eight helpers did with an unreadable body
+ *   exactly what ten of the eleven helpers did with an unreadable body
  *   before they called this; `postFeedRemoval.ts` alone answered its own
  *   `unexpected` there and now answers `unreachable` like the rest.
  * - `expired` -- the host answered 401 (`session.ts`'s

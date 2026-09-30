@@ -9,9 +9,9 @@ import type { SaveDestinationInput } from '../media/destinations.ts';
  * Split out of `server.ts` (issue #89): body-shape validation is not
  * routing. None of these checks a field's *value* -- only that it is
  * present and of the right primitive type -- because the value-level
- * invariants belong to whichever host function the route hands the body to,
- * per `server.ts`'s own module doc, which is where "no business rule
- * belongs in this file" is actually a rule about that file's own contents.
+ * invariants belong to whichever host function the route hands the body to:
+ * per `server.ts`'s module doc, no business rule belongs in a shape guard
+ * either.
  */
 
 /**

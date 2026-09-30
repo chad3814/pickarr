@@ -45,9 +45,10 @@
  * spellings agreed. Measured: renaming `pollIntervalS` to `pollSeconds` on
  * the host alone reddened every host test and left the whole web suite
  * green, so the client kept posting the old field name and every
- * submission came back `bad-poll-interval` wrapped in the catch-all
- * sentence. A rename here is now a compile error in `@pickarr/web`, not a
- * silent divergence (issue #88).
+ * submission came back `400 invalid-shape` -- `isFeedBody` rejects a body
+ * missing `pollIntervalS` before `addFeed`'s own `bad-poll-interval` check
+ * is ever reached. A rename here is now a compile error in `@pickarr/web`,
+ * not a silent divergence (issue #88).
  *
  * `downloadType` is `string`, not `Transport` (`'torrent' | 'nzb'`), on
  * purpose: this value arrives unchecked off a JSON request body, and

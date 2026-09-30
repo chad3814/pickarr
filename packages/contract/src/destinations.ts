@@ -55,6 +55,46 @@
  */
 
 /**
+ * The wire shape `PUT /api/destinations/:pluginId` needs -- what the
+ * browser sends, not what `packages/host/src/media/destinations.ts`'s
+ * `saveDestination` parses it into.
+ *
+ * **Declared once, here, rather than mirrored on each side of the wire.**
+ * It used to be declared twice -- once as `media/destinations.ts`'s own
+ * `SaveDestinationInput`, and again as a hand-copied interface in
+ * `packages/web`'s `postDestination.ts` -- and issue #88's other three
+ * moves left this one behind because the two copies disagreed on
+ * `unmatchedDir`'s optionality. That disagreement is real, not a spelling
+ * drift, and is resolved by having two *names*: this interface is the wire
+ * shape the browser builds, and the host's `SaveDestinationInput` is a
+ * derived, parsed form with the same three fields but `unmatchedDir`
+ * required-but-nullable instead of optional. A rename of any field here is
+ * now a compile error in both `@pickarr/web` and `@pickarr/host`, because
+ * the host's type is defined in terms of this one rather than copied from
+ * it.
+ *
+ * `root` and `shape` are `string`, unchecked: this value arrives off a
+ * JSON request body and `saveDestination` is the validator that narrows
+ * it, not a caller that has already done so.
+ *
+ * **`unmatchedDir` is optional, and the absence is load-bearing.** A blank
+ * unmatched-folder field means "use the host's own default"
+ * (`media/destinations.ts`'s `DEFAULT_UNMATCHED_DIR`, design spec §6's
+ * `_unmatched`) and must be sent as an *absent* key, not as `''` --
+ * `JSON.stringify` drops an `undefined` member, which is exactly this
+ * omission, and the host's `empty-path` refusal is what an explicit `''`
+ * earns instead. The host's derived `SaveDestinationInput` keeps this key
+ * always present (`string | undefined`) because `exactOptionalPropertyTypes`
+ * is on there and a route forwarding a value it read off a body has only
+ * one meaning for "absent", not two.
+ */
+export interface SaveDestinationRequest {
+  root: string;
+  shape: string;
+  unmatchedDir?: string;
+}
+
+/**
  * Every way `PUT /api/destinations/:pluginId` can decline a destination.
  *
  * Grouped by the field each is about, because a client has to put the error
@@ -119,46 +159,6 @@
  *   a legitimate answer, and the escape check is what governs what it may
  *   reach.
  */
-/**
- * The wire shape `PUT /api/destinations/:pluginId` needs -- what the
- * browser sends, not what `packages/host/src/media/destinations.ts`'s
- * `saveDestination` parses it into.
- *
- * **Declared once, here, rather than mirrored on each side of the wire.**
- * It used to be declared twice -- once as `media/destinations.ts`'s own
- * `SaveDestinationInput`, and again as a hand-copied interface in
- * `packages/web`'s `postDestination.ts` -- and issue #88's other three
- * moves left this one behind because the two copies disagreed on
- * `unmatchedDir`'s optionality. That disagreement is real, not a spelling
- * drift, and is resolved by having two *names*: this interface is the wire
- * shape the browser builds, and the host's `SaveDestinationInput` is a
- * derived, parsed form with the same three fields but `unmatchedDir`
- * required-but-nullable instead of optional. A rename of any field here is
- * now a compile error in both `@pickarr/web` and `@pickarr/host`, because
- * the host's type is defined in terms of this one rather than copied from
- * it.
- *
- * `root` and `shape` are `string`, unchecked: this value arrives off a
- * JSON request body and `saveDestination` is the validator that narrows
- * it, not a caller that has already done so.
- *
- * **`unmatchedDir` is optional, and the absence is load-bearing.** A blank
- * unmatched-folder field means "use the host's own default"
- * (`media/destinations.ts`'s `DEFAULT_UNMATCHED_DIR`, design spec §6's
- * `_unmatched`) and must be sent as an *absent* key, not as `''` --
- * `JSON.stringify` drops an `undefined` member, which is exactly this
- * omission, and the host's `empty-path` refusal is what an explicit `''`
- * earns instead. The host's derived `SaveDestinationInput` keeps this key
- * always present (`string | undefined`) because `exactOptionalPropertyTypes`
- * is on there and a route forwarding a value it read off a body has only
- * one meaning for "absent", not two.
- */
-export interface SaveDestinationRequest {
-  root: string;
-  shape: string;
-  unmatchedDir?: string;
-}
-
 export const DESTINATION_REFUSALS = [
   'unknown-plugin',
   'not-absolute-root',
