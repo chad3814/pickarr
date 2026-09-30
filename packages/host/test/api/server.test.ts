@@ -22,12 +22,12 @@ import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
 import type { RetryLookupOutcome } from '../../src/media/retry.ts';
+import { MAX_BODY_BYTES } from '../../src/api/body.ts';
 import {
   API_VERSION,
   CONNECTIONS_CHECK_MS,
   DEFAULT_HOST,
   DEFAULT_PORT,
-  MAX_BODY_BYTES,
   REQUEST_TIMEOUT_MS,
   ROUTES,
   createReadServer,

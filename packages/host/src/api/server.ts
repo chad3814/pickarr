@@ -27,9 +27,13 @@
  * Measured rather than counted by eye, which is the only way this gets
  * caught: `grep -c "^    path: "` on this file.
  *
- * Everything this file does is routing. Parse a request, call one function
- * from `./reads.ts`, `./artwork-route.ts` or `./static-route.ts`, write what
- * came back.
+ * Everything this file does is routing. A request's body is read and capped
+ * by `./body.ts`, its shape checked by `./request-shapes.ts`, and a refusal
+ * mapped to a status by `./refusal-status.ts`; an id or a plugin id named in
+ * a path is read back by `./path-params.ts`, and the `Answer` both this file
+ * and `./body.ts` build one of lives in `./answer.ts`. Past that, this file
+ * parses a request, calls one function from `./reads.ts`, `./artwork-route.ts`
+ * or `./static-route.ts`, and writes what came back.
  *
  * **No SQL here.** Every read is a `reads.ts` call, so the keyset predicates,
  * the page size and the plan-tested statements live in one module with one
@@ -141,11 +145,31 @@ import type { DestinationRefusal, SaveDestinationInput } from '../media/destinat
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedInput, AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
-import type { ArtworkKind, ArtworkResponse } from './artwork-route.ts';
+import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
+import { json } from './answer.ts';
+import type { Answer } from './answer.ts';
+import { readBody } from './body.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
+import { DIGITS, feedIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
-import type { StaticResponse } from './static-route.ts';
+import {
+  destinationBodyFrom,
+  isDownloadClientBody,
+  isFeedBody,
+  isMappingBody,
+  isMappingEditBody,
+  isPickBody,
+  isSetFeedDisabledBody,
+} from './request-shapes.ts';
+import {
+  statusForDestinationRefusal,
+  statusForDownloadClientRefusal,
+  statusForFeedRefusal,
+  statusForMappingRefusal,
+  statusForPickRefusal,
+  statusForRetryRefusal,
+} from './refusal-status.ts';
 import { isApiPath, staticAnswer } from './static-route.ts';
 import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 import type { EnableFeedOutcome, FeedRefusal, RemoveFeedOutcome } from '../feeds/remove.ts';
@@ -164,9 +188,6 @@ import type { EnableFeedOutcome, FeedRefusal, RemoveFeedOutcome } from '../feeds
  * `scripts/check-dev-scripts.test.ts` is what holds the two together.
  */
 export const DEFAULT_PORT = 7676;
-
-/** Enough for a feed; small enough that an unbounded client cannot make the host buy memory. */
-export const MAX_BODY_BYTES = 16 * 1024;
 
 /**
  * How long one request has to arrive in full -- request line, headers and
@@ -498,32 +519,6 @@ export interface ReadServerDeps {
 }
 
 /**
- * What a route answers, before anything is written to a socket.
- *
- * Artwork and the static bundle are the two routes that do not answer JSON,
- * and each already returns a status/headers/body triple of its own
- * (`ArtworkResponse`, `StaticResponse`) that this module has no business
- * reinterpreting. Keeping routing separate from writing is what lets every
- * route be a function of its request.
- *
- * **`empty` is the fourth, and it is not `json` with an absent body.** A
- * `204` must carry no body and no `Content-Length` at all, and `writeJson`
- * below composes both from `JSON.stringify(body)` -- which for `undefined`
- * answers `undefined`, so `Buffer.byteLength` would throw and a successful
- * delete would become a 500. `DELETE /api/mappings/:id` is the only route
- * that answers this kind today.
- */
-type Answer =
-  | { kind: 'json'; status: number; body: unknown }
-  | { kind: 'empty'; status: number }
-  | { kind: 'artwork'; artwork: ArtworkResponse }
-  | { kind: 'static'; file: StaticResponse };
-
-function json(status: number, body: unknown): Answer {
-  return { kind: 'json', status, body };
-}
-
-/**
  * The fixed `204` a successful delete answers: a status, and nothing else.
  *
  * A module-level constant rather than a value built per request, because
@@ -561,37 +556,6 @@ const UNAUTHORIZED = json(401, { error: 'unauthorized' });
  * inputs that were thought of.
  */
 const MEDIA_TYPE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
-
-/** An artwork id, as a path segment: digits only, so nothing else reaches a query parameter. */
-const DIGITS = /^\d+$/;
-
-/**
- * What a plugin id may look like as a path segment, for
- * `PUT /api/destinations/:pluginId`.
- *
- * **The class a plugin id already has to be in, bounded.**
- * `MediaPlugin.id` is a bare `string` in the contract, but it is also "the
- * required prefix for every table this plugin declares" -- and
- * `assertSyncedTableName` (`@pickarr/contract`) refuses a table name outside
- * `/^[a-z][a-z0-9_]*$/`, because that name is interpolated into a trigger
- * body where SQLite binds no parameters. So a plugin whose id fell outside
- * this class could declare no synced table at all. The 32-character bound is
- * this module's own: a path segment is caller-chosen and unbounded, and
- * nothing is served by letting an arbitrarily long one reach a route
- * decision.
- *
- * **A segment outside it answers `UNKNOWN_ROUTE`, not `unknown-plugin`** --
- * `mappingIdFrom`'s reasoning below, for a string rather than an integer.
- * `unknown-plugin` claims "this is a well-formed plugin id and nothing
- * registered it", which is a statement the host cannot make about
- * `Tv%20Shows`; the 404 a path naming no route gets says the truthful thing
- * instead, and tells a caller nothing a missing plugin would not have.
- *
- * `api/server.test.ts` drives every shipped plugin id through the route, so
- * a class narrower than the ids the host actually registers fails there
- * rather than making a real plugin's destination unreachable.
- */
-const PLUGIN_ID = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**
  * Only `readArtwork`'s two filesystem calls, and the real ones -- the async
@@ -868,536 +832,6 @@ interface Route {
    */
   readonly open: boolean;
   readonly answer: (route: RouteRequest) => Answer | Promise<Answer>;
-}
-
-/**
- * Whether `value` has the shape `POST /api/feeds` needs: every field
- * present, and a primitive of the right type. Nothing here checks a field's
- * *value* -- a registered plugin, a real transport, a poll interval in range
- * -- because that is `addFeed`'s job (`../feeds/add.ts`'s module doc), and
- * checking it twice is how the two checks drift apart.
- *
- * `'pluginId' in value` rather than a cast to `Record<string, unknown>`:
- * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly as
- * far as each check proves, the same pattern `feeds/add.ts`'s own
- * `isUniqueConstraintViolation` uses.
- */
-function isFeedBody(value: unknown): value is AddFeedInput {
-  return typeof value === 'object' && value !== null
-    && 'pluginId' in value && typeof value.pluginId === 'string'
-    && 'name' in value && typeof value.name === 'string'
-    && 'url' in value && typeof value.url === 'string'
-    && 'downloadType' in value && typeof value.downloadType === 'string'
-    && 'pollIntervalS' in value && typeof value.pollIntervalS === 'number';
-}
-
-/**
- * The status `POST /api/feeds` answers for each way `addFeed` can refuse.
- *
- * A conflict is the one refusal that already has a row to point at --
- * `duplicate-url` names a url already on file, so `409` is the one that
- * fits. The other three are all "this otherwise well-formed field's value is
- * not one this host will accept" -- an unregistered plugin, a transport
- * that is not `torrent` or `nzb`, a poll interval outside the allowed range
- * -- so all three answer `422`: the request parsed fine and named a field
- * that exists, but the value it carries cannot be acted on. Whatever the
- * status, the body always carries `refusal` itself (never a message a human
- * would read), which is what a client actually branches on -- see this
- * module's doc on why no body may carry prose in place of a stable code.
- */
-function statusForFeedRefusal(refusal: AddFeedRefusal['refusal']): number {
-  switch (refusal) {
-    case 'duplicate-url':
-      return 409;
-    case 'unknown-plugin':
-    case 'bad-download-type':
-    case 'bad-poll-interval':
-      return 422;
-  }
-}
-
-/**
- * Whether `value` has the shape `POST /api/download-clients` needs: every
- * field present, and a string. Nothing here checks a field's *value* -- a
- * real implementation, a usable auth shape, a url that is an address --
- * because that is `addDownloadClient`'s job (`../clients/add.ts`'s module
- * doc), and checking it twice is how the two checks drift apart.
- *
- * **Every credential field is required, not optional**, and an unsupplied
- * one is `''`. The distinction is load-bearing rather than tidy: the host
- * reads `''` as "this strategy sends no such credential" and decides the
- * auth shape from which of the three are blank, so a body that *omits*
- * `apiKey` rather than sending it empty would arrive as `undefined` and be
- * read as a shape the operator never chose. Requiring the field makes the
- * client state its intent.
- *
- * **`type` is not a field and is not read even if sent.** The host derives
- * it from `implementation` (design spec §4 and §8.3), because
- * `readClientConfig` treats a `type`/`implementation` mismatch as fatal --
- * so accepting one from a browser would be accepting the ability to
- * construct a row that can never work. An extra property on the body is
- * simply ignored, the same way it is for `POST /api/feeds`.
- *
- * `'name' in value` rather than a cast to `Record<string, unknown>`:
- * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
- * as far as each check proves -- the same pattern `isFeedBody` above uses.
- */
-function isDownloadClientBody(value: unknown): value is AddDownloadClientInput {
-  return typeof value === 'object' && value !== null
-    && 'name' in value && typeof value.name === 'string'
-    && 'implementation' in value && typeof value.implementation === 'string'
-    && 'url' in value && typeof value.url === 'string'
-    && 'category' in value && typeof value.category === 'string'
-    && 'apiKey' in value && typeof value.apiKey === 'string'
-    && 'username' in value && typeof value.username === 'string'
-    && 'password' in value && typeof value.password === 'string';
-}
-
-/**
- * The status `POST /api/download-clients` answers for each way
- * `addDownloadClient` can refuse, on `statusForFeedRefusal`'s reasoning
- * above.
- *
- * `duplicate-name` is the one refusal that already has a row to point at --
- * a client answering to a name already on file -- so `409` is the one that
- * fits. The other three are all "this otherwise well-formed field's value
- * is not one this host will accept": an implementation this host cannot
- * drive, a set of credential fields no auth strategy uses, a url that is
- * not an http address. All three answer `422`: the request parsed fine and
- * named fields that exist, but the values they carry cannot be acted on.
- *
- * Whatever the status, the body carries `refusal` itself and nothing else
- * -- never a message a human would read, and in particular never the
- * submitted credential or url, neither of which any answer from this route
- * repeats.
- */
-function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal['refusal']): number {
-  switch (refusal) {
-    case 'duplicate-name':
-      return 409;
-    case 'unknown-implementation':
-    case 'bad-auth-shape':
-    case 'bad-url':
-      return 422;
-  }
-}
-
-/**
- * Whether `value` has the shape `POST /api/picks` needs: one field, and a
- * number.
- *
- * Nothing here checks the *value* -- not that the id names a row, not that
- * its feed has a registered plugin, not that a client of the right type
- * exists, and not that this release has already been picked. Every one of
- * those is `requestPick`'s (`../clients/pick.ts`'s module doc), and
- * checking any of them twice is how the two checks drift apart. The
- * `unknown-release` refusal is what an id naming nothing gets, and it comes
- * from the host rather than from here.
- *
- * **`typeof … === 'number'` and no more**, deliberately: this does not
- * reject a non-integer, a negative or `NaN`. Measured against a migrated
- * database holding one `rss_item` at id 1, each of `1.5`, `-1` and `NaN`
- * comes back from `ownerPluginId`'s join as `undefined` -- so each already
- * has a correct answer, `unknown-release`, and adding the check here would
- * be this module deciding what an id may look like, which is a value-level
- * rule about a table it can see none of.
- *
- * **The `typeof` half is not decoration, and the obvious reason for it is
- * wrong.** The same measurement: `'1'`, the string an id arrives as when a
- * caller forgets to parse it, **matches the row** -- SQLite applies the
- * column's INTEGER affinity to the bound text and compares it as a number.
- * So a string id would not "silently match nothing"; it would silently
- * *work*, and this route would be quietly accepting a wire shape it does
- * not declare, which the browser client is then free to depend on. The
- * guard is what keeps `{ rssItemId: number }` true of what the host is
- * actually asked.
- *
- * `'rssItemId' in value` rather than a cast to `Record<string, unknown>`:
- * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
- * as far as the check proves -- the same pattern `isFeedBody` and
- * `isDownloadClientBody` above use.
- */
-function isPickBody(value: unknown): value is { rssItemId: number } {
-  return typeof value === 'object' && value !== null
-    && 'rssItemId' in value && typeof value.rssItemId === 'number';
-}
-
-/**
- * The status `POST /api/picks` answers for each way `requestPick` can
- * refuse, on `statusForFeedRefusal`'s reasoning above.
- *
- * `already-submitted` is the one refusal that already has a row to point
- * at -- since migration 18 that is a download on the release this pick
- * named, in any status but `failed`; before it, only a download this
- * client held under the reference this pick resolved to. Either way there
- * is an existing row that is the reason, so `409` is the one that fits,
- * exactly as `duplicate-url` and `duplicate-name` get it on the other two
- * routes. `clients/pick.ts` maps both conditions to this one code, and
- * says why.
- *
- * The other four all answer `422`: the request parsed fine and named a
- * field that exists, but the value it carries cannot be acted on. That is
- * the honest grouping even though the four are not alike in *whose* fault
- * they are -- `unknown-release` is a stale browser, `plugin-not-registered`
- * and `no-client-of-type` are an install with a gap in it, and
- * `client-type-mismatch` is a feed configured wrongly. A status is not what
- * tells those apart; the code in the body is, which is the whole reason
- * this route answers one. Splitting them across statuses would put the
- * distinction in the place a client is least able to act on it and leave
- * the codes doing the work anyway.
- *
- * Whatever the status, the body carries `refusal` itself and nothing else
- * -- never a message a human would read, and never the rss item id it was
- * asked about.
- */
-/**
- * `POST /api/unmatched/:id/retry`'s three refusals.
- *
- * `already-matched` is 409 and the other two are 422, matching
- * {@link statusForPickRefusal}'s own split: a 409 is a state that changed
- * under the caller and that a reload fixes, while a 422 says the request
- * names something this host cannot act on at all.
- */
-function statusForRetryRefusal(refusal: Exclude<RetryLookupOutcome, { accepted: true }>['refusal']): number {
-  switch (refusal) {
-    case 'already-matched':
-      return 409;
-    case 'unknown-release':
-    case 'plugin-not-registered':
-      return 422;
-  }
-}
-
-function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
-  switch (refusal) {
-    case 'already-submitted':
-      return 409;
-    case 'unknown-release':
-    case 'plugin-not-registered':
-    case 'no-client-of-type':
-    case 'client-type-mismatch':
-      return 422;
-  }
-}
-
-/**
- * Whether `value` has the shape `POST /api/mappings` needs: three fields, a
- * number and two strings.
- *
- * Nothing here checks a field's *value*. Not that the client id names a
- * row -- that is `unknown-client`, caught from the foreign key in
- * `../clients/mappings.ts`; not that the `from_path` is free -- that is
- * `duplicate-from-path`, caught from the unique index; and above all
- * **nothing here looks at the shape of a path**. Design spec §7: a
- * `from_path` may be `D:\Downloads`, because these are foreign paths from a
- * machine that is not this one, and `../clients/paths.ts` refuses
- * `node:path` for exactly that reason. A route that demanded a leading `/`
- * or rejected a backslash would be stricter than the consumer and would
- * refuse mappings that work. The one path-content rule there is --
- * `empty-path`, on `''` alone -- lives in the host with every other
- * value-level invariant, per the module doc's rule that no business rule
- * belongs in this file.
- *
- * `'fromPath' in value` rather than a cast to `Record<string, unknown>`:
- * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
- * as far as each check proves -- the same pattern `isFeedBody`,
- * `isDownloadClientBody` and `isPickBody` above use.
- */
-function isMappingBody(value: unknown): value is AddMappingInput {
-  return typeof value === 'object' && value !== null
-    && 'downloadClientId' in value && typeof value.downloadClientId === 'number'
-    && 'fromPath' in value && typeof value.fromPath === 'string'
-    && 'toPath' in value && typeof value.toPath === 'string';
-}
-
-/**
- * Whether `value` has the shape `PATCH /api/feeds/:id` needs: exactly one
- * boolean, `disabled`.
- *
- * Strict about extra keys for the reason the config schemas are: a body
- * carrying a misspelled field would otherwise be accepted and do something
- * other than what it says.
- */
-function isSetFeedDisabledBody(value: unknown): value is { disabled: boolean } {
-  if (typeof value !== 'object' || value === null) return false;
-  if (!('disabled' in value) || typeof value.disabled !== 'boolean') return false;
-  return Object.keys(value).length === 1;
-}
-
-/**
- * Whether `value` has the shape `PATCH /api/mappings/:id` needs: the two
- * paths, both present.
- *
- * **Both required, not optional**, and `downloadClientId` absent. The host
- * replaces both columns, so an omitted field would arrive as `undefined`
- * and there would be two spellings of "leave it alone" for this route to
- * tell apart -- `EditMappingInput`'s own doc has the longer version. The
- * client a mapping belongs to is not editable at all: a mapping is
- * meaningless away from its client (design spec §8), and an extra
- * `downloadClientId` on the body is simply ignored, the same way an extra
- * property is on every other route here.
- *
- * The id is **not** in the body -- it is the path segment `mappingIdFrom`
- * reads -- so there is no way for a body to name one row while the target
- * names another.
- */
-function isMappingEditBody(value: unknown): value is EditMappingInput {
-  return typeof value === 'object' && value !== null
-    && 'fromPath' in value && typeof value.fromPath === 'string'
-    && 'toPath' in value && typeof value.toPath === 'string';
-}
-
-/**
- * The status the three mapping routes answer for each way the host can
- * refuse, on `statusForFeedRefusal`'s reasoning above.
- *
- * `duplicate-from-path` is the one refusal that already has a row to point
- * at -- a mapping on this client already holding that `from_path` -- so
- * `409` is the one that fits, exactly as `duplicate-url`, `duplicate-name`
- * and `already-submitted` get it on the other three write routes.
- *
- * **`unknown-client` and `unknown-mapping` answer `404`, where every
- * "names no row" refusal on the routes above answers `422`.** The
- * difference is what the id is *of*. `unknown-release` is a field inside a
- * `POST /api/picks` body describing the pick; the request itself was
- * addressed to a route that exists, so a `404` would say "no such
- * endpoint". Here `unknown-mapping` is the **request target** --
- * `/api/mappings/7` names a resource, and a resource that is not there is
- * what `404` means. `unknown-client` rides along with it: `POST
- * /api/mappings` addresses the collection rather than a client, but the
- * two are the same answer to a browser holding a stale settings list
- * (reload and the row it named is gone), and giving them different
- * statuses would split one recovery into two.
- *
- * `empty-path` answers `422`: the request parsed fine and named fields
- * that exist, but the value one of them carries cannot be acted on.
- *
- * Whatever the status, the body carries `refusal` itself and nothing else
- * -- never a message a human would read, and never a path. Paths are in
- * this table by design (design spec §5) and a client reads them back off
- * the replica; that is not licence for an *error* body to quote the one it
- * was just handed.
- */
-function statusForMappingRefusal(refusal: MappingRefusal['refusal']): number {
-  switch (refusal) {
-    case 'duplicate-from-path':
-      return 409;
-    case 'unknown-client':
-    case 'unknown-mapping':
-      return 404;
-    case 'empty-path':
-      return 422;
-  }
-}
-
-/**
- * The mapping id in `/api/mappings/:id`, or `undefined` for a segment that
- * is not one.
- *
- * **Read back off the pathname by index, never bound**, which is the shape
- * `artworkAnswer` above established and the reason `Route.path` carries a
- * `:name` segment at all: the template exists so `matchesPath` can compare
- * segment counts, and the value is this function's to recover.
- *
- * Every segment is checked rather than `!`-asserted:
- * `noUncheckedIndexedAccess` types each one `string | undefined`, and a
- * path with the right number of slashes and an empty segment is a real
- * request a client can send.
- *
- * **`Number.isSafeInteger` is the last check, and the reason written here
- * first was false.** It said a float bound against an `INTEGER PRIMARY
- * KEY` is a 500. Measured on a migrated database: `node:sqlite` binds
- * `1e+30`, `1.5`, `-1` and `2**53` to both the `DELETE` and the `UPDATE`
- * **without throwing**, each reporting `changes: 0`. So without this check
- * the host answers `404 { refusal: 'unknown-mapping' }`, not a 500. The
- * sentence was copied from `artworkAnswer`'s docblock above, which makes
- * the same claim about the same binding and is wrong in the same way; that
- * one is left for whoever owns that route, but nothing here now rests on
- * it.
- *
- * Two real reasons remain, and both are measured.
- *
- * **A float id can address a row that is not the one asked for.** A
- * `filepath_mapping` row seeded at id `9007199254740992` (`2**53`) is
- * deleted by a request for `/api/mappings/9007199254740993` -- a different
- * id -- because `Number('9007199254740993')` *is* `9007199254740992`,
- * `changes: 1`, row gone. Every integer above `2**53` has neighbours that
- * collapse onto it, and `INTEGER PRIMARY KEY` goes to `2**63 - 1`, so the
- * aliasing is a property of the id space rather than of any particular
- * install. This check is the only thing between that and a silent
- * wrong-row write. `DIGITS` cannot see it: sixteen digits are all digits.
- *
- * **And the body stays honest.** `unknown-mapping` claims "this is a
- * well-formed id and no row has it", which is a statement the host cannot
- * make about `1e+30`. Refused here, both callers answer `UNKNOWN_ROUTE` --
- * the same 404 a path naming no route gets -- so an id that could never
- * name a row reads as a bad request target rather than as a missing
- * mapping, and no unparseable id reaches a prepared statement at all.
- *
- * `undefined` rather than an `Answer`, because the two callers want
- * different things from it and neither wants this function's opinion: both
- * turn it into `UNKNOWN_ROUTE`, which is the same 404 a path naming no
- * route gets, so an unparseable id tells a caller nothing a missing row
- * would not have.
- */
-/**
- * The feed id in `/api/feeds/:id`, or `undefined` for a segment that cannot
- * be one. Identical rules to {@link mappingIdFrom}, and a separate function
- * rather than a shared one only so each route's 404 keeps naming its own
- * resource in the reader's head; if a third arrives, share it.
- */
-function feedIdFrom(pathname: string): number | undefined {
-  return mappingIdFrom(pathname);
-}
-
-function mappingIdFrom(pathname: string): number | undefined {
-  return idAt(pathname, 4, 3);
-}
-
-/**
- * The release id in `/api/unmatched/:id/retry`.
- *
- * Five segments, not four, which is why this is not simply
- * {@link mappingIdFrom}: the id is not the last thing in the path. The
- * shared {@link idAt} is what the note above `feedIdFrom` asked for -- "if
- * a third arrives, share it" -- and a third has.
- */
-function retryIdFrom(pathname: string): number | undefined {
-  return idAt(pathname, 5, 3);
-}
-
-/**
- * The integer at `index` of a pathname with exactly `segments` parts, or
- * `undefined` for anything else.
- *
- * **The segment count is checked, not just the one segment.** Without it
- * `/api/feeds/7/anything` would read as feed 7 and answer a route that
- * does not exist. `DIGITS` rather than `Number()` alone because `Number`
- * accepts `' 7'`, `'0x7'` and `''`, each of which would name a row the
- * caller did not ask for or none at all.
- */
-function idAt(pathname: string, segments: number, index: number): number | undefined {
-  const parts = pathname.split('/');
-  if (parts.length !== segments) return undefined;
-  const raw = parts[index];
-  if (raw === undefined || !DIGITS.test(raw)) return undefined;
-  const id = Number(raw);
-  return Number.isSafeInteger(id) ? id : undefined;
-}
-
-/**
- * The plugin id in `/api/destinations/:pluginId`, or `undefined` for a
- * segment that could not be one.
- *
- * **Read back off the pathname by index, never bound**, the shape
- * `artworkAnswer` established and `mappingIdFrom` above follows: `Route.path`
- * carries a `:name` segment so `matchesPath` can compare segment counts, and
- * the value is this function's to recover. Every segment is checked rather
- * than `!`-asserted -- `noUncheckedIndexedAccess` types each one
- * `string | undefined`, and an assertion would be a claim rather than a
- * check.
- *
- * **What differs from `mappingIdFrom`, and what does not.** A mapping id is
- * an integer, so that function has `DIGITS` and then `Number.isSafeInteger`
- * -- two checks, the second because a float id can silently address a
- * *different* row. Nothing here parses: a plugin id is a string all the way
- * to the prepared statement, so there is no coercion for a neighbouring
- * value to collapse onto and the safe-integer hazard has no analogue. What
- * is left is the class check alone, {@link PLUGIN_ID}, whose doc has what it
- * is and why a segment outside it is `UNKNOWN_ROUTE` rather than a refusal.
- *
- * `undefined` rather than an `Answer`, for `mappingIdFrom`'s reason: the
- * caller turns it into `UNKNOWN_ROUTE` and wants no opinion from here.
- */
-function pluginIdFrom(pathname: string): string | undefined {
-  const segments = pathname.split('/');
-  if (segments.length !== 4) return undefined;
-  const raw = segments[3];
-  if (raw === undefined || !PLUGIN_ID.test(raw)) return undefined;
-  return raw;
-}
-
-/**
- * `PUT /api/destinations/:pluginId`'s body as the host wants it, or
- * `undefined` for one this route will not forward.
- *
- * **It builds a value where the other body guards assert a shape**, and
- * that is because of the one optional field. `isMappingBody` and its
- * siblings are `value is T` predicates, which is honest when every property
- * is required: the checks prove exactly the type. Here `unmatchedDir` may
- * be *absent*, and a predicate claiming `{ unmatchedDir: string | undefined }`
- * of an object that has no such property would be asserting slightly more
- * than it proved. Constructing the input instead turns "absent" into
- * `undefined` by writing it, which is what `SaveDestinationInput` means by
- * the field -- and `exactOptionalPropertyTypes` is why "absent" and
- * "explicitly undefined" have to be collapsed somewhere rather than carried
- * as two states.
- *
- * **A `null` is refused rather than read as absent.** A client that means
- * "use the default" sends no field; `null` is a third thing, and giving it
- * the same meaning as absence would make two spellings of one intent that
- * this route would have to keep agreeing about.
- *
- * Nothing here checks a field's *value*. Not that the root is absolute --
- * that is `not-absolute-root`; not that the shape's tokens are declared --
- * that is `unknown-token`, and it needs the plugin registry this module
- * deliberately cannot reach; and not the three unmatched-directory rules.
- * Every one of them lives in `../media/destinations.ts`, per the module
- * doc's rule that no business rule belongs in this file.
- *
- * `'root' in value` rather than a cast to `Record<string, unknown>`:
- * `value` is `unknown` off a json-parsed body, and `in` narrows it exactly
- * as far as each check proves -- the same pattern every guard above uses.
- */
-function destinationBodyFrom(value: unknown): SaveDestinationInput | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  if (!('root' in value) || typeof value.root !== 'string') return undefined;
-  if (!('shape' in value) || typeof value.shape !== 'string') return undefined;
-  if (!('unmatchedDir' in value)) {
-    return { root: value.root, shape: value.shape, unmatchedDir: undefined };
-  }
-  if (typeof value.unmatchedDir !== 'string') return undefined;
-  return { root: value.root, shape: value.shape, unmatchedDir: value.unmatchedDir };
-}
-
-/**
- * The status `PUT /api/destinations/:pluginId` answers for each way the host
- * can refuse, on `statusForMappingRefusal`'s reasoning above.
- *
- * **`unknown-plugin` is `404` and everything else is `422`**, and the split
- * is the one that file already draws: `unknown-plugin` is about the
- * **request target** -- `/api/destinations/book` names a resource, and a
- * resource that is not there is what `404` means -- exactly as
- * `unknown-mapping` is. The other nine are about a *value in the body*: the
- * request parsed fine and named fields that exist, and one of them carries
- * something that cannot be acted on, which is what `422` means and what
- * `empty-path` already gets on the mapping routes.
- *
- * There is no `409`. Its sibling has one because a mapping can collide with
- * an existing row; a destination cannot -- the statement upserts, so having
- * one already is the ordinary case rather than a conflict.
- *
- * Whatever the status, the body carries `refusal` itself and nothing else --
- * never a message a human would read, and above all never the root. A root
- * is a path, and although this table's roots do reach a client through the
- * replica (design spec §3), that is not licence for an *error* body to quote
- * the one it was just handed.
- */
-function statusForDestinationRefusal(refusal: DestinationRefusal['refusal']): number {
-  switch (refusal) {
-    case 'unknown-plugin':
-      return 404;
-    case 'not-absolute-root':
-    case 'unusable-root':
-    case 'unknown-token':
-    case 'malformed-shape':
-    case 'backslash-in-shape':
-    case 'escaping-shape':
-    case 'empty-filename':
-    case 'empty-path':
-    case 'escaping-path':
-      return 422;
-  }
 }
 
 /**
@@ -2098,127 +1532,6 @@ function write(response: ServerResponse, answer: Answer): void {
 /** An error's message, whatever was thrown -- a non-`Error` stringifies rather than vanishing. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** The fixed 413 an oversized body is refused with -- fixed for the same reason `UNKNOWN_ROUTE` is: nothing of the body it refused is ever worth repeating. */
-const PAYLOAD_TOO_LARGE = json(413, { error: 'payload too large' });
-
-/**
- * The fixed 400 a body that is not valid json is refused with.
- *
- * **`refusal`, and no `error` beside it.** This and `invalid-shape` are the
- * only two answers this API gives that share a status, so before this they
- * were told apart by an english string and by nothing else -- which is the
- * one thing the constraint on refusal codes forbids. They now carry the same
- * single-field shape the `409` and `422` refusals already carried, so a
- * client branches on `refusal` for every answer `POST /api/feeds` refuses a
- * *body* with, rather than on `refusal` sometimes and prose the rest of the
- * time. The prose is gone rather than kept alongside: a body carrying both
- * is a body a client can still be tempted to read the wrong half of.
- */
-const MALFORMED_BODY = json(400, { refusal: 'malformed-body' });
-
-/**
- * Reads `request`'s body for anything but a `GET` -- `handle` never calls
- * this for one -- capped at `MAX_BODY_BYTES` and refused with 413 the
- * moment the running total exceeds it, **before** the bytes collected so far
- * are parsed or handed anywhere. Refused with 400 if what was collected does
- * not parse as json.
- *
- * Listened for with `'data'`/`'end'` rather than `for await`: `IncomingMessage`
- * (`node:http`'s own typings) declares its async iterator `AsyncIterator<any>`,
- * with no way to say the chunks are `Buffer`s short of asserting it -- and an
- * assertion here would be exactly the cast the brief this module was written
- * against refuses. The listener below types its own callback `(chunk:
- * Buffer)`, which needs no assertion: it is a stricter parameter than the
- * listener signature promises, which every `EventEmitter#on` overload in
- * `@types/node` already allows.
- *
- * The over-cap branch does **not** call `request.destroy()`: destroying the
- * request stream before the client has finished sending tears down the
- * shared socket underneath the response this function's caller still has to
- * write -- measured, as a `fetch` `SocketError` on the 413 this was meant to
- * deliver. `settled` guarding the `'data'` handler is what stands in for it:
- * bytes past the cap are still drained (so the stream still reaches `'end'`
- * and the connection can be reused) but never pushed onto `chunks`, so
- * nothing over the cap is held in memory either way.
- */
-function readBody(request: IncomingMessage): Promise<{ body: unknown } | { refusal: Answer }> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    let settled = false;
-
-    const finish = (result: { body: unknown } | { refusal: Answer }): void => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
-
-    request.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      total += chunk.length;
-      if (total > MAX_BODY_BYTES) {
-        finish({ refusal: PAYLOAD_TOO_LARGE });
-        return;
-      }
-      chunks.push(chunk);
-    });
-    request.on('end', () => {
-      if (settled) return;
-      const text = Buffer.concat(chunks).toString('utf8');
-      // **No body at all is not a malformed one**, and telling the two
-      // apart is what makes `DELETE /api/mappings/:id` answerable.
-      // `JSON.parse('')` throws, so before this line every bodiless
-      // non-`GET` request was refused `400 malformed-body` *here*, ahead of
-      // the router -- and a `DELETE` carries no body, which is exactly what
-      // `fetch(url, { method: 'DELETE' })` sends. The per-route `methods`
-      // entry could not have reached that, because this runs first.
-      //
-      // The alternative was to skip this call for `DELETE` in `handle`,
-      // which was rejected: a request whose stream is never read leaves
-      // bytes on the socket if a client did send some, and the rule would
-      // then be about the method rather than about what arrived.
-      //
-      // **What this changes for the routes that already existed**: a `POST`
-      // with a completely empty body now answers `invalid-shape` rather
-      // than `malformed-body`. Both are 400 and both carry a code, so the
-      // constraint the two exist to satisfy is untouched -- and
-      // `invalid-shape` is the more honest of the two, since there was
-      // nothing to parse and so nothing malformed.
-      // `test/api/server.test.ts` pins that on `POST /api/feeds` as well
-      // as on a mapping route, because the routes this moved are the ones
-      // it was not written for.
-      //
-      // **`=== ''` and not a trim**, deliberately. `'   '` is a body, it
-      // does not parse, and it still answers `malformed-body` -- pinned
-      // beside the empty case. Trimming would widen "the client sent no
-      // body" to "the client sent nothing but spaces", which is a
-      // different claim and one this function has no reason to make.
-      //
-      // **A `DELETE` that does send a body is still read and still
-      // checked**, since this is about what arrived rather than about the
-      // method: `DELETE` with `{not json` is `malformed-body`, pinned in
-      // the same test.
-      if (text === '') {
-        finish({ body: undefined });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        finish({ refusal: MALFORMED_BODY });
-        return;
-      }
-      finish({ body: parsed });
-    });
-    request.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-  });
 }
 
 /**
