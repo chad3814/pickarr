@@ -130,8 +130,19 @@ export function assertSyncable(raw: DatabaseSync, pluginId: string, table: strin
  * rather than checked one at a time. The message does not say "two plugins",
  * because one plugin listing a table twice in its own `synced` array trips
  * this too.
+ *
+ * **`HOST_SYNCED_TABLES` gets the lone-`id` check too, not only a plugin's
+ * tables.** Issue #102: `assertSyncable`'s loop above only ever sees
+ * `plugin.synced`, so a host table keyed by something other than `id` used
+ * to reach `installSyncTriggers` unchecked and fail only at the first
+ * `INSERT`, with SQLite's own `no such column: NEW.id` naming neither the
+ * table nor the reason. Every shipped entry in `HOST_SYNCED_TABLES` does
+ * have a lone `id` column today -- this is a guard against the list ever
+ * gaining one that does not, not a fix for a reachable failure.
  */
 export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlugin[]): SyncRegistry {
+  for (const table of HOST_SYNCED_TABLES) assertIntegerIdKey(raw, table);
+
   const owned = new Map<string, SyncedTable<unknown>>();
 
   for (const plugin of plugins) {

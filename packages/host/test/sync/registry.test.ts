@@ -152,3 +152,19 @@ test('createSyncRegistry refuses a synced table keyed wrong, via assertSyncable'
   const plugin = fakePlugin('tv', [fakeTable('tv_wrong_key', {})]);
   assert.throws(() => createSyncRegistry(raw, [plugin]), /tv_wrong_key/);
 });
+
+/**
+ * `assertSyncable`'s callers all iterate `plugin.synced` -- `HOST_SYNCED_TABLES`
+ * is concatenated in after that loop (issue #102), so a host synced table
+ * with a natural key used to skip this guard entirely and fail only at the
+ * first `INSERT`, with SQLite's own `no such column: NEW.id` naming no
+ * table and no reason. `filepath_mapping` has nothing else's foreign key
+ * pointing at it, so rebuilding it here with a wrong key, after the real
+ * migrations have run, is safe.
+ */
+test('createSyncRegistry refuses a host synced table keyed wrong too, not only a plugin one', () => {
+  const raw = open();
+  raw.exec('DROP TABLE filepath_mapping');
+  raw.exec('CREATE TABLE filepath_mapping (uuid TEXT PRIMARY KEY)');
+  assert.throws(() => createSyncRegistry(raw, []), /filepath_mapping/);
+});
