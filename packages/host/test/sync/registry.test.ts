@@ -141,15 +141,19 @@ test('assertIntegerIdKey refuses a table with a composite primary key', () => {
 
 /**
  * A table that does not exist at all answers zero rows from
- * `PRAGMA table_info`, the same as a real table with no primary key -- but
- * this one must not throw here: `api/server.test.ts` drops a host synced
- * table on purpose to force a genuine query failure later, and relies on
- * `createSyncRegistry` (below) not refusing a database in that state before
- * the query it is testing ever runs.
+ * `PRAGMA table_info`, the same as a real table with no primary key -- so
+ * this is checked separately, and refused under its own message rather than
+ * misreported as one keyed wrong. `api/server.test.ts`'s "a read that throws
+ * answers 500" test drops a host synced table on purpose, but only *after*
+ * `createSyncRegistry` has already run against it while it still existed, so
+ * this throw is never reached on that path.
  */
-test('assertIntegerIdKey is a no-op for a table that does not exist, leaving that failure to the query itself', () => {
+test('assertIntegerIdKey refuses a table that does not exist, distinctly from one keyed wrong', () => {
   const raw = open();
-  assert.doesNotThrow(() => { assertIntegerIdKey(raw, 'tv_never_created'); });
+  assert.throws(
+    () => { assertIntegerIdKey(raw, 'tv_never_created'); },
+    /sync: table "tv_never_created" does not exist/,
+  );
 });
 
 // Narrowed from "...before any trigger is installed": `createSyncRegistry`

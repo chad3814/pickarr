@@ -50,7 +50,9 @@ function hostSchemaTableNames(): ReadonlySet<string> {
 }
 
 /**
- * Refuses a table whose primary key is not exactly one column named `id`.
+ * Refuses a table whose primary key is not exactly one column named `id`,
+ * and refuses a table that does not exist at all under its own distinct
+ * error.
  *
  * `syncTriggerSql` (`sync/log.ts`) reads `NEW.id`/`OLD.id` unconditionally --
  * a table keyed by something else, or by more than one column, would install
@@ -59,21 +61,25 @@ function hostSchemaTableNames(): ReadonlySet<string> {
  * place a developer is looking, rather than at a write nobody suspected
  * (design spec §7.16).
  *
- * **A no-op for a table that does not exist at all, since issue #102 widened
+ * **Checked separately from the primary-key shape, since issue #102 widened
  * this to run on every `HOST_SYNCED_TABLES` entry too.** `PRAGMA table_info`
- * on a missing table answers zero rows -- indistinguishable, from here, from
- * a real table with no declared primary key -- but a missing table already
- * fails its own way, undisguised: `CREATE TRIGGER ... ON <table>` and any
- * query against it throw SQLite's own `no such table`, which names the exact
- * problem with no help needed. This guard's job is the table that exists and
- * is keyed wrong, not the one that is not there yet --
- * `sync/tables.ts`'s `readHostRows` draws the same line, for the same
- * reason, with its own early return for an empty id list.
+ * on a missing table answers zero rows -- indistinguishable, from there, from
+ * a real table with no declared primary key -- so a table that does not
+ * exist would otherwise be misreported as one keyed wrong. It used to be
+ * treated as a no-op instead, on the theory that a missing table already
+ * fails its own way at `CREATE TRIGGER` or at the query itself; that stayed
+ * silent for every *other* caller of this function, not only the one test
+ * that needed it, so a plugin that misspelled a table name learned about it
+ * from SQLite's own undecorated `no such table` rather than from this guard
+ * naming the table it declared. `test/sync/registry.test.ts` pins the
+ * distinct message this throws now instead.
  */
 export function assertIntegerIdKey(raw: DatabaseSync, table: string): void {
   const exists = raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(table);
-  if (!exists) return;
+  if (!exists) {
+    throw new Error(`sync: table ${JSON.stringify(table)} does not exist`);
+  }
   const pk = raw.prepare(`PRAGMA table_info(${table})`).all()
     .filter((row) => Number((row as { pk: unknown }).pk) > 0)
     .map((row) => String((row as { name: unknown }).name));

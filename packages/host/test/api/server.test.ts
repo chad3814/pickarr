@@ -904,10 +904,18 @@ test('a read that throws answers 500 with no url, path or query in the body', as
 
   // And a genuinely failing query, not only a failing mapping: the same fixed
   // body, with the table the statement named nowhere in it.
+  //
+  // The drop happens after `startSignedIn`, not before: `createSyncRegistry`
+  // (built during startup) now refuses a table that does not exist under its
+  // own `assertIntegerIdKey` error, so dropping `media_item` first would fail
+  // startup itself rather than reach the query this test is actually about.
+  // Dropping it once the server is already up leaves the registry already
+  // built against a `media_item` that still existed, and the query below
+  // fails on its own, undisguised `no such table`.
   const broken = setup();
   seedMediaItem(broken.raw, 'alpha', 1000, 'Recognisable Fixture Title');
-  broken.raw.exec('DROP TABLE media_item');
   const failing = await startSignedIn(broken.raw, broken.db, moviesOnly);
+  broken.raw.exec('DROP TABLE media_item');
   try {
     const response = await get(failing.server, '/api/media?type=movie', failing.cookie);
     assert.equal(response.status, 500);
