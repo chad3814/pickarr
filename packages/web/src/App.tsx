@@ -17,15 +17,29 @@
  * `Shell` owns the read that makes the discovery: `withUnauthenticatedCheck`
  * (`shell/Shell.tsx`) routes a 401 from anywhere in its sync loops to
  * `onUnauthenticated`, which is this component's cue to fall back to
- * `SignIn` -- the same callback an explicit "Sign out" click uses, because
- * `App`'s response to either is identical.
+ * `SignIn` -- the same callback an explicit "Sign out" click uses, and the
+ * one a write that met a 401 reaches through `auth/sendJson.ts`'s
+ * session-expired signal (issue #94).
+ *
+ * **The response is identical; what the form says is not.** Only an
+ * `'expired'` reason puts {@link SESSION_EXPIRED_MESSAGE} on the form. A
+ * sign-out is not an expiry, and a sync-tail 401 is also how a first visit
+ * with no cookie arrives here -- a visitor who was never signed in must not
+ * be told their session ended. The first reason after a demote wins: once
+ * `SignIn` is showing, a second call (a tail 401 in the same tick as the
+ * write's) changes nothing. Signing in clears the notice.
  */
 import { useCallback, useState, type ReactElement } from 'react';
 import { SignIn } from './auth/SignIn.tsx';
-import { Shell } from './shell/Shell.tsx';
+import { SESSION_EXPIRED_MESSAGE } from './auth/sessionExpired.ts';
+import { Shell, type UnauthenticatedReason } from './shell/Shell.tsx';
 import type { CreateStoreDeps } from './store/index.ts';
 
-type Phase = 'authenticated' | 'unauthenticated';
+type Phase =
+  | { readonly phase: 'authenticated' }
+  | { readonly phase: 'unauthenticated'; readonly expired: boolean };
+
+const AUTHENTICATED: Phase = { phase: 'authenticated' };
 
 export interface AppProps {
   /**
@@ -37,23 +51,23 @@ export interface AppProps {
 }
 
 export function App({ shellDeps }: AppProps): ReactElement {
-  const [phase, setPhase] = useState<Phase>('authenticated');
+  const [state, setState] = useState<Phase>(AUTHENTICATED);
 
   const handleSignedIn = useCallback((): void => {
-    setPhase('authenticated');
+    setState(AUTHENTICATED);
   }, []);
 
-  const handleUnauthenticated = useCallback((): void => {
-    setPhase('unauthenticated');
+  const handleUnauthenticated = useCallback((reason: UnauthenticatedReason): void => {
+    setState((prev) => (prev.phase === 'unauthenticated' ? prev : { phase: 'unauthenticated', expired: reason === 'expired' }));
   }, []);
 
   // `deps` is spread only when present rather than always passed (even as
   // `undefined`): `ShellProps.deps` is typed `CreateStoreDeps | undefined`
   // as a prop that may be *omitted*, and `exactOptionalPropertyTypes`
   // distinguishes that from a key explicitly set to `undefined`.
-  return phase === 'authenticated' ? (
+  return state.phase === 'authenticated' ? (
     <Shell {...(shellDeps === undefined ? {} : { deps: shellDeps })} onUnauthenticated={handleUnauthenticated} />
   ) : (
-    <SignIn onSignedIn={handleSignedIn} />
+    <SignIn onSignedIn={handleSignedIn} {...(state.expired ? { notice: SESSION_EXPIRED_MESSAGE } : {})} />
   );
 }

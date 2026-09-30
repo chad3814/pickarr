@@ -85,7 +85,8 @@ export function signOut(): Promise<Response> {
  * Whether a response is the guard's fixed 401 (`packages/host/src/api/server.ts`'s
  * `UNAUTHORIZED`) -- the ordinary way, per the design spec's §4, that this
  * client discovers it needs to show `SignIn` again: any read can answer it,
- * not just the three calls above.
+ * not just the three calls above, and so can any write -- `sendJson.ts`
+ * asks this of every write path's answer (issue #94).
  *
  * Typed structurally on `status` alone, rather than on `Response`, so a
  * caller can hand it either a real `fetch` `Response` or `store/sync.ts`'s

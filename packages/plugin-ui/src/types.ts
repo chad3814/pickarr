@@ -78,7 +78,7 @@ export interface GatheredItemView {
 export type PickOutcome =
   | { accepted: true }
   | { refusal: RequestPickRefusalCode }
-  | { refusal: 'offline' | 'unrecognised' };
+  | { refusal: 'offline' | 'expired' | 'unrecognised' };
 
 /**
  * The shape a plugin's `Card` takes its `submit` prop in: a release id in,
@@ -88,13 +88,31 @@ export type PickOutcome =
 export type PickSubmit = (rssItemId: number) => Promise<PickOutcome>;
 
 /**
+ * What every write path in the client says when the host answers 401: the
+ * session behind the request is gone (issue #94).
+ *
+ * **Declared here, not in `@pickarr/contract` and not in web.** Web imports
+ * this package and this package must not import web, and
+ * {@link PICK_REFUSAL_MESSAGES} -- which `ReleaseList` reads -- needs it, so
+ * web is ruled out. The contract is ruled out for a different reason: it is
+ * the wire's vocabulary, codes and data, and never a sentence
+ * (`contract/src/destinations.ts`: "It is never a sentence"); every sentence
+ * an operator reads is the client's own. This package is the one place both
+ * browser-side consumers already reach that already holds client sentences,
+ * so one constant here serves every write path. Web's
+ * `auth/sessionExpired.ts` re-exports it and every web path imports it from
+ * there, so the copies in each path's message map cannot drift.
+ */
+export const SESSION_EXPIRED_MESSAGE = 'Your session expired. Sign in again.';
+
+/**
  * A fixed sentence per non-accepted outcome -- never the server's own words
  * (Global Constraint). Moved from `web/src/library/postPick.ts` unchanged:
  * `ReleaseList` reads this map and must not import web, so this is now
  * where it lives, and `postPick.ts` re-exports it rather than holding a
  * second copy.
  */
-export const PICK_REFUSAL_MESSAGES: Record<RequestPickRefusalCode | 'offline' | 'unrecognised', string> = {
+export const PICK_REFUSAL_MESSAGES: Record<RequestPickRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
   'unknown-release': 'Pickarr no longer has that release on file. Reload the page and try again.',
   'plugin-not-registered': 'No plugin in this Pickarr handles that kind of media, so nothing can fetch this release.',
   'no-client-of-type': 'No download client that can take this kind of release is set up. Add one under Settings.',
@@ -102,7 +120,9 @@ export const PICK_REFUSAL_MESSAGES: Record<RequestPickRefusalCode | 'offline' | 
   'already-submitted': 'This release has already been sent to a download client.',
   /** Distinct from every named refusal above, which are answers from the host -- this one means the submit never reached it. Worded exactly as `AddDownloadClient.tsx`'s own `offline`, because it is the same event and a second wording for it would be two sentences for one condition. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
-  /** `postPick`'s catch-all. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
+  /** A 401: the session expired. `postPick` never lands this in `unrecognised`, whose version-skew advice would send the operator after the wrong cause; the shell also returns to sign-in on the same answer. */
+  expired: SESSION_EXPIRED_MESSAGE,
+  /** `postPick`'s catch-all -- a parseable answer this build cannot read. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised:
     'Pickarr refused this pick, but did not say why. The host may be a different version than this page expects — reload and try again.',
 };

@@ -61,7 +61,7 @@ function chooseStrategy(strategy: string): void {
  */
 test('the refusal codes this form has sentences for are exactly the codes the contract declares', () => {
   const spoken = Object.keys(REFUSAL_MESSAGES)
-    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .filter((key) => key !== 'offline' && key !== 'expired' && key !== 'unrecognised')
     .toSorted();
 
   assert.deepEqual(spoken, [...ADD_DOWNLOAD_CLIENT_REFUSALS].toSorted(),
@@ -74,7 +74,7 @@ test('no refusal code borrows another one\'s sentence', () => {
   const sentences = Object.values(REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 6, 'the contract\'s four, plus offline and unrecognised');
+  assert.equal(sentences.length, 7, 'the contract\'s four, plus offline, expired and unrecognised');
 });
 
 test('the implementation select offers both products, and defaults to one the host can drive', () => {
@@ -339,14 +339,22 @@ test('postDownloadClient never reads a server-authored message off the body', as
 });
 
 /**
- * A 401 (an expired session -- the most ordinary failure a real submit
- * meets), the route's own 400 `{ error }`, a 500, and a refusal code this
- * build has never heard of all resolve rather than throw. A client is
- * routinely older than its host, so an unknown code is a normal outcome.
+ * A 401 is an expired session -- the most ordinary failure a real submit
+ * meets -- and has its own outcome (issue #94), rather than sharing the
+ * version-skew catch-all it used to.
+ */
+test('postDownloadClient reports "expired" for a 401, not "unrecognised", and never throws', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await postDownloadClient(SAMPLE_INPUT), { refusal: 'expired' });
+});
+
+/**
+ * The route's own 400 `{ error }`, a 500, and a refusal code this build
+ * has never heard of all resolve rather than throw. A client is routinely
+ * older than its host, so an unknown code is a normal outcome.
  */
 test('postDownloadClient reports "unrecognised" for a body carrying no refusal, never a throw', async () => {
   for (const [body, status] of [
-    [{ error: 'unauthorized' }, 401],
     [{ error: 'invalid download client' }, 400],
     [{ error: 'internal' }, 500],
   ] as const) {

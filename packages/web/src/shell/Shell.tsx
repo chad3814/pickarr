@@ -24,6 +24,15 @@
  * 401 anywhere in the sync loops reaches `onUnauthenticated`, without this
  * component or `sync.ts` ever inspecting a response body.
  *
+ * **So does a 401 on any write, and it arrives sooner.** Every write path
+ * goes through `auth/sendJson.ts`, which fires the session-expired signal
+ * on a 401 (issue #94); this component subscribes for its lifetime and
+ * passes it on as `onUnauthenticated('expired')`, so the operator is back
+ * at sign-in the moment the write fails rather than at the next poll. The
+ * reason is what lets `App` tell them why -- and lets it *not* claim an
+ * expiry for a sign-out or for a sync-tail 401, the latter being how a
+ * first visit with no cookie at all lands on the form too.
+ *
  * **Routing (task 4, task 5 adds `/settings`).** `Shell` is also where the
  * app's routes live -- one per registered plugin, plus `/unmatched` and
  * `/settings`, with `/` redirecting to the first plugin's -- via
@@ -48,6 +57,7 @@ import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts
 import { realFetch, idleScheduler } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
+import { subscribeSessionExpired } from '../auth/sessionExpired.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
 import { postRetry } from '../library/postRetry.ts';
 import { useCounts, type Counts } from './useCounts.ts';
@@ -87,6 +97,18 @@ function defaultDeps(): CreateStoreDeps {
 }
 
 /**
+ * Why `Shell` is handing the app back to `SignIn`.
+ *
+ * - `signed-out` -- the operator pressed "Sign out".
+ * - `sync` -- a sync read answered 401 ({@link withUnauthenticatedCheck}).
+ *   Deliberately not `expired`: a first visit with no cookie at all arrives
+ *   by exactly this route, and was never signed in to expire.
+ * - `expired` -- a write answered 401 (`auth/sendJson.ts`). The operator was
+ *   acting on a session that is gone, and is owed the reason.
+ */
+export type UnauthenticatedReason = 'signed-out' | 'sync' | 'expired';
+
+/**
  * Wraps `fetch` so a 401 anywhere calls `onUnauthenticated`, and otherwise
  * changes nothing about the response `sync.ts` sees -- it still decides for
  * itself whether `res.ok`. Never reads the body (Global Constraints): the
@@ -101,8 +123,15 @@ function withUnauthenticatedCheck(fetch: SyncFetch, onUnauthenticated: () => voi
 }
 
 export interface ShellProps {
-  /** Called once sign-out completes, or once any sync read discovers the session is already dead. Either way, `App`'s job is the same: show `SignIn` again. */
-  onUnauthenticated: () => void;
+  /**
+   * Called once sign-out completes (`'signed-out'`), once any sync read
+   * discovers the session is already dead (`'sync'`), or once any write
+   * does (`'expired'`). `App`'s job is to show `SignIn` again every time;
+   * the reason decides only whether the form says the session expired.
+   * May be called more than once before `Shell` unmounts -- a tail 401 can
+   * land in the same tick as a write's.
+   */
+  onUnauthenticated: (reason: UnauthenticatedReason) => void;
   /**
    * Overridable for tests, which need to drive fetch, the scheduler, the
    * clock and the lease by hand rather than touch a real browser API --
@@ -131,7 +160,12 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
     let cancelled = false;
     let created: Store | undefined;
     const base = deps ?? defaultDeps();
-    const wired: CreateStoreDeps = { ...base, fetch: withUnauthenticatedCheck(base.fetch, onUnauthenticated) };
+    const wired: CreateStoreDeps = {
+      ...base,
+      fetch: withUnauthenticatedCheck(base.fetch, () => {
+        onUnauthenticated('sync');
+      }),
+    };
 
     createStore(wired)
       .then((opened) => {
@@ -161,6 +195,19 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
     // that must vary `deps` renders a fresh `Shell` rather than reusing one.
   }, []);
 
+  // The write half of the demote (this file's docblock). Its own effect
+  // rather than a line in the store's above, because it does not depend on
+  // the store at all: it is live from the first commit, whether or not
+  // `createStore` ever resolves, and its cleanup is the unsubscribe, so an
+  // unmounted shell hears nothing. `[]` for the same reason as above.
+  useEffect(
+    () =>
+      subscribeSessionExpired(() => {
+        onUnauthenticated('expired');
+      }),
+    [],
+  );
+
   const counts = useCounts(store);
 
   function handleSignOut(): void {
@@ -178,7 +225,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
       // best-effort from here on.
       console.error('pickarr: could not reach the sign-out endpoint');
     });
-    onUnauthenticated();
+    onUnauthenticated('signed-out');
   }
 
   return (

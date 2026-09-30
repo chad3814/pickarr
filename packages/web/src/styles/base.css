@@ -149,6 +149,23 @@ a { color: var(--color-accent-text); }
 
 .error { color: var(--color-error); }
 .notice { color: var(--color-success); }
+
+/* The sign-in form's notice (`SignIn.tsx`'s `notice` prop): why the visitor
+   was sent back, today only an expired session (issue #94). Here rather
+   than in a component stylesheet because `SignIn` has none -- every rule
+   that reaches it is in this file. Keyed on the structure `SignIn` renders,
+   as `settings.css` keys its banners, since no 2.0 component sets a class.
+   A bordered band in the accent colour rather than `--color-error`: nothing
+   the visitor did failed, and it must not read as a refused password. */
+form[aria-labelledby='signin-heading'] > p[role='status'] {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-accent-text);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-weight: 600;
+}
 /* Told apart from silence by italics as well as by colour — a lookup in flight is
    the one metadata state that resolves into something else on its own. */
 .loading { color: var(--color-text-dim); font-size: var(--text-meta); font-style: italic; }

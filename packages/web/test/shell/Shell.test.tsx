@@ -8,6 +8,8 @@ import type { CreateStoreDeps } from '../../src/store/index.ts';
 import { SCHEMA_VERSION } from '../../src/store/db.ts';
 import type { SyncFetch } from '../../src/store/sync.ts';
 import { fetchStub, jsonResponse } from '../fetchStub.ts';
+import { sendJson } from '../../src/auth/sendJson.ts';
+import type { UnauthenticatedReason } from '../../src/shell/Shell.tsx';
 import {
   settle,
   manualScheduler,
@@ -78,10 +80,10 @@ test('sign-out stops the store', async () => {
   globalThis.fetch = fetchStub(async () => jsonResponse({}, 200));
   const { deps, sched } = testDeps();
 
-  let unauthenticated = 0;
+  const reasons: UnauthenticatedReason[] = [];
   render(
     <MemoryRouter>
-      <Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />
+      <Shell deps={deps} onUnauthenticated={(reason) => { reasons.push(reason); }} />
     </MemoryRouter>,
   );
 
@@ -103,7 +105,7 @@ test('sign-out stops the store', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
   await settle();
 
-  assert.equal(unauthenticated, 1, 'App is told to show SignIn again');
+  assert.deepEqual(reasons, ['signed-out'], 'App is told to show SignIn again, and that it was a sign-out -- not an expiry');
   assert.equal(sched.hasPending('tail'), false, 'store.stop() cancelled the tail task that was pending');
 });
 
@@ -130,10 +132,10 @@ test('an offline sign-out does not escape as an unhandled promise rejection', as
   console.error = (): void => {};
 
   try {
-    let unauthenticated = 0;
+    const reasons: UnauthenticatedReason[] = [];
     render(
       <MemoryRouter>
-        <Shell deps={deps} onUnauthenticated={() => { unauthenticated += 1; }} />
+        <Shell deps={deps} onUnauthenticated={(reason) => { reasons.push(reason); }} />
       </MemoryRouter>,
     );
 
@@ -145,7 +147,7 @@ test('an offline sign-out does not escape as an unhandled promise rejection', as
     await settle();
 
     assert.deepEqual(escaped, [], 'the failed sign-out network call was caught, not left to escape as an unhandled rejection');
-    assert.equal(unauthenticated, 1, 'App is still told to show SignIn again even though the network call failed');
+    assert.deepEqual(reasons, ['signed-out'], 'App is still told to show SignIn again even though the network call failed');
   } finally {
     console.error = originalConsoleError;
     process.off('unhandledRejection', onUnhandledRejection);
@@ -179,7 +181,7 @@ test('a 401 on the tail poll -- the ordinary way a client discovers a dead sessi
   const originalConsoleError = console.error;
   console.error = (): void => {};
 
-  let unauthenticated = 0;
+  const reasons: UnauthenticatedReason[] = [];
   try {
     render(
       <MemoryRouter>
@@ -192,7 +194,7 @@ test('a 401 on the tail poll -- the ordinary way a client discovers a dead sessi
             locks: grantedLease(),
             fetchDeadlineMs: TEST_FETCH_DEADLINE_MS,
           }}
-          onUnauthenticated={() => { unauthenticated += 1; }}
+          onUnauthenticated={(reason) => { reasons.push(reason); }}
         />
       </MemoryRouter>,
     );
@@ -202,10 +204,55 @@ test('a 401 on the tail poll -- the ordinary way a client discovers a dead sessi
     });
     await sched.drive('tail');
 
-    assert.equal(unauthenticated, 1, 'a 401 read anywhere in the sync loops -- not just sign-in or sign-out -- is enough to demote');
+    assert.deepEqual(reasons, ['sync'],
+      'a 401 read anywhere in the sync loops -- not just sign-in or sign-out -- is enough to demote, and says it came from sync: '
+      + 'a first visit with no cookie lands here too, so it must not read as an expiry');
   } finally {
     console.error = originalConsoleError;
   }
+});
+
+test('a write that meets a 401 calls onUnauthenticated with "expired" at once, without waiting for the tail', async () => {
+  // Issue #94: the write path used to render a version-skew sentence and
+  // leave the operator on the page until the next poll. `sendJson` fires the
+  // session-expired signal; `Shell` is its subscriber.
+  const { deps, sched } = testDeps();
+  const reasons: UnauthenticatedReason[] = [];
+  render(
+    <MemoryRouter>
+      <Shell deps={deps} onUnauthenticated={(reason) => { reasons.push(reason); }} />
+    </MemoryRouter>,
+  );
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await sendJson('/api/picks', { method: 'POST', body: { rssItemId: 1 } }), { outcome: 'expired' });
+
+  assert.deepEqual(reasons, ['expired'], 'the tail was never driven, so this can only have come from the write');
+});
+
+test('an unmounted Shell no longer hears an expired write', async () => {
+  // The subscription is for `Shell`'s lifetime only: once `App` has swapped
+  // it for `SignIn`, a late 401 from a write still in flight must not reach
+  // a callback for a shell that is gone.
+  const { deps, sched } = testDeps();
+  const reasons: UnauthenticatedReason[] = [];
+  const { unmount } = render(
+    <MemoryRouter>
+      <Shell deps={deps} onUnauthenticated={(reason) => { reasons.push(reason); }} />
+    </MemoryRouter>,
+  );
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+  unmount();
+
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  await sendJson('/api/picks', { method: 'POST', body: { rssItemId: 1 } });
+
+  assert.deepEqual(reasons, []);
 });
 
 /**

@@ -47,7 +47,7 @@ function submitForm(): void {
  */
 test('the refusal codes this form has sentences for are exactly the codes the contract declares', () => {
   const spoken = Object.keys(REFUSAL_MESSAGES)
-    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .filter((key) => key !== 'offline' && key !== 'expired' && key !== 'unrecognised')
     .toSorted();
 
   // The client's set against the contract's: this is the assertion the
@@ -57,7 +57,7 @@ test('the refusal codes this form has sentences for are exactly the codes the co
 
   // And the contract's against four literals, so a rename applied to both
   // sides at once is still a deliberate, visible edit rather than a silent
-  // one. `offline` and `unrecognised` are filtered out above because they
+  // one. `offline`, `expired` and `unrecognised` are filtered out above because they
   // are this client's own outcomes, never anything a server answered.
   assert.deepEqual(spoken, ['bad-download-type', 'bad-poll-interval', 'duplicate-url', 'unknown-plugin']);
 });
@@ -65,12 +65,12 @@ test('the refusal codes this form has sentences for are exactly the codes the co
 test('no refusal code borrows another one\'s sentence', () => {
   // A code added to the contract and then given a copy-pasted sentence --
   // or quietly pointed at the catch-all -- would satisfy the key-set test
-  // above while telling an operator the wrong thing. Six outcomes, six
+  // above while telling an operator the wrong thing. Seven outcomes, seven
   // distinct sentences.
   const sentences = Object.values(REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 6, 'the contract\'s four, plus offline and unrecognised');
+  assert.equal(sentences.length, 7, 'the contract\'s four, plus offline, expired and unrecognised');
 });
 
 test('the plugin select offers CATEGORIES, and defaults to a value the host will accept', () => {
@@ -208,11 +208,23 @@ test('postFeed never reads a server-authored message off the body', async () => 
  * Fix round 1 (review C1/I4): a 401 (an expired session -- the most
  * ordinary failure a real submit meets), this tree's 400
  * `{ error: 'invalid feed' }`, and a 500 all carry no `refusal` key at all.
- * None of them may throw; each resolves to `{ refusal: 'unrecognised' }'`.
+ * None of them may throw. The 401 resolves to `{ refusal: 'expired' }`
+ * (issue #94: it used to share `unrecognised`, whose version-skew sentence
+ * named the wrong cause); the other two to `{ refusal: 'unrecognised' }`.
  */
-test('postFeed reports "unrecognised" for a 401, never a throw', async () => {
+test('postFeed reports "expired" for a 401 -- not the version-skew catch-all -- and never throws', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
-  assert.deepEqual(await postFeed(SAMPLE_INPUT), { refusal: 'unrecognised' });
+  assert.deepEqual(await postFeed(SAMPLE_INPUT), { refusal: 'expired' });
+});
+
+test('an expired session shows the sign-in sentence, not the version-skew one', async () => {
+  render(<AddFeed submit={() => Promise.resolve({ refusal: 'expired' })} />);
+  fillNameAndUrl('Movies HD', 'https://tracker.example/rss');
+  submitForm();
+
+  const alert = await screen.findByRole('alert');
+  assert.equal(alert.textContent, 'Your session expired. Sign in again.');
+  assert.equal(screen.getByRole<HTMLButtonElement>('button', { name: 'Add feed' }).disabled, false);
 });
 
 test('postFeed reports "unrecognised" for a bare { error } body, never a throw', async () => {

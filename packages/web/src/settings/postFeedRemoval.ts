@@ -11,8 +11,12 @@
  * **Nothing here throws.** The same rule `postFeed` and `postMapping`
  * already follow: a rejection from a submit handler is swallowed by
  * `void handleSubmit(event)` and leaves a control stuck pending forever.
- * Every path returns an outcome instead.
+ * Every path returns an outcome instead. The request itself is
+ * `auth/sendJson.ts`'s, which is where a rejected `fetch`, an unreadable
+ * body and a 401 are told apart for every write path.
  */
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 /** What the host did, or why it would not. */
 export type RemoveFeedOutcome =
@@ -28,17 +32,21 @@ export type SetFeedDisabledOutcome =
 /**
  * Every way these two routes can refuse.
  *
- * `unknown-feed` is the host's; `unreachable` and `unexpected` are this
- * module's, for a network that failed and for an answer it cannot read.
- * Spelled as a union rather than `string` so a new code has to be handled
- * here before it can reach a sentence.
+ * `unknown-feed` is the host's; `unreachable`, `expired` and `unexpected`
+ * are this module's -- for a request that never reached the host (a failed
+ * network, or bytes Pickarr's route layer could not have sent), for a 401
+ * from a session that has ended (issue #94: it used to read as
+ * `unexpected`), and for a parseable answer it cannot read. Spelled as a
+ * union rather than `string` so a new code has to be handled here before it
+ * can reach a sentence.
  */
-export type FeedRefusalCode = 'unknown-feed' | 'unreachable' | 'unexpected';
+export type FeedRefusalCode = 'unknown-feed' | 'unreachable' | 'expired' | 'unexpected';
 
 /** The sentence an operator reads for each. The client owns every one. */
 export const FEED_REFUSAL_MESSAGES: Record<FeedRefusalCode, string> = {
   'unknown-feed': 'That feed is already gone.',
   unreachable: 'Could not reach Pickarr. Check your connection and try again.',
+  expired: SESSION_EXPIRED_MESSAGE,
   unexpected: 'Pickarr gave an answer this page did not understand.',
 };
 
@@ -86,23 +94,36 @@ function feedUrl(id: number): string {
  * anything else is a host this client does not match, which is exactly what
  * `unexpected` is for.
  */
-async function refusalFrom(response: Response): Promise<FeedRefusalCode> {
-  const body: unknown = await response.json().catch(() => undefined);
+function refusalFrom(body: unknown): FeedRefusalCode {
   if (isRecord(body) && body['refusal'] === 'unknown-feed') return 'unknown-feed';
   return 'unexpected';
 }
 
+/**
+ * Whether `status` is a 2xx -- `Response.ok`'s own test, spelled out because
+ * `sendJson` hands back the status rather than the `Response`.
+ */
+function isOk(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+/**
+ * `sendJson`'s two non-answers in this module's vocabulary. `offline` is
+ * named `unreachable` here, and now also covers an unparseable body, which
+ * this module used to call `unexpected` -- the same event every other write
+ * path already called offline, for the reason `sendJson`'s docblock gives.
+ */
+function refusalFor(outcome: 'offline' | 'expired'): FeedRefusalCode {
+  return outcome === 'offline' ? 'unreachable' : 'expired';
+}
+
 export async function removeFeed(id: number): Promise<RemoveFeedOutcome> {
-  let response: Response;
-  try {
-    response = await fetch(feedUrl(id), { method: 'DELETE' });
-  } catch {
-    return { outcome: 'refused', refusal: 'unreachable' };
-  }
+  const result = await sendJson(feedUrl(id), { method: 'DELETE' });
+  if (result.outcome !== 'answered') return { outcome: 'refused', refusal: refusalFor(result.outcome) };
 
-  if (!response.ok) return { outcome: 'refused', refusal: await refusalFrom(response) };
+  const { body } = result;
+  if (!isOk(result.status)) return { outcome: 'refused', refusal: refusalFrom(body) };
 
-  const body: unknown = await response.json().catch(() => undefined);
   if (isRecord(body) && body['outcome'] === 'deleted') return { outcome: 'deleted' };
   if (isRecord(body) && body['outcome'] === 'disabled' && typeof body['items'] === 'number') {
     return { outcome: 'disabled', items: body['items'] };
@@ -114,18 +135,9 @@ export async function removeFeed(id: number): Promise<RemoveFeedOutcome> {
 }
 
 export async function setFeedDisabled(id: number, disabled: boolean): Promise<SetFeedDisabledOutcome> {
-  let response: Response;
-  try {
-    response = await fetch(feedUrl(id), {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ disabled }),
-    });
-  } catch {
-    return { outcome: 'refused', refusal: 'unreachable' };
-  }
-
-  if (!response.ok) return { outcome: 'refused', refusal: await refusalFrom(response) };
+  const result = await sendJson(feedUrl(id), { method: 'PATCH', body: { disabled } });
+  if (result.outcome !== 'answered') return { outcome: 'refused', refusal: refusalFor(result.outcome) };
+  if (!isOk(result.status)) return { outcome: 'refused', refusal: refusalFrom(result.body) };
   return disabled ? { outcome: 'disabled' } : { outcome: 'enabled' };
 }
 

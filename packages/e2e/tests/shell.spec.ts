@@ -1864,9 +1864,10 @@ test('a pick with no download client set up says so, in words that are styled as
  *   `duplicate-from-path` (acceptance item 2, caught from the unique
  *   index), `unknown-client` and `unknown-mapping` are host-level and
  *   pinned in `packages/host/test/clients/mappings.test.ts`;
- *   `postMapping.ts`'s own two -- `offline` and `unrecognised` -- are
- *   pinned in `packages/web/test/settings/postMapping.test.tsx`. Nothing
- *   below is evidence about any of the five.
+ *   `postMapping.ts`'s own three -- `offline`, `expired` and
+ *   `unrecognised` -- are pinned in
+ *   `packages/web/test/settings/postMapping.test.tsx`. Nothing below is
+ *   evidence about any of the six.
  * - **Acceptance item 7 -- that `PATCH` and `DELETE` are refused without a
  *   session.** Every request this spec makes carries one. The guard and
  *   its ordering are pinned in the host's own route tests.

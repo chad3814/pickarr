@@ -8,8 +8,10 @@
  * inherited here rather than re-argued:
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `offline`; a body that parses but is neither a success shape nor a
- * known refusal answers `unrecognised`.
+ * answer `offline`; a 401 answers `expired` (issue #94); a body that parses
+ * but is neither a success shape nor a known refusal answers
+ * `unrecognised`. The first two are decided by `auth/sendJson.ts`, which
+ * makes the request for every write path.
  * The feeds slice shipped a sibling that threw, and because its caller
  * invoked it as `void handleSubmit(event)` the rejection was swallowed: the
  * pending flag never cleared and the form wedged on five of six real host
@@ -20,7 +22,8 @@
  * contract and the statuses are not. `postMapping.ts`'s `deleteMapping` is
  * the one narrowly-argued exception in this package and it exists because a
  * 204 has no body to branch on; this route answers a body on every path it
- * has, success included, so the rule stands here with no exception at all.
+ * has, success included, so the rule stands here with no exception at all
+ * -- the guard's 401 aside, which `sendJson` reads once for every path.
  *
  * **Why an unparseable body is `offline` and not `unrecognised`.**
  * `postMapping.ts` and `AddDownloadClient.tsx` argue this at length and the
@@ -34,8 +37,8 @@
  *
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on the request; nothing here reads, stores or forwards the
- * token itself (Global Constraint). Nothing here logs, and the `catch`
- * never inspects its error: a `TypeError` from a rejected `fetch` names the
+ * token itself (Global Constraint). Nothing here logs, and `sendJson`'s
+ * `catch` never inspects its error: a `TypeError` from a rejected `fetch` names the
  * url, and a caught error's message is the classic way a request's detail
  * reaches a console. A root and a shape are both paths, which is the other
  * half of why nothing here is logged.
@@ -50,6 +53,8 @@ import {
   type DestinationRefusalCode,
   type SaveDestinationRequest,
 } from '@pickarr/contract';
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 export type { SaveDestinationRequest };
 
@@ -57,19 +62,21 @@ export type { SaveDestinationRequest };
  * Every way the save can fail to do what was asked.
  *
  * `offline` is this client's own outcome for a request that never reached
- * the host, and `unrecognised` its outcome for an answer it cannot read --
- * a refusal code this build has never heard of, or a body with no `refusal`
- * key at all. That last shape is the most ordinary real failure there is: a
- * 401 from an expired session answers `{ error }`, as do 405, 413 and 500,
- * and none of them carries a `refusal`. A client is routinely older than
- * its host, so neither of these two is a defect in either side.
+ * the host; `expired` its outcome for a 401, the session behind the request
+ * having ended (issue #94 -- it used to share `unrecognised`, whose sentence
+ * blamed version skew); and `unrecognised` its outcome for an answer it
+ * cannot read -- a refusal code this build has never heard of, or a body
+ * with no `refusal` key at all, as a 405, 413 and 500 answer. A client is
+ * routinely older than its host, so none of these is a defect in either
+ * side.
  */
 export interface DestinationRefusal {
-  refusal: DestinationRefusalCode | 'offline' | 'unrecognised';
+  refusal: DestinationRefusalCode | 'offline' | 'expired' | 'unrecognised';
   /**
    * The token the host refused, for `unknown-token`, and `null` for every
    * other outcome -- including an `unknown-token` the host declined to
-   * name, and both of this client's own two, which never saw a body.
+   * name, and this client's own `offline` and `expired`, which never read
+   * a body.
    *
    * **Read, not ignored, and the distinction cost an operator the feature.**
    * `@pickarr/contract`'s `DestinationRefusalBody` has carried this field
@@ -130,24 +137,18 @@ export async function putDestination(
   pluginId: string,
   input: SaveDestinationRequest,
 ): Promise<SaveDestinationOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch(`/api/destinations/${encodeURIComponent(pluginId)}`, {
-      method: 'PUT',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      // `JSON.stringify` drops an `undefined` member, which is exactly the
-      // omission `SaveDestinationRequest.unmatchedDir` documents -- so a
-      // caller that leaves it unset sends no field rather than an empty
-      // one. Pinned by `postDestination.test.tsx` rather than left to this
-      // comment, because it is a property of `JSON.stringify` and not of
-      // anything visible here.
-      body: JSON.stringify(input),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline', token: null };
-  }
+  // `sendJson` serialises `input` with `JSON.stringify`, which drops an
+  // `undefined` member -- exactly the omission
+  // `SaveDestinationRequest.unmatchedDir` documents, so a caller that leaves
+  // it unset sends no field rather than an empty one. Pinned by
+  // `postDestination.test.tsx` rather than left to this comment, because it
+  // is a property of `JSON.stringify` and not of anything visible here.
+  const result = await sendJson(`/api/destinations/${encodeURIComponent(pluginId)}`, {
+    method: 'PUT',
+    body: input,
+  });
+  if (result.outcome !== 'answered') return { refusal: result.outcome, token: null };
+  const { body } = result;
   if (isRecord(body) && typeof body.id === 'number') return { id: body.id };
   if (isRecord(body) && isRefusalCode(body.refusal)) {
     // `typeof === 'string'` rather than a cast: the body is `unknown` and
@@ -169,14 +170,14 @@ export const destinationSubmit: DestinationSubmit = putDestination;
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all twelve, `offline` and
+ * (Global Constraint). One map covers all thirteen, `offline`, `expired` and
  * `unrecognised` included, so no two plugin rows can word the same outcome
  * differently. The one outcome that is not a fixed sentence is an
  * `unknown-token` the host named, which {@link destinationRefusalMessage}
  * composes from this map's key set plus the one datum the wire carries.
  *
  * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's ten codes plus this client's own two, so a code added to
+ * the contract's ten codes plus this client's own three, so a code added to
  * `DESTINATION_REFUSALS` fails to compile here until someone writes the
  * sentence for it, and a code renamed there fails twice -- an unwritten key
  * and an unreachable one. The three tests at the top of
@@ -189,7 +190,7 @@ export const destinationSubmit: DestinationSubmit = putDestination;
  * **Distinctness is only half of it; the rendering has to pick the right
  * one.** Measured against the web suite by replacing every
  * `setError(destinationRefusalMessage(...))` in `Destinations.tsx` with one
- * fixed sentence: the test that names the property is `each of the twelve
+ * fixed sentence: the test that names the property is `each of the thirteen
  * outcomes reads as its own sentence`. The three tests above all stay green
  * under that mutation, because this object is still correct -- which is why
  * the component has a walk of its own rather than trusting this one.
@@ -208,7 +209,7 @@ export const destinationSubmit: DestinationSubmit = putDestination;
  * one.
  */
 export const DESTINATION_REFUSAL_MESSAGES: Record<
-  DestinationRefusalCode | 'offline' | 'unrecognised',
+  DestinationRefusalCode | 'offline' | 'expired' | 'unrecognised',
   string
 > = {
   'unknown-plugin':
@@ -271,6 +272,8 @@ export const DESTINATION_REFUSAL_MESSAGES: Record<
     'The unmatched folder has to stay inside the library folder. Remove the leading slash, or the .. segment, that takes it out. A folder inside another one is fine.',
   /** Worded exactly as `postMapping.ts`'s and `AddDownloadClient.tsx`'s own `offline`, because it is the same event and a second wording for it would be two sentences for one condition. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
+  /** A 401. One sentence shared by every write path (`auth/sessionExpired.ts`), so no two can word it differently. */
+  expired: SESSION_EXPIRED_MESSAGE,
   /** The catch-all. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised:
     'Pickarr refused this destination, but did not say why. The host may be a different version than this page expects — reload and try again.',

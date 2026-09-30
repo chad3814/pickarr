@@ -410,13 +410,15 @@ test('an unknown-token the host declined to name still sends the operator to the
   assert.ok(gone('{seasn}'), 'the token the operator typed is quoted back as though Pickarr had identified it');
 });
 
-test('each of the twelve outcomes reads as its own sentence', async () => {
-  // Ten contract codes plus this client's `offline` and `unrecognised`. A
+test('each of the thirteen outcomes reads as its own sentence', async () => {
+  // Ten contract codes plus this client's `offline`, `expired` and
+  // `unrecognised`. A
   // test covering three of them would pass against a component that
   // rendered one fixed string for every refusal.
   const outcomes = [
     ...DESTINATION_REFUSALS.map((refusal) => ({ refusal, token: null }) as const),
     { refusal: 'offline', token: null } as const,
+    { refusal: 'expired', token: null } as const,
     { refusal: 'unrecognised', token: null } as const,
   ];
   const seen = new Set<string>();
@@ -437,7 +439,7 @@ test('each of the twelve outcomes reads as its own sentence', async () => {
     cleanup();
   }
 
-  assert.equal(seen.size, 12, 'twelve outcomes, twelve different things on screen');
+  assert.equal(seen.size, 13, 'thirteen outcomes, thirteen different things on screen');
 });
 
 test('a submit that rejects outright reads as offline rather than wedging the row', async () => {
