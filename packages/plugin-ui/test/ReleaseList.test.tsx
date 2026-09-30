@@ -13,17 +13,19 @@ import {
 
 afterEach(cleanup);
 
-/** An `RssItemSyncRead` with everything but `id`, `filename` and `rankingScore` defaulted -- `lookupState` is the lookup state, `resolved` unless a test says otherwise. */
+/** An `RssItemSyncRead` with everything but `id`, `filename` and `rankingScore` defaulted -- `lookupState` is the lookup state, `resolved` unless a test says otherwise, and `videoResolution` is the stored field, `null` unless a test says otherwise. */
 function rssItem({
   id,
   filename,
   lookupState = 'resolved',
   rankingScore = null,
+  videoResolution = null,
 }: {
   id: number;
   filename: string;
   lookupState?: string;
   rankingScore?: number | null;
+  videoResolution?: string | null;
 }): RssItemSyncRead {
   return {
     id,
@@ -36,7 +38,7 @@ function rssItem({
     rankingScore,
     lookupState,
     lookupStateDetail: null,
-    videoResolution: null,
+    videoResolution,
     lookupJson: null,
     deliveredAt: null,
   };
@@ -138,7 +140,7 @@ test('no releases still renders a releases list, with nothing inside it', () => 
 test('a release with a download shows its filename, resolution and download status', () => {
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv' }),
+    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', videoResolution: '2160p' }),
     downloads: [torrentDownload(torrent({ id: 9, status: 'downloading', percentage: 42 }))],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);
@@ -218,23 +220,32 @@ test('a percentage is shown only while a download is downloading', () => {
   }
 });
 
-test("a row shows the release's video resolution from its filename, and unknown when it has none", () => {
+test("a row shows the release's stored video resolution, and unknown when it has none", () => {
+  // The stored value, not a parse of the filename: this name says 2160p and
+  // the row says 1080p, which is only possible if the component reads the
+  // field.
   const releases: GatheredRelease[] = [
-    { id: 1, row: rssItem({ id: 1, filename: 'the.thing.2160p.mkv' }), downloads: [] },
-    { id: 2, row: rssItem({ id: 2, filename: 'the.thing.mkv' }), downloads: [] },
+    { id: 1, row: rssItem({ id: 1, filename: 'the.thing.2160p.mkv', videoResolution: '1080p' }), downloads: [] },
+    { id: 2, row: rssItem({ id: 2, filename: 'the.thing.1080p.mkv', videoResolution: null }), downloads: [] },
   ];
   render(<ReleaseList releases={releases} submit={accepts} />);
 
-  const known = screen.getByRole('listitem', { name: 'the.thing.2160p.mkv' });
-  const unknown = screen.getByRole('listitem', { name: 'the.thing.mkv' });
-  assert.ok(
-    [...known.querySelectorAll('span')].some((span) => span.textContent === '2160p'),
-    'the resolution has a span of its own, not just a mention inside the filename',
-  );
-  assert.ok(
-    [...unknown.querySelectorAll('span')].some((span) => span.textContent === 'unknown'),
-    'no resolution in the name reads as unknown',
-  );
+  const spans = (filename: string): string[] =>
+    [...screen.getByRole('listitem', { name: filename }).querySelectorAll('span')].map((span) => span.textContent ?? '');
+  assert.ok(spans('the.thing.2160p.mkv').includes('1080p'), 'the stored value');
+  assert.ok(!spans('the.thing.2160p.mkv').includes('2160p'), 'not the filename');
+  assert.ok(spans('the.thing.1080p.mkv').includes('unknown'), 'null reads as unknown');
+});
+
+test('a replica row from before the field existed reads as unknown, not undefined', () => {
+  // Review Focus 1: a replica that missed the re-bootstrap holds rows with
+  // no `videoResolution` key at all.
+  const { videoResolution: _dropped, ...legacy } = rssItem({ id: 1, filename: 'old.row.mkv' });
+  const release = { id: 1, row: legacy, downloads: [] } as unknown as GatheredRelease;
+  render(<ReleaseList releases={[release]} submit={accepts} />);
+  const text = screen.getByRole('listitem', { name: 'old.row.mkv' }).textContent ?? '';
+  assert.ok(text.includes('unknown'));
+  assert.ok(!text.includes('undefined'));
 });
 
 test("a row does not show the release's lookup state", () => {

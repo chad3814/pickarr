@@ -4,11 +4,10 @@
  * on every release that has no download, the `Pick` button that submits one
  * (picks design §2, §3).
  *
- * **The resolution is the video resolution the filename states, not
- * `row.lookupState`.** That column is the lookup state, and this row used to
- * print it: `resolved` on every browse card, which is what being on a
- * browse card already means. `videoResolutionOf` has why the filename is
- * the only source a client has.
+ * **The resolution is `row.videoResolution`, the lookup service's parse**
+ * (issue #98), or `unknown` when it has none. The row once printed
+ * `row.resolution`, which was the lookup state, and for one commit parsed
+ * the filename in the browser instead.
  *
  * A release with no `torrent_download` or `nzb_download` row is still not
  * an edge case here; it is the normal state of every release nobody has
@@ -87,7 +86,6 @@ import {
   type GatheredReleaseView as GatheredRelease,
   type PickSubmit,
 } from './types.ts';
-import { videoResolutionOf } from './videoResolution.ts';
 
 export interface ReleaseListProps {
   releases: GatheredItemView['releases'];
@@ -258,7 +256,7 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
       */}
       <DownloadTypeIcon type={release.row.downloadType} />
       <span id={filenameId} title={release.row.filename}>{release.row.filename}</span>{' '}
-      <span>{videoResolutionOf(release.row.filename) ?? 'unknown'}</span>
+      <span>{release.row.videoResolution ?? 'unknown'}</span>
       {score !== undefined && <span> {score}</span>}
       {release.downloads.map((download) => (
         <span key={downloadKey(download)}> {statusText(download)}</span>
