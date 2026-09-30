@@ -1,10 +1,10 @@
 /**
  * The one `fetch` every write path in the client makes (issue #94).
  *
- * Eleven `post*` functions used to each hold their own copy of the same
- * `try { fetch; response.json() } catch { offline }` block, inherited on
- * purpose because two earlier fix rounds learned that such a helper must
- * never throw. The copies carried a defect along with the lesson: none of
+ * Ten write functions, across seven files, used to each hold their own copy
+ * of the same `try { fetch; response.json() } catch { offline }` block,
+ * inherited on purpose because two earlier fix rounds learned that such a
+ * helper must never throw. The copies carried a defect along with the lesson: none of
  * them looked at a 401, so an expired session -- whose body is `{ error }`
  * with no `refusal` key -- fell into each path's `unrecognised` catch-all
  * and told the operator the host "may be a different version". This module
@@ -17,9 +17,9 @@
  *   `postDownloadClient` makes at length: every answer `api/server.ts` can
  *   produce under `/api` is JSON, so unparseable bytes came from something
  *   in front of Pickarr and the request did not reach the host. This is
- *   exactly what ten of the eleven helpers did with an unreadable body
- *   before they called this; `postFeedRemoval.ts` alone answered its own
- *   `unexpected` there and now answers `unreachable` like the rest.
+ *   exactly what eight of the ten did with an unreadable body before they
+ *   called this; `postFeedRemoval.ts`'s two answered their own `unexpected`
+ *   there and now answer `unreachable` like the rest.
  * - `expired` -- the host answered 401 (`session.ts`'s
  *   {@link isUnauthenticated}). Decided on the status, before the body is
  *   read, because the guard's 401 is the one answer whose meaning is its
