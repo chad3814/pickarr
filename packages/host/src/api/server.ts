@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, sixteen routes --
- * fourteen behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, eighteen routes --
+ * sixteen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -17,9 +17,12 @@
  * fifteen with `POST /api/mappings` and `/api/mappings/:id` -- the last of
  * those being one route answering two methods, so the route count and the
  * method count have stopped being the same number; the shape of the
- * sentence is what matters and has not changed -- and to sixteen with
+ * sentence is what matters and has not changed -- to sixteen with
  * `PUT /api/destinations/:pluginId`, the importer slice's, and the first
- * `PUT` this API has ever answered.)
+ * `PUT` this API has ever answered, to seventeen with `DELETE` and `PATCH
+ * /api/feeds/:id`, a second route answering two methods, and to eighteen
+ * with `POST /api/unmatched/:id/retry`, letting an operator ask for an
+ * unmatched release to be identified again.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -846,11 +849,12 @@ interface Route {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The sixteen routes -- fourteen guarded, two `open: true`, the same split
- * this module's own doc states. Sixteen *routes*, seventeen
- * route-and-method pairs: `/api/mappings/:id` is the one entry here that
- * declares two methods, so the two counts have parted company and a reader
- * counting "endpoints" will get a different number than `grep` does.
+ * The eighteen routes -- sixteen guarded, two `open: true`, the same split
+ * this module's own doc states. Eighteen *routes*, twenty
+ * route-and-method pairs: `/api/mappings/:id` and `/api/feeds/:id` are the
+ * two entries here that declare two methods each, so the two counts have
+ * parted company and a reader counting "endpoints" will get a different
+ * number than `grep` does.
  *
  * **It said "ten" until the final review counted them, and then "eleven"
  * for two slices while the table held twelve.** `POST /api/feeds` made
@@ -859,8 +863,10 @@ const STATIC_ROUTE_PATH = '/*';
  * predecessor said "six routes" and was wrong -- while missing this line;
  * the download-clients slice then added a twelfth and updated neither.
  * (The picks slice made it thirteen and corrected both; the mappings slice
- * made it fifteen and the importer slice sixteen. Measured with the `grep`
- * below on each occasion, not incremented on sight -- `16` on this tree.) That is not an argument for deleting the number:
+ * made it fifteen and the importer slice sixteen. The feed-removal slice
+ * made it seventeen and the retry slice eighteen, both missing this line
+ * too. Measured with the `grep` below on each occasion, not incremented on
+ * sight -- `18` on this tree.) That is not an argument for deleting the number:
  * a reader wants to know whether the table below is the whole set. It is
  * an argument for checking it, because no test pins the total and none
  * can usefully. The one count assertion in `api/server.test.ts` is

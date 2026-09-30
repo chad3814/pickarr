@@ -98,6 +98,18 @@ export function statusForDownloadClientRefusal(refusal: AddDownloadClientRefusal
  * -- never a message a human would read, and never the rss item id it was
  * asked about.
  */
+export function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
+  switch (refusal) {
+    case 'already-submitted':
+      return 409;
+    case 'unknown-release':
+    case 'plugin-not-registered':
+    case 'no-client-of-type':
+    case 'client-type-mismatch':
+      return 422;
+  }
+}
+
 /**
  * `POST /api/unmatched/:id/retry`'s three refusals.
  *
@@ -112,18 +124,6 @@ export function statusForRetryRefusal(refusal: Exclude<RetryLookupOutcome, { acc
       return 409;
     case 'unknown-release':
     case 'plugin-not-registered':
-      return 422;
-  }
-}
-
-export function statusForPickRefusal(refusal: PickRefusal['refusal']): number {
-  switch (refusal) {
-    case 'already-submitted':
-      return 409;
-    case 'unknown-release':
-    case 'plugin-not-registered':
-    case 'no-client-of-type':
-    case 'client-type-mismatch':
       return 422;
   }
 }

@@ -40,6 +40,16 @@ export const DIGITS = /^\d+$/;
 export const PLUGIN_ID = /^[a-z][a-z0-9_]{0,31}$/;
 
 /**
+ * The feed id in `/api/feeds/:id`, or `undefined` for a segment that cannot
+ * be one. Identical rules to {@link mappingIdFrom}, and a separate function
+ * rather than a shared one only so each route's 404 keeps naming its own
+ * resource in the reader's head; if a third arrives, share it.
+ */
+export function feedIdFrom(pathname: string): number | undefined {
+  return mappingIdFrom(pathname);
+}
+
+/**
  * The mapping id in `/api/mappings/:id`, or `undefined` for a segment that
  * is not one.
  *
@@ -89,16 +99,6 @@ export const PLUGIN_ID = /^[a-z][a-z0-9_]{0,31}$/;
  * route gets, so an unparseable id tells a caller nothing a missing row
  * would not have.
  */
-/**
- * The feed id in `/api/feeds/:id`, or `undefined` for a segment that cannot
- * be one. Identical rules to {@link mappingIdFrom}, and a separate function
- * rather than a shared one only so each route's 404 keeps naming its own
- * resource in the reader's head; if a third arrives, share it.
- */
-export function feedIdFrom(pathname: string): number | undefined {
-  return mappingIdFrom(pathname);
-}
-
 export function mappingIdFrom(pathname: string): number | undefined {
   return idAt(pathname, 4, 3);
 }
