@@ -7,14 +7,17 @@
  * cost an earlier slice a fix round:
  *
  * - **Never throws.** A rejected `fetch` and a body that fails to parse
- *   both answer `offline`; a body that parses but matches nothing known
- *   answers `unrecognised`. The caller invokes this from a click handler
+ *   both answer `offline`; a 401 answers `expired` (issue #94); a body
+ *   that parses but matches nothing known answers `unrecognised`. The
+ *   first two are decided by `auth/sendJson.ts`, which makes the request
+ *   for every write path. The caller invokes this from a click handler
  *   as `void retry()`, so a rejection would be swallowed and the button
  *   would sit disabled for ever -- exactly how the feeds slice wedged its
  *   form on five of six real host answers.
  * - **Branches on the body, never on `response.status`.** The route
  *   answers 202, 409 and 422 (`api/server.ts`'s `statusForRetryRefusal`);
- *   the codes are the stable contract and the statuses are not.
+ *   the codes are the stable contract and the statuses are not. The
+ *   guard's 401 is the one status read, once, in `sendJson`.
  * - **The codes are imported, never spelled again.**
  *   `RETRY_LOOKUP_REFUSALS` is the contract's list; a second spelling
  *   drifts silently, because renaming one half reddens only that half's
@@ -30,15 +33,17 @@
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on the request; this module never reads, stores or
  * forwards the token itself (Global Constraint). Nothing here logs, and
- * the `catch` inspects no error: a `TypeError` from a rejected `fetch`
- * names the url.
+ * `sendJson`'s `catch` inspects no error: a `TypeError` from a rejected
+ * `fetch` names the url.
  */
 import { RETRY_LOOKUP_REFUSALS, type RetryLookupRefusalCode } from '@pickarr/contract';
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 /** What a retry resolves to. Never a thrown error -- see this file's docblock. */
 export type RetryOutcome =
   | { readonly accepted: true }
-  | { readonly refusal: RetryLookupRefusalCode | 'offline' | 'unrecognised' };
+  | { readonly refusal: RetryLookupRefusalCode | 'offline' | 'expired' | 'unrecognised' };
 
 /**
  * A fixed sentence per outcome this client can show -- never the server's
@@ -49,11 +54,12 @@ export type RetryOutcome =
  * click, so the operator's page is merely stale and the thing they wanted
  * has already happened.
  */
-export const RETRY_REFUSAL_MESSAGES: Record<RetryLookupRefusalCode | 'offline' | 'unrecognised', string> = {
+export const RETRY_REFUSAL_MESSAGES: Record<RetryLookupRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
   'unknown-release': 'Pickarr no longer has that release on file. Reload the page and try again.',
   'already-matched': 'That release has already been identified — reload to see what it matched.',
   'plugin-not-registered': 'No plugin in this Pickarr handles that kind of media, so nothing can identify this release.',
   offline: 'Could not reach Pickarr. Check your connection and try again.',
+  expired: SESSION_EXPIRED_MESSAGE,
   unrecognised:
     'Pickarr refused the retry, but did not say why. The host may be a different version than this page expects — reload and try again.',
 };
@@ -73,19 +79,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Asks for release `rssItemId` to be identified again. Never throws. */
 export async function postRetry(rssItemId: number): Promise<RetryOutcome> {
-  let body: unknown;
-  try {
-    // The id is in the path and there is no body: this route acts on one
-    // release and has nothing else to say about it, unlike `/api/picks`,
-    // which takes `{ rssItemId }` because it is about picks in general.
-    const response = await fetch(`/api/unmatched/${String(rssItemId)}/retry`, {
-      method: 'POST',
-      credentials: 'same-origin',
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
+  // The id is in the path and there is no body: this route acts on one
+  // release and has nothing else to say about it, unlike `/api/picks`,
+  // which takes `{ rssItemId }` because it is about picks in general.
+  const result = await sendJson(`/api/unmatched/${String(rssItemId)}/retry`, { method: 'POST' });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  const { body } = result;
   if (isRecord(body) && body.accepted === true) return { accepted: true };
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };

@@ -1,5 +1,15 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { DownloadClients, DownloadedFile, JobHandler, MediaPlugin, PluginContext } from '@pickarr/contract';
+import type {
+  AddDownloadClientInput,
+  AddFeedInput,
+  AddMappingInput,
+  DownloadClients,
+  DownloadedFile,
+  EditMappingInput,
+  JobHandler,
+  MediaPlugin,
+  PluginContext,
+} from '@pickarr/contract';
 import { createArtworkStore } from './artwork/store.ts';
 import type { HostDb } from './db/open.ts';
 import { migratePlugin } from './db/migrate.ts';
@@ -21,9 +31,9 @@ import {
   type FeedRefusal,
   type RemoveFeedOutcome,
 } from './feeds/remove.ts';
-import type { AddFeedInput, AddFeedRefusal } from './feeds/add.ts';
+import type { AddFeedRefusal } from './feeds/add.ts';
 import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
-import type { AddDownloadClientInput, AddDownloadClientRefusal } from './clients/add.ts';
+import type { AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
 import { retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
@@ -32,7 +42,7 @@ import {
   editMapping as editMappingRule,
   removeMapping as removeMappingRule,
 } from './clients/mappings.ts';
-import type { AddMappingInput, EditMappingInput, MappingRefusal } from './clients/mappings.ts';
+import type { MappingRefusal } from './clients/mappings.ts';
 import { saveDestination as saveDestinationRule } from './media/destinations.ts';
 import type { DestinationRefusal, SaveDestinationInput } from './media/destinations.ts';
 import { installSyncTriggers, seedSyncLogOnce } from './sync/log.ts';

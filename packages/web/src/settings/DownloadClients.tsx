@@ -44,16 +44,12 @@
  * honestly available.
  */
 import type { ReactElement } from 'react';
+import type { AddDownloadClientInput } from '@pickarr/contract';
 import { useDownloadClients, type DownloadClientsSource } from './useDownloadClients.ts';
 import { ClientMappings } from './ClientMappings.tsx';
 import type { ClientMappingsSource } from './useClientMappings.ts';
 import type { MappingSubmit } from './postMapping.ts';
-import {
-  AddDownloadClient,
-  implementationLabel,
-  type AddDownloadClientInput,
-  type AddDownloadClientOutcome,
-} from './AddDownloadClient.tsx';
+import { AddDownloadClient, implementationLabel, type AddDownloadClientOutcome } from './AddDownloadClient.tsx';
 
 /** Re-exported so a caller of this section needs one import, not two -- `useDownloadClients.ts` is where it is declared, since that hook is what needs it narrowed. */
 export type { DownloadClientsSource };

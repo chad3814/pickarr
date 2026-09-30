@@ -11,8 +11,11 @@
  * the delete, argued at {@link deleteMapping}.
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `{ refusal: 'offline' }`; a body that parses but matches neither
- * a success shape nor a known refusal answers `{ refusal: 'unrecognised' }`.
+ * answer `{ refusal: 'offline' }`; a 401 answers `{ refusal: 'expired' }`
+ * (issue #94); a body that parses but matches neither a success shape nor
+ * a known refusal answers `{ refusal: 'unrecognised' }`. The first two are
+ * decided by `auth/sendJson.ts`, which makes the request for every write
+ * path.
  * The feeds slice shipped a sibling that threw, and because its caller
  * invoked it as `void handleSubmit(event)` the rejection was swallowed:
  * the pending flag never cleared and the form wedged on five of six real
@@ -31,8 +34,8 @@
  *
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on each request; nothing here reads, stores or forwards
- * the token itself (Global Constraint). Nothing here logs, and no `catch`
- * inspects its error: a `TypeError` from a rejected `fetch` names the url,
+ * the token itself (Global Constraint). Nothing here logs, and `sendJson`'s
+ * `catch` inspects no error: a `TypeError` from a rejected `fetch` names the url,
  * and a caught error's message is the classic way a request's detail
  * reaches a console.
  *
@@ -47,51 +50,29 @@
  * this one. Nothing here trims, normalises or flips a separator -- a
  * writer stricter than the consumer refuses mappings that work.
  */
-import { MAPPING_REFUSALS, type MappingRefusalCode } from '@pickarr/contract';
-
-/**
- * The wire shape `POST /api/mappings` needs -- mirrored from
- * `packages/host/src/clients/mappings.ts`'s own `AddMappingInput` rather
- * than imported, for the reason `AddDownloadClient.tsx`'s twin gives: this
- * package ships to a browser and only needs to agree with the host on the
- * JSON that crosses the wire.
- */
-export interface AddMappingInput {
-  downloadClientId: number;
-  fromPath: string;
-  toPath: string;
-}
-
-/**
- * The wire shape `PATCH /api/mappings/:id` needs: both paths, and no
- * `downloadClientId`.
- *
- * The client a mapping belongs to is not editable at all -- a mapping is
- * meaningless away from its client (design spec §8) -- and the id is the
- * path segment rather than a body field, so there is no way for a body to
- * name one row while the url names another. Both paths are required
- * rather than optional because the host replaces both columns and an
- * omitted field would be a second spelling of "leave it alone"
- * (`api/server.ts`'s `isMappingEditBody`).
- */
-export interface EditMappingInput {
-  fromPath: string;
-  toPath: string;
-}
+import {
+  type AddMappingInput,
+  type EditMappingInput,
+  MAPPING_REFUSALS,
+  type MappingRefusalCode,
+} from '@pickarr/contract';
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 /**
  * Every way one of these three writes can fail to do what was asked.
  *
  * `offline` is this client's own outcome for a request that never reached
- * the host, and `unrecognised` its outcome for an answer it cannot read --
- * a refusal code this build has never heard of, or a body with no
- * `refusal` key at all. That last shape is the most ordinary real failure
- * there is: a 401 from an expired session answers `{ error }`, as do 405,
- * 413 and 500, and none of them carries a `refusal`. A client is routinely
- * older than its host, so neither of these two is a defect in either side.
+ * the host; `expired` its outcome for a 401, the session behind the request
+ * having ended (issue #94 -- it used to share `unrecognised`, whose sentence
+ * blamed version skew); and `unrecognised` its outcome for an answer it
+ * cannot read -- a refusal code this build has never heard of, or a body
+ * with no `refusal` key at all, as a 405, 413 and 500 answer. A client is
+ * routinely older than its host, so none of these is a defect in either
+ * side.
  */
 export interface MappingRefusal {
-  refusal: MappingRefusalCode | 'offline' | 'unrecognised';
+  refusal: MappingRefusalCode | 'offline' | 'expired' | 'unrecognised';
 }
 
 /** An accepted add: the id the host gave the new row. */
@@ -150,38 +131,25 @@ function outcomeFromBody(body: unknown): AddMappingOutcome {
   return { refusal: 'unrecognised' };
 }
 
-/** Adds a mapping to `input.downloadClientId`. See this file's docblock; in particular, this never throws. */
+/**
+ * Adds a mapping to `input.downloadClientId`. See this file's docblock;
+ * in particular, this never throws.
+ *
+ * `AddMappingInput` and `EditMappingInput` are `@pickarr/contract`'s now
+ * (issue #88) -- that module's own doc has the full reasoning, including
+ * why `EditMappingInput` requires both paths rather than a sparse patch.
+ */
 export async function postMapping(input: AddMappingInput): Promise<AddMappingOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch('/api/mappings', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
-  return outcomeFromBody(body);
+  const result = await sendJson('/api/mappings', { method: 'POST', body: input });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  return outcomeFromBody(result.body);
 }
 
 /** Replaces both of mapping `id`'s paths. Never throws; see this file's docblock. */
 export async function patchMapping(id: number, input: EditMappingInput): Promise<EditMappingOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch(mappingUrl(id), {
-      method: 'PATCH',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
-  return outcomeFromBody(body);
+  const result = await sendJson(mappingUrl(id), { method: 'PATCH', body: input });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  return outcomeFromBody(result.body);
 }
 
 /**
@@ -197,7 +165,8 @@ export async function patchMapping(id: number, input: EditMappingInput): Promise
  * unconditional parse would report the removal that just happened as
  * `offline` -- telling the operator to check their connection about a
  * mapping the host has already dropped. The status is the only evidence
- * there is.
+ * there is. `sendJson` knows this too: it answers a 204 with no body
+ * rather than trying to read one.
  *
  * What that costs, stated rather than glossed: a 204 from something in
  * front of Pickarr would read as a removal. That is a narrower exposure
@@ -208,20 +177,11 @@ export async function patchMapping(id: number, input: EditMappingInput): Promise
  * Every non-204 answer is read exactly as the other two read theirs.
  */
 export async function deleteMapping(id: number): Promise<RemoveMappingOutcome> {
-  let response: Response;
-  try {
-    response = await fetch(mappingUrl(id), { method: 'DELETE', credentials: 'same-origin' });
-  } catch {
-    return { refusal: 'offline' };
-  }
-  if (response.status === 204) return { removed: true };
+  const result = await sendJson(mappingUrl(id), { method: 'DELETE' });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  if (result.status === 204) return { removed: true };
 
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
+  const { body } = result;
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };
 }
@@ -242,13 +202,13 @@ export const mappingSubmit: MappingSubmit = {
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own
- * words (Global Constraint). One map covers all six, `offline` and
- * `unrecognised` included, so the three controls below have no special
+ * words (Global Constraint). One map covers all seven, `offline`,
+ * `expired` and `unrecognised` included, so the three controls below have no special
  * case to get wrong between them and no two of them can word the same
  * outcome differently.
  *
  * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's four codes plus this client's own two, so a code added to
+ * the contract's four codes plus this client's own three, so a code added to
  * `MAPPING_REFUSALS` fails to compile here until someone writes the
  * sentence for it, and a code renamed there fails twice -- an unwritten
  * key and an unreachable one. The two tests at the top of
@@ -280,7 +240,7 @@ export const mappingSubmit: MappingSubmit = {
  * naming the other mapping, rather than "the existing" one, is true and
  * actionable from both forms.
  */
-export const MAPPING_REFUSAL_MESSAGES: Record<MappingRefusalCode | 'offline' | 'unrecognised', string> = {
+export const MAPPING_REFUSAL_MESSAGES: Record<MappingRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
   'unknown-client': 'Pickarr no longer has that download client on file. Reload the page and try again.',
   'duplicate-from-path':
     'This download client already maps that client path. Change the mapping that already has it, or use a different client path.',
@@ -288,6 +248,8 @@ export const MAPPING_REFUSAL_MESSAGES: Record<MappingRefusalCode | 'offline' | '
   'empty-path': 'Fill in both paths. Neither the client path nor the host path may be left blank.',
   /** Distinct from every named refusal above, which are answers from the host -- this one means the request never reached it. Worded exactly as `AddDownloadClient.tsx`'s own `offline`, because it is the same event and a second wording for it would be two sentences for one condition. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
+  /** A 401. One sentence shared by every write path (`auth/sessionExpired.ts`), so no two can word it differently. */
+  expired: SESSION_EXPIRED_MESSAGE,
   /** The catch-all the three functions above share. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised:
     'Pickarr refused this path mapping, but did not say why. The host may be a different version than this page expects — reload and try again.',

@@ -23,23 +23,31 @@
  * render of this form holds nothing.
  *
  * **What is mirrored from the host and what is imported.**
- * {@link ADD_DOWNLOAD_CLIENT_REFUSALS} is imported from
- * `@pickarr/contract`, because a refusal code is the wire's shared
- * vocabulary and a second spelling of it drifts silently -- the feeds slice
- * shipped one and the final review measured a host-side rename leaving all
- * 100 web tests green. {@link IMPLEMENTATIONS} and
- * {@link AUTH_STRATEGIES} are mirrored from `clients/config.ts` and
- * `clients/add.ts`'s `planCredential` instead, on `AddFeed.tsx`'s own
- * distinction: they are host *policy* this widget hints at. If the host
- * grew a third implementation and this select still offered two, an
- * operator would simply not see the new one here, and anything this form
- * did offer that the host does not support comes back as
- * `unknown-implementation` -- the right sentence, from the right authority.
- * A drifting refusal code, by contrast, makes this form say the wrong
- * thing with nothing to notice it.
+ * {@link ADD_DOWNLOAD_CLIENT_REFUSALS} and `AddDownloadClientInput` are
+ * both imported from `@pickarr/contract`, because a refusal code and a
+ * write input are both the wire's shared vocabulary and a second spelling
+ * of either drifts silently -- the feeds slice shipped a hand-copied
+ * `AddFeedInput` and the follow-up review measured a host-side field
+ * rename leaving the entire web suite green (issue #88).
+ * {@link IMPLEMENTATIONS} and {@link AUTH_STRATEGIES} are mirrored from
+ * `clients/config.ts` and `clients/add.ts`'s `planCredential` instead, on
+ * `AddFeed.tsx`'s own distinction: they are host *policy* this widget
+ * hints at. If the host grew a third implementation and this select still
+ * offered two, an operator would simply not see the new one here, and
+ * anything this form did offer that the host does not support comes back
+ * as `unknown-implementation` -- the right sentence, from the right
+ * authority. A drifting refusal code or input field, by contrast, makes
+ * this form say the wrong thing, or fail every submission, with nothing
+ * to notice it at the type level.
  */
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, type AddDownloadClientRefusalCode } from '@pickarr/contract';
+import {
+  ADD_DOWNLOAD_CLIENT_REFUSALS,
+  type AddDownloadClientInput,
+  type AddDownloadClientRefusalCode,
+} from '@pickarr/contract';
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 /**
  * The implementations `clients/config.ts`'s `isImplementation` resolves --
@@ -101,34 +109,6 @@ const AUTH_STRATEGY_LABELS: Readonly<Record<AuthStrategy, string>> = {
   login: 'Username and password',
 };
 
-/**
- * The wire shape `POST /api/download-clients` needs -- mirrored from
- * `packages/host/src/clients/add.ts`'s own `AddDownloadClientInput` rather
- * than imported, for the reason `AddFeed.tsx`'s twin gives: this package
- * ships to a browser and only needs to agree with the host on the JSON that
- * crosses the wire.
- *
- * **Every credential field is present on every request, and an unsupplied
- * one is `''`.** The host reads a blank field as "this strategy sends no
- * such credential" and decides the auth shape from which of the three are
- * blank, so omitting one would arrive as `undefined` and be read as a shape
- * the operator never chose (`api/server.ts`'s `isDownloadClientBody`).
- *
- * **`type` is absent and is never sent.** The host derives it from
- * `implementation` (design spec §4, §8.3), because `readClientConfig`
- * treats a mismatch as fatal -- so sending one would be offering to build a
- * row that can never work.
- */
-export interface AddDownloadClientInput {
-  name: string;
-  implementation: string;
-  url: string;
-  category: string;
-  apiKey: string;
-  username: string;
-  password: string;
-}
-
 /** A refusal the host actually sent, carrying one of the four codes `@pickarr/contract` declares -- the same declaration `clients/add.ts`'s own `AddDownloadClientRefusal` is built from, so the two cannot drift. */
 export interface AddDownloadClientRefusal {
   refusal: AddDownloadClientRefusalCode;
@@ -145,20 +125,24 @@ export interface AddDownloadClientRefusal {
  * "already on file" would send the operator hunting for a client that is
  * not there.
  *
+ * `expired` is a 401 -- an expired session, the most ordinary failure a
+ * real submit meets (issue #94). It used to fall into `unrecognised`, whose
+ * sentence blamed version skew; `auth/sendJson.ts` now answers it on the
+ * status, and the shell returns to sign-in on it.
+ *
  * **`unrecognised` is a normal outcome, not a should-not-happen one.**
  * `POST /api/download-clients` answers `{ id }`, or `{ refusal }` with one
  * of six codes (the contract's four plus the route's own `invalid-shape`
  * and `malformed-body`), or a bare `{ error }` with no `refusal` key at all
- * for a 401 -- an expired session, the most ordinary failure a real submit
- * meets -- a 405, a 413 or a 500. A client is routinely older than its
- * host, so a code this build has never heard of is as normal as a body it
- * cannot parse, and neither is a defect in either side. `unrecognised`
- * covers both.
+ * for a 405, a 413 or a 500. A client is routinely older than its host, so
+ * a code this build has never heard of is a normal answer, not a defect in
+ * either side. `unrecognised` covers every parseable answer this build
+ * cannot read.
  */
 export type AddDownloadClientOutcome =
   | { id: number }
   | AddDownloadClientRefusal
-  | { refusal: 'offline' | 'unrecognised' };
+  | { refusal: 'offline' | 'expired' | 'unrecognised' };
 
 /**
  * The codes this client recognises, built from the contract's list rather
@@ -183,22 +167,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * **Branches on the body's `refusal` field, never on the HTTP status.**
  * The route answers 409 for `duplicate-name` and 422 for the other three
  * today (`api/server.ts`'s `statusForDownloadClientRefusal`); the codes are
- * the stable contract and the statuses are not. `response.status` is never
- * read here.
+ * the stable contract and the statuses are not. No status is read here;
+ * the guard's 401 is read once in `auth/sendJson.ts` for every write path.
  *
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on the request; this function never reads, stores or
  * forwards the token itself (Global Constraint).
  *
  * **This is the one place a credential leaves the browser**, inside
- * `body`. Nothing here logs, and in particular the `catch` below inspects
- * no error: a `TypeError` from a rejected `fetch` names the url, and a
+ * `body`. Nothing here logs, and in particular `sendJson`'s `catch`
+ * inspects no error: a `TypeError` from a rejected `fetch` names the url, and a
  * caught error's message is the classic way a request's detail reaches a
  * console.
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `{ refusal: 'offline' }`; a body that parses but matches neither
- * an accepted id nor a known refusal answers `{ refusal: 'unrecognised' }`.
+ * answer `{ refusal: 'offline' }`; a 401 answers `{ refusal: 'expired' }`;
+ * a body that parses but matches neither an accepted id nor a known refusal
+ * answers `{ refusal: 'unrecognised' }`. The first two are decided by
+ * `auth/sendJson.ts`, which makes the request for every write path; the
+ * argument below is why it decides an unparseable body the way it does.
  *
  * **Why an unparseable body is `offline` and not `unrecognised`**, since
  * the two are one `await` apart inside the same `try` and the reason this
@@ -228,20 +215,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * disabled and nothing on screen. Never reads `error` or any field beyond
  * `id`/`refusal`: a server-authored message never reaches a human here
  * (Global Constraint).
+ *
+ * `AddDownloadClientInput` is `@pickarr/contract`'s now (issue #88) --
+ * that module's own doc has the full reasoning, including the credential
+ * and `type`-omission rules this function relies on to build the request
+ * body.
  */
 export async function postDownloadClient(input: AddDownloadClientInput): Promise<AddDownloadClientOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch('/api/download-clients', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
+  const result = await sendJson('/api/download-clients', { method: 'POST', body: input });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  const { body } = result;
   if (isRecord(body) && typeof body.id === 'number') return { id: body.id };
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };
@@ -249,12 +232,12 @@ export async function postDownloadClient(input: AddDownloadClientInput): Promise
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all six, `offline` and `unrecognised`
- * included, so `handleSubmit` below has no special case to get wrong
+ * (Global Constraint). One map covers all seven, `offline`, `expired` and
+ * `unrecognised` included, so `handleSubmit` below has no special case to get wrong
  * between them.
  *
  * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's four codes plus this client's own two, so a code added to
+ * the contract's four codes plus this client's own three, so a code added to
  * `ADD_DOWNLOAD_CLIENT_REFUSALS` fails to compile here until someone writes
  * the sentence for it, and a code renamed there fails twice -- an unwritten
  * key and an unreachable one. `AddDownloadClient.test.tsx`'s two
@@ -265,13 +248,15 @@ export async function postDownloadClient(input: AddDownloadClientInput): Promise
  * none can name a credential: each says which rule was broken. That is the
  * same discipline `clients/add.ts` keeps on the other side of the wire.
  */
-export const REFUSAL_MESSAGES: Record<AddDownloadClientRefusalCode | 'offline' | 'unrecognised', string> = {
+export const REFUSAL_MESSAGES: Record<AddDownloadClientRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
   'unknown-implementation': 'Pickarr cannot drive that kind of download client.',
   'bad-auth-shape': 'Fill in exactly one set of credentials: an api key, or a username and password.',
   'duplicate-name': 'A download client with that name is already on file.',
   'bad-url': 'That address is not an http or https url.',
   /** Distinct from every named refusal above, which are answers from the host -- this one means the submit never reached it. The first clause is the load-bearing half: "could not reach Pickarr" is true of a rejected `fetch` and of a gateway answering in Pickarr's place alike, where "check your connection" is advice that happens to fit the first case better than the second. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
+  /** A 401. One sentence shared by every write path (`auth/sessionExpired.ts`), so no two can word it differently. */
+  expired: SESSION_EXPIRED_MESSAGE,
   /** `postDownloadClient`'s own catch-all. Names no code and no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised:
     'Pickarr refused this download client, but did not say why. The host may be a different version than this page expects — reload and try again.',

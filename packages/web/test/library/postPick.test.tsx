@@ -31,7 +31,7 @@ afterEach(() => {
  */
 test('the refusal codes the pick button has sentences for are exactly the codes the contract declares', () => {
   const spoken = Object.keys(PICK_REFUSAL_MESSAGES)
-    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .filter((key) => key !== 'offline' && key !== 'expired' && key !== 'unrecognised')
     .toSorted();
 
   assert.deepEqual(spoken, [...REQUEST_PICK_REFUSALS].toSorted(),
@@ -50,7 +50,7 @@ test('no pick refusal borrows another one\'s sentence', () => {
   const sentences = Object.values(PICK_REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 7, 'the contract\'s five, plus offline and unrecognised');
+  assert.equal(sentences.length, 8, 'the contract\'s five, plus offline, expired and unrecognised');
 });
 
 test('postPick reports an accepted pick', async () => {
@@ -135,15 +135,23 @@ test('postPick never reads a server-authored message off the body', async () => 
 });
 
 /**
- * A 401 (an expired session -- the most ordinary failure a real submit
- * meets, and the one shape that carries no `refusal` key at all), the
- * route's own envelope refusals, a 500, and a refusal code this build has
- * never heard of. Every one resolves rather than throws: a client is
+ * A 401 is an expired session -- the most ordinary failure a real submit
+ * meets, and one shape that carries no `refusal` key at all. It has its own
+ * outcome (issue #94) rather than the version-skew catch-all below.
+ */
+test('postPick reports "expired" for a 401, not "unrecognised", and never throws', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await postPick(7), { refusal: 'expired' });
+  assert.equal(PICK_REFUSAL_MESSAGES.expired, 'Your session expired. Sign in again.');
+});
+
+/**
+ * The route's own envelope refusals, a 500, and a refusal code this build
+ * has never heard of. Every one resolves rather than throws: a client is
  * routinely older than its host.
  */
 test('postPick reports "unrecognised" for every answer it cannot read, never a throw', async () => {
   const unreadable: readonly { body: unknown; status: number }[] = [
-    { body: { error: 'unauthorized' }, status: 401 },
     { body: { error: 'method not allowed' }, status: 405 },
     { body: { error: 'body too large' }, status: 413 },
     { body: { error: 'internal error' }, status: 500 },

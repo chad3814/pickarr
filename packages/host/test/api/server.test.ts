@@ -12,22 +12,27 @@ import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
-import type { AddFeedInput } from '../../src/feeds/add.ts';
-import type { AddDownloadClientInput } from '../../src/clients/add.ts';
 import type { MappingRefusal } from '../../src/clients/mappings.ts';
-import { ADD_DOWNLOAD_CLIENT_REFUSALS, DESTINATION_REFUSALS, MAPPING_REFUSALS, REQUEST_PICK_REFUSALS } from '@pickarr/contract';
+import {
+  ADD_DOWNLOAD_CLIENT_REFUSALS,
+  type AddDownloadClientInput,
+  type AddFeedInput,
+  DESTINATION_REFUSALS,
+  MAPPING_REFUSALS,
+  REQUEST_PICK_REFUSALS,
+} from '@pickarr/contract';
 import type { DestinationRefusalCode } from '@pickarr/contract';
 import { shippedPlugins } from '../../src/main.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
 import type { ReadServer, ReadServerDeps } from '../../src/api/server.ts';
 import type { RetryLookupOutcome } from '../../src/media/retry.ts';
+import { MAX_BODY_BYTES } from '../../src/api/body.ts';
 import {
   API_VERSION,
   CONNECTIONS_CHECK_MS,
   DEFAULT_HOST,
   DEFAULT_PORT,
-  MAX_BODY_BYTES,
   REQUEST_TIMEOUT_MS,
   ROUTES,
   createReadServer,
@@ -899,10 +904,18 @@ test('a read that throws answers 500 with no url, path or query in the body', as
 
   // And a genuinely failing query, not only a failing mapping: the same fixed
   // body, with the table the statement named nowhere in it.
+  //
+  // The drop happens after `startSignedIn`, not before: `createSyncRegistry`
+  // (built during startup) now refuses a table that does not exist under its
+  // own `assertIntegerIdKey` error, so dropping `media_item` first would fail
+  // startup itself rather than reach the query this test is actually about.
+  // Dropping it once the server is already up leaves the registry already
+  // built against a `media_item` that still existed, and the query below
+  // fails on its own, undisguised `no such table`.
   const broken = setup();
   seedMediaItem(broken.raw, 'alpha', 1000, 'Recognisable Fixture Title');
-  broken.raw.exec('DROP TABLE media_item');
   const failing = await startSignedIn(broken.raw, broken.db, moviesOnly);
+  broken.raw.exec('DROP TABLE media_item');
   try {
     const response = await get(failing.server, '/api/media?type=movie', failing.cookie);
     assert.equal(response.status, 500);

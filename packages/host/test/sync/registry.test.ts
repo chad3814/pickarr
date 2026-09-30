@@ -139,6 +139,23 @@ test('assertIntegerIdKey refuses a table with a composite primary key', () => {
   assert.throws(() => { assertIntegerIdKey(raw, 'tv_composite'); }, /tv_composite/);
 });
 
+/**
+ * A table that does not exist at all answers zero rows from
+ * `PRAGMA table_info`, the same as a real table with no primary key -- so
+ * this is checked separately, and refused under its own message rather than
+ * misreported as one keyed wrong. `api/server.test.ts`'s "a read that throws
+ * answers 500" test drops a host synced table on purpose, but only *after*
+ * `createSyncRegistry` has already run against it while it still existed, so
+ * this throw is never reached on that path.
+ */
+test('assertIntegerIdKey refuses a table that does not exist, distinctly from one keyed wrong', () => {
+  const raw = open();
+  assert.throws(
+    () => { assertIntegerIdKey(raw, 'tv_never_created'); },
+    /sync: table "tv_never_created" does not exist/,
+  );
+});
+
 // Narrowed from "...before any trigger is installed": `createSyncRegistry`
 // never installs a trigger itself, and this test never builds one -- the
 // claim this file can actually prove is about the registry's own
@@ -151,4 +168,20 @@ test('createSyncRegistry refuses a synced table keyed wrong, via assertSyncable'
   raw.exec('CREATE TABLE tv_wrong_key (uuid TEXT PRIMARY KEY)');
   const plugin = fakePlugin('tv', [fakeTable('tv_wrong_key', {})]);
   assert.throws(() => createSyncRegistry(raw, [plugin]), /tv_wrong_key/);
+});
+
+/**
+ * `assertSyncable`'s callers all iterate `plugin.synced` -- `HOST_SYNCED_TABLES`
+ * is concatenated in after that loop (issue #102), so a host synced table
+ * with a natural key used to skip this guard entirely and fail only at the
+ * first `INSERT`, with SQLite's own `no such column: NEW.id` naming no
+ * table and no reason. `filepath_mapping` has nothing else's foreign key
+ * pointing at it, so rebuilding it here with a wrong key, after the real
+ * migrations have run, is safe.
+ */
+test('createSyncRegistry refuses a host synced table keyed wrong too, not only a plugin one', () => {
+  const raw = open();
+  raw.exec('DROP TABLE filepath_mapping');
+  raw.exec('CREATE TABLE filepath_mapping (uuid TEXT PRIMARY KEY)');
+  assert.throws(() => createSyncRegistry(raw, []), /filepath_mapping/);
 });

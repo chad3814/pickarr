@@ -50,7 +50,9 @@ function hostSchemaTableNames(): ReadonlySet<string> {
 }
 
 /**
- * Refuses a table whose primary key is not exactly one column named `id`.
+ * Refuses a table whose primary key is not exactly one column named `id`,
+ * and refuses a table that does not exist at all under its own distinct
+ * error.
  *
  * `syncTriggerSql` (`sync/log.ts`) reads `NEW.id`/`OLD.id` unconditionally --
  * a table keyed by something else, or by more than one column, would install
@@ -58,8 +60,26 @@ function hostSchemaTableNames(): ReadonlySet<string> {
  * changes. Checking here means that failure happens at declaration, in a
  * place a developer is looking, rather than at a write nobody suspected
  * (design spec §7.16).
+ *
+ * **Checked separately from the primary-key shape, since issue #102 widened
+ * this to run on every `HOST_SYNCED_TABLES` entry too.** `PRAGMA table_info`
+ * on a missing table answers zero rows -- indistinguishable, from there, from
+ * a real table with no declared primary key -- so a table that does not
+ * exist would otherwise be misreported as one keyed wrong. It used to be
+ * treated as a no-op instead, on the theory that a missing table already
+ * fails its own way at `CREATE TRIGGER` or at the query itself; that stayed
+ * silent for every *other* caller of this function, not only the one test
+ * that needed it, so a plugin that misspelled a table name learned about it
+ * from SQLite's own undecorated `no such table` rather than from this guard
+ * naming the table it declared. `test/sync/registry.test.ts` pins the
+ * distinct message this throws now instead.
  */
 export function assertIntegerIdKey(raw: DatabaseSync, table: string): void {
+  const exists = raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table);
+  if (!exists) {
+    throw new Error(`sync: table ${JSON.stringify(table)} does not exist`);
+  }
   const pk = raw.prepare(`PRAGMA table_info(${table})`).all()
     .filter((row) => Number((row as { pk: unknown }).pk) > 0)
     .map((row) => String((row as { name: unknown }).name));
@@ -130,8 +150,19 @@ export function assertSyncable(raw: DatabaseSync, pluginId: string, table: strin
  * rather than checked one at a time. The message does not say "two plugins",
  * because one plugin listing a table twice in its own `synced` array trips
  * this too.
+ *
+ * **`HOST_SYNCED_TABLES` gets the lone-`id` check too, not only a plugin's
+ * tables.** Issue #102: `assertSyncable`'s loop above only ever sees
+ * `plugin.synced`, so a host table keyed by something other than `id` used
+ * to reach `installSyncTriggers` unchecked and fail only at the first
+ * `INSERT`, with SQLite's own `no such column: NEW.id` naming neither the
+ * table nor the reason. Every shipped entry in `HOST_SYNCED_TABLES` does
+ * have a lone `id` column today -- this is a guard against the list ever
+ * gaining one that does not, not a fix for a reachable failure.
  */
 export function createSyncRegistry(raw: DatabaseSync, plugins: readonly MediaPlugin[]): SyncRegistry {
+  for (const table of HOST_SYNCED_TABLES) assertIntegerIdKey(raw, table);
+
   const owned = new Map<string, SyncedTable<unknown>>();
 
   for (const plugin of plugins) {

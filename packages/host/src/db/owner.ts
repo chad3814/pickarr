@@ -17,7 +17,7 @@ export function ownerPluginId(raw: DatabaseSync, rssItemId: number): string | un
      WHERE rss_item.id = ?
   `).get(rssItemId);
   if (!row) return undefined;
-  return String((row as { plugin_id: unknown }).plugin_id);
+  return String(row['plugin_id']);
 }
 
 /**
@@ -46,8 +46,7 @@ export function mediaItemIdForRssItem(raw: DatabaseSync, rssItemId: number): num
   // one: `node:sqlite` already types a row as
   // `Record<string, SQLOutputValue>`, so indexing it compiles on its own
   // and the assertion bought nothing but a second, unchecked spelling of
-  // the column name. `ownerPluginId` above still carries the older
-  // spelling and predates this branch.
+  // the column name.
   //
   // The null is tested before the conversion, not after: `Number(null)` is
   // 0, and a 0 here reads as a media item this release matched.

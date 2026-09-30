@@ -37,7 +37,7 @@ afterEach(() => {
  */
 test('the refusal codes the mapping controls have sentences for are exactly the codes the contract declares', () => {
   const spoken = Object.keys(MAPPING_REFUSAL_MESSAGES)
-    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .filter((key) => key !== 'offline' && key !== 'expired' && key !== 'unrecognised')
     .toSorted();
 
   assert.deepEqual(spoken, [...MAPPING_REFUSALS].toSorted(),
@@ -55,7 +55,7 @@ test('no mapping refusal borrows another one\'s sentence', () => {
   const sentences = Object.values(MAPPING_REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 6, 'the contract\'s four, plus offline and unrecognised');
+  assert.equal(sentences.length, 7, 'the contract\'s four, plus offline, expired and unrecognised');
 });
 
 test('postMapping reports the id of an accepted mapping', async () => {
@@ -87,11 +87,20 @@ test('a 201 carrying no id is not an acceptance this client will claim', async (
     { refusal: 'unrecognised' });
 });
 
-test('a bare { error } with no refusal key -- the expired session -- reads as unrecognised, not as a refusal', async () => {
-  // The most ordinary real failure there is, and the one shape that must
-  // not wedge anything: 401, 405, 413 and 500 all answer `{ error }` and
-  // none of them carries a `refusal`.
+test('a 401 -- the expired session -- reads as expired on the add and the edit, not as the version-skew catch-all', async () => {
+  // The most ordinary real failure there is (issue #94). It used to land in
+  // `unrecognised`, whose sentence blamed a version mismatch.
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await postMapping({ downloadClientId: 3, fromPath: '/a', toPath: '/b' }),
+    { refusal: 'expired' });
+  assert.deepEqual(await patchMapping(3, { fromPath: '/a', toPath: '/b' }), { refusal: 'expired' });
+  assert.equal(MAPPING_REFUSAL_MESSAGES.expired, 'Your session expired. Sign in again.');
+});
+
+test('a bare { error } with no refusal key on any other status reads as unrecognised, not as a refusal', async () => {
+  // The shape that must not wedge anything: 405, 413 and 500 all answer
+  // `{ error }` and none of them carries a `refusal`.
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'internal' }, 500)));
   assert.deepEqual(await postMapping({ downloadClientId: 3, fromPath: '/a', toPath: '/b' }),
     { refusal: 'unrecognised' });
 });
@@ -215,9 +224,9 @@ test('deleteMapping reports offline for a rejected fetch and for bytes it cannot
   assert.deepEqual(await deleteMapping(41), { refusal: 'offline' });
 });
 
-test('a 401 on the delete path reads as unrecognised, and never as a removal', async () => {
+test('a 401 on the delete path reads as expired, and never as a removal', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
-  assert.deepEqual(await deleteMapping(41), { refusal: 'unrecognised' });
+  assert.deepEqual(await deleteMapping(41), { refusal: 'expired' });
 });
 
 test('none of the three ever throws, whatever fetch does', async () => {

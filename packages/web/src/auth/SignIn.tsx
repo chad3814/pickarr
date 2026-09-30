@@ -14,6 +14,14 @@ import { signIn, signUp } from './session.ts';
  * explains why those two are made to look alike on the wire) -- are read no
  * further than `response.ok`, and the fixed sentence below is what a caller
  * sees instead.
+ *
+ * **A `notice` is the one sentence shown before anything was submitted**:
+ * why the visitor is here at all, when `App` knows (today only an expired
+ * session, issue #94). Real text in a `<p role="status">` directly inside
+ * the form, which `base.css` styles by that structure -- not an
+ * `aria-label`, which a sighted visitor never receives (`CLAUDE.md`'s
+ * `IdentityChangeConfirm` hazard). `role="status"` rather than `alert`
+ * because it is context, not a failure of anything they did here.
  */
 
 const SIGN_IN_REFUSED = 'That email and password did not work. Check them and try again.';
@@ -43,9 +51,11 @@ export interface SignInProps {
    * is the caller that uses it, to flip `App` from `SignIn` to `Shell`.
    */
   onSignedIn?: () => void;
+  /** Why the visitor was sent here, shown above the fields. See this file's docblock. Absent: nothing is shown. */
+  notice?: string;
 }
 
-export function SignIn({ onSignedIn }: SignInProps): ReactElement {
+export function SignIn({ onSignedIn, notice }: SignInProps): ReactElement {
   const [claiming, setClaiming] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -88,6 +98,7 @@ export function SignIn({ onSignedIn }: SignInProps): ReactElement {
       }}
     >
       <h1 id="signin-heading">Sign in</h1>
+      {notice !== undefined && <p role="status">{notice}</p>}
       {error !== null && (
         <div role="alert">
           <h2>{error}</h2>

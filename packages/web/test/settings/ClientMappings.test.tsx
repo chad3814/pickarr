@@ -11,13 +11,12 @@ import { ClientMappings } from '../../src/settings/ClientMappings.tsx';
 import type { ClientMappingsSource } from '../../src/settings/useClientMappings.ts';
 import {
   MAPPING_REFUSAL_MESSAGES,
-  type AddMappingInput,
   type AddMappingOutcome,
-  type EditMappingInput,
   type EditMappingOutcome,
   type MappingSubmit,
   type RemoveMappingOutcome,
 } from '../../src/settings/postMapping.ts';
+import type { AddMappingInput, EditMappingInput } from '@pickarr/contract';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -358,10 +357,10 @@ test('a Windows-shaped path renders unchanged, in the list and in the form that 
 });
 
 test('each refusal reads as its own sentence, and offline and unrecognised read differently again', async () => {
-  // Six outcomes, six sentences no other outcome produces. A collapsed map
+  // Seven outcomes, seven sentences no other outcome produces. A collapsed map
   // -- every refusal answering with one sentence -- is what this catches.
   //
-  // All six are driven through the add control because the sentence map is
+  // All seven are driven through the add control because the sentence map is
   // one map shared by all three controls; `unknown-mapping` is not an
   // answer `POST /api/mappings` can really give, and the test below drives
   // that one through the control that can.
@@ -372,9 +371,10 @@ test('each refusal reads as its own sentence, and offline and unrecognised read 
     { refusal: 'unknown-mapping' },
     { refusal: 'empty-path' },
     { refusal: 'offline' },
+    { refusal: 'expired' },
     { refusal: 'unrecognised' },
   ] as const) {
-    // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and cleans up before the next; the six outcomes cannot run concurrently against the one shared `screen` (`DownloadClients.test.tsx`'s own refusal walk takes the identical exception for the identical reason).
+    // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and cleans up before the next; the seven outcomes cannot run concurrently against the one shared `screen` (`DownloadClients.test.tsx`'s own refusal walk takes the identical exception for the identical reason).
     const db = await freshDb();
     renderMappings(db, submits({ add: () => Promise.resolve(outcome) }));
     expand();
@@ -390,7 +390,7 @@ test('each refusal reads as its own sentence, and offline and unrecognised read 
     cleanup();
   }
 
-  assert.equal(new Set(seen).size, 6, 'each of the six outcomes put a sentence of its own on screen');
+  assert.equal(new Set(seen).size, 7, 'each of the seven outcomes put a sentence of its own on screen');
   // And the sentences are the ones this client wrote, not something derived
   // from a code the server sent.
   assert.deepEqual(seen.toSorted(), Object.values(MAPPING_REFUSAL_MESSAGES).toSorted());

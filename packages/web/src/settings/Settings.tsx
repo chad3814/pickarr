@@ -38,13 +38,13 @@ import { DownloadClients } from './DownloadClients.tsx';
 import { Destinations, type PluginTokens } from './Destinations.tsx';
 import type { FeedsSource } from './useFeeds.ts';
 import type { DownloadClientsListSource } from './DownloadClients.tsx';
-import type { AddFeedInput, AddFeedOutcome } from './AddFeed.tsx';
-import type { AddDownloadClientInput, AddDownloadClientOutcome } from './AddDownloadClient.tsx';
+import type { AddFeedOutcome } from './AddFeed.tsx';
+import type { AddDownloadClientOutcome } from './AddDownloadClient.tsx';
 import type { MappingSubmit } from './postMapping.ts';
 import type { FeedRemovalSubmit } from './postFeedRemoval.ts';
 import type { DestinationsSource } from './useDestinations.ts';
 import type { DestinationSubmit } from './postDestination.ts';
-import { TOKEN_NAMES_BY_PLUGIN } from '@pickarr/contract';
+import { type AddDownloadClientInput, type AddFeedInput, TOKEN_NAMES_BY_PLUGIN } from '@pickarr/contract';
 
 /**
  * The token vocabulary each plugin's destination row offers, derived from

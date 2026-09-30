@@ -39,7 +39,7 @@ const ANY_INPUT = { root: '/media/tv', shape: '{series}/{title}.{ext}' };
  */
 test('the refusal codes this screen has sentences for are exactly the ten the contract declares', () => {
   const spoken = Object.keys(DESTINATION_REFUSAL_MESSAGES)
-    .filter((key) => key !== 'offline' && key !== 'unrecognised')
+    .filter((key) => key !== 'offline' && key !== 'expired' && key !== 'unrecognised')
     .toSorted();
 
   assert.deepEqual(spoken, [...DESTINATION_REFUSALS].toSorted(),
@@ -63,7 +63,7 @@ test('no destination refusal borrows another one\'s sentence', () => {
   const sentences = Object.values(DESTINATION_REFUSAL_MESSAGES);
   assert.equal(new Set(sentences).size, sentences.length,
     'each outcome gets words of its own, so a refusal is legible without reading a code');
-  assert.equal(sentences.length, 12, 'the contract\'s ten, plus offline and unrecognised');
+  assert.equal(sentences.length, 13, 'the contract\'s ten, plus offline, expired and unrecognised');
 });
 
 /**
@@ -227,8 +227,14 @@ test('a 200 carrying no id is not an acceptance this client will claim', async (
   assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 
-test('a bare { error } with no refusal key -- the expired session -- reads as unrecognised', async () => {
+test('a 401 -- the expired session -- reads as expired, not as the version-skew catch-all', async () => {
   globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'unauthorized' }, 401)));
+  assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'expired', token: null });
+  assert.equal(destinationRefusalMessage({ refusal: 'expired', token: null }), 'Your session expired. Sign in again.');
+});
+
+test('a bare { error } with no refusal key on any other status reads as unrecognised', async () => {
+  globalThis.fetch = fetchStub(() => Promise.resolve(jsonResponse({ error: 'internal' }, 500)));
   assert.deepEqual(await putDestination('tv', ANY_INPUT), { refusal: 'unrecognised', token: null });
 });
 

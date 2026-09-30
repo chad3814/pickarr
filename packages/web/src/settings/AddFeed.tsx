@@ -46,7 +46,9 @@
  * erased before anything reaches a bundle. So "the client cannot import
  * it" is true of the host and false of the contract, and the two halves of
  * the `rss_feed` wire are both in the contract now: `RssFeedSyncRead` for
- * the read, {@link ADD_FEED_REFUSALS} for the write.
+ * the read, {@link ADD_FEED_REFUSALS} and {@link AddFeedInput} for the
+ * write -- the latter once hand-copied here and, per issue #88, now
+ * declared once and imported on both sides.
  *
  * The poll-interval bounds and the two download types stay mirrored, and
  * that is a different call rather than an oversight. A refusal *code* is
@@ -59,8 +61,10 @@
  * the second loosens a hint. Only the first is worth a shared declaration.
  */
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { ADD_FEED_REFUSALS, type AddFeedRefusalCode } from '@pickarr/contract';
+import { ADD_FEED_REFUSALS, type AddFeedInput, type AddFeedRefusalCode } from '@pickarr/contract';
 import { CATEGORIES } from '../shell/useCounts.ts';
+import { sendJson } from '../auth/sendJson.ts';
+import { SESSION_EXPIRED_MESSAGE } from '../auth/sessionExpired.ts';
 
 /** Mirrors `packages/host/src/feeds/add.ts`'s own bounds -- see this file's docblock on why mirrored rather than imported. */
 const MIN_POLL_INTERVAL_S = 60;
@@ -70,21 +74,6 @@ const DEFAULT_POLL_INTERVAL_S = 300;
 /** Mirrors `feeds/add.ts`'s own `TRANSPORTS`. */
 const DOWNLOAD_TYPES: readonly string[] = ['torrent', 'nzb'];
 const DEFAULT_DOWNLOAD_TYPE = 'torrent';
-
-/**
- * The wire shape `POST /api/feeds` needs -- mirrored from
- * `packages/host/src/feeds/add.ts`'s own `AddFeedInput` rather than
- * imported: this package ships to a browser and only needs to agree with
- * the host on the JSON shape that crosses the wire, not on a shared module
- * (`store/wire.ts`'s `SyncOp` doc gives the identical reasoning).
- */
-export interface AddFeedInput {
-  pluginId: string;
-  name: string;
-  url: string;
-  downloadType: string;
-  pollIntervalS: number;
-}
 
 /**
  * A refusal the host actually sent, carrying one of the four codes
@@ -105,20 +94,23 @@ export interface AddFeedRefusal {
  * "refused" (design spec §4): an offline submit that read as "already on
  * file" would send the operator hunting for a feed that is not there.
  *
+ * `expired` is a 401 -- an expired session, the single most ordinary
+ * failure a real submit meets (issue #94). It used to fall into
+ * `unrecognised`, whose sentence blamed version skew; `auth/sendJson.ts`
+ * now answers it on the status, and the shell returns to sign-in on it.
+ *
  * **`unrecognised` is a normal outcome, not a should-not-happen one**
  * (fix round 1, review-found). `POST /api/feeds` has two permanent response
  * shapes: `{ refusal }` for a duplicate url, an unregistered plugin, a bad
  * download type, a bad poll interval, and now the two shape-check refusals
  * (`invalid-shape`, `malformed-body`); and a bare `{ error }` with no
- * `refusal` key at all for a 401 (an expired session -- the single most
- * ordinary failure a real submit meets), a 405, a 413, or a 500. A client
- * this old will routinely outlive a host that has added a refusal code this
- * build does not know, or answer with a body this build cannot parse at
- * all -- neither is a defect in either side, so neither may crash this
- * form. `unrecognised` covers both: any answer that is not a recognised
+ * `refusal` key at all for a 405, a 413, or a 500. A client this old will
+ * routinely outlive a host that has added a refusal code this build does
+ * not know -- not a defect in either side, so it may not crash this form.
+ * `unrecognised` covers any parseable answer that is not a recognised
  * accepted id and not one of `AddFeedRefusal`'s four known codes.
  */
-export type AddFeedOutcome = { id: number } | AddFeedRefusal | { refusal: 'offline' | 'unrecognised' };
+export type AddFeedOutcome = { id: number } | AddFeedRefusal | { refusal: 'offline' | 'expired' | 'unrecognised' };
 
 /**
  * The codes this client recognises, built from the contract's list rather
@@ -143,8 +135,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * **Branches on the body's `refusal` field, never on the HTTP status**
  * (design spec §2.2) -- the status mapping is under review and may change;
- * the refusal codes are the stable contract. `response.status` is never
- * read here.
+ * the refusal codes are the stable contract. No status is read here; the
+ * guard's 401, the one status that means something on its own, is read
+ * once in `auth/sendJson.ts` for every write path.
  *
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on the request; this function never reads, stores or
@@ -154,7 +147,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * A rejected `fetch` -- offline, DNS, a reset connection -- and a body that
  * fails to parse as JSON both answer `{ refusal: 'offline' }`: neither is a
  * server answer, so neither may be reported as a refusal, which would read
- * as "your feed was rejected" when nothing rejected it.
+ * as "your feed was rejected" when nothing rejected it. A 401 answers
+ * `{ refusal: 'expired' }`. All three are decided by `auth/sendJson.ts`,
+ * which makes the request for every write path.
  *
  * **Never throws** (fix round 1, review-found: it did, and the five of six
  * real host answers that are not `{ id }` and not one of `AddFeedRefusal`'s
@@ -169,18 +164,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * message never reaches a human here (Global Constraint).
  */
 export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch('/api/feeds', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
+  const result = await sendJson('/api/feeds', { method: 'POST', body: input });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  const { body } = result;
   if (isRecord(body) && typeof body.id === 'number') return { id: body.id };
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };
@@ -188,12 +174,12 @@ export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
 
 /**
  * A fixed sentence per non-accepted outcome -- never the server's own words
- * (Global Constraint). One map covers all six, `offline` and
+ * (Global Constraint). One map covers all seven, `offline`, `expired` and
  * `unrecognised` included, so `handleSubmit` below has no special case to
  * get wrong between them.
  *
  * **The keyed `Record` is load-bearing, not decoration.** Its key type is
- * the contract's four codes plus this client's own two, so a code added to
+ * the contract's four codes plus this client's own three, so a code added to
  * `ADD_FEED_REFUSALS` fails to compile here until someone writes the
  * sentence for it, and a code renamed there fails twice -- an unwritten key
  * and an unreachable one. That is the compile half of what stops the drift
@@ -204,13 +190,15 @@ export async function postFeed(input: AddFeedInput): Promise<AddFeedOutcome> {
  * Exported for that pair of tests, which asserts this object's own key set
  * against a list spelled literally -- not against anything derived from it.
  */
-export const REFUSAL_MESSAGES: Record<AddFeedRefusalCode | 'offline' | 'unrecognised', string> = {
+export const REFUSAL_MESSAGES: Record<AddFeedRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
   'duplicate-url': 'That url is already on file.',
   'unknown-plugin': 'That plugin is not registered on this host.',
   'bad-download-type': 'That download type is not supported.',
   'bad-poll-interval': 'That poll interval is out of range.',
   /** Distinct from every named refusal above, which are answers -- this one means the request never got one. */
   offline: 'Could not reach Pickarr. Check your connection and try again.',
+  /** A 401. One sentence shared by every write path (`auth/sessionExpired.ts`), so no two can word it differently. */
+  expired: SESSION_EXPIRED_MESSAGE,
   /** `postFeed`'s own catch-all -- see `AddFeedOutcome`'s doc on why this is a normal outcome. Names no code, no status: those are exactly the server-authored detail the Global Constraint forbids rendering. */
   unrecognised: 'Pickarr refused this feed, but did not say why. The host may be a different version than this page expects -- reload and try again.',
 };

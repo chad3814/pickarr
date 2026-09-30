@@ -82,7 +82,7 @@
  * because the interface it satisfies is.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { DestinationRefusalCode } from '@pickarr/contract';
+import type { DestinationRefusalCode, SaveDestinationRequest } from '@pickarr/contract';
 import { canonicalRoot, unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
 
@@ -117,7 +117,20 @@ export const DEFAULT_UNMATCHED_DIR = '_unmatched';
 export const SHAPE_PROBE_VALUE = 'x';
 
 /**
- * What `Host.saveDestination` needs to write one plugin's destination.
+ * What `Host.saveDestination` needs to write one plugin's destination:
+ * `@pickarr/contract`'s `SaveDestinationRequest`, parsed.
+ *
+ * **Derived from the wire shape, not a second hand-copy of it.** Issue #88
+ * moved `AddFeedInput`, `AddDownloadClientInput`, `AddMappingInput` and
+ * `EditMappingInput` into `@pickarr/contract` and left this one behind,
+ * because this is where the two sides of the wire genuinely disagree
+ * rather than merely repeat each other: `unmatchedDir` is optional on the
+ * wire and required-but-nullable here (see below). Two *names* -- this one
+ * and `SaveDestinationRequest` -- still have to mean the same three
+ * fields, so this type is written as a transform of that one rather than
+ * copied from it: renaming or removing a field there is a compile error
+ * here too (see below for why adding one also is), without either side's
+ * optionality claim about `unmatchedDir` being lost.
  *
  * **Every field is a primitive and none is optional**, for the reason
  * `AddDownloadClientInput` and `AddMappingInput` each give at length: these
@@ -131,17 +144,61 @@ export const SHAPE_PROBE_VALUE = 'x';
  * forwarding a value it read off a body, and there is only one thing they
  * could mean here -- use the default.
  *
+ * **Written as three indexed-access fields, not a mapped type over
+ * `Required<SaveDestinationRequest>`.** The mapped-type spelling was tried
+ * first and types this file's own uses correctly, but loses the
+ * `| undefined` half of `unmatchedDir` the moment something else maps over
+ * *this* type in turn -- `test/media/destinations.test.ts`'s
+ * `Partial<SaveDestinationInput>` did, and `exactOptionalPropertyTypes`
+ * then refused the test's own `unmatchedDir: undefined` probes. A mapped
+ * type remembers modifiers, not values, when nested; indexed access on
+ * each field name does not have that failure mode, and still turns a
+ * rename or removal on `SaveDestinationRequest` into a compile error here
+ * (`SaveDestinationRequest['unmatchedDir']` stops resolving).
+ *
+ * **Indexed access alone does not catch a field added to
+ * `SaveDestinationRequest`.** Three named fields read off it type-check
+ * whether or not a fourth exists; an addition there would silently stay
+ * unparsed and unwritten here. {@link saveDestinationKeysMatch} below is
+ * the other half: a type-level assertion that the two interfaces' key sets
+ * are exactly equal, so an added field fails the build here too instead of
+ * only failing quietly at runtime.
+ *
  * The plugin id is **not** a field. It comes from the request path, so
  * putting it in the body too would give one request two places to name a
  * plugin and a way for them to disagree; `editMapping` keeps its `id` out of
  * `EditMappingInput` for the same reason.
  */
 export interface SaveDestinationInput {
-  root: string;
-  shape: string;
-  /** `undefined` means {@link DEFAULT_UNMATCHED_DIR}; `''` is refused. */
-  unmatchedDir: string | undefined;
+  root: SaveDestinationRequest['root'];
+  shape: SaveDestinationRequest['shape'];
+  unmatchedDir: SaveDestinationRequest['unmatchedDir'];
 }
+
+/**
+ * The other half of {@link SaveDestinationInput}'s field-parity claim:
+ * every key of `SaveDestinationRequest` is a key of `SaveDestinationInput`
+ * and back again.
+ *
+ * **Why indexed access alone is not enough.** `SaveDestinationInput`'s three
+ * fields are each written as `SaveDestinationRequest['<name>']`, which is a
+ * compile error the moment a named field is renamed or removed -- the
+ * indexed type stops resolving. It is not a compile error when a field is
+ * *added* to `SaveDestinationRequest`: nothing here reads it, so nothing
+ * here notices. This type computes `never` unless the two interfaces'
+ * key sets are identical, and assigning it to `true` below is what turns
+ * that into a build failure rather than a silent gap -- add a field to one
+ * side without the other and this line stops type-checking.
+ */
+type SaveDestinationKeysMatch = [
+  Exclude<keyof SaveDestinationRequest, keyof SaveDestinationInput>,
+  Exclude<keyof SaveDestinationInput, keyof SaveDestinationRequest>,
+] extends [never, never]
+  ? true
+  : never;
+const saveDestinationKeysMatch: SaveDestinationKeysMatch = true;
+// Referenced so a linter does not flag this type-only assertion as unused.
+void saveDestinationKeysMatch;
 
 /**
  * Why a destination write declined, returned as a value rather than thrown

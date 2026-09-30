@@ -33,6 +33,86 @@
  */
 
 /**
+ * The wire shape `POST /api/download-clients` needs, and what
+ * `Host.addDownloadClient` (`packages/host/src/clients/add.ts`) accepts to
+ * create a download client.
+ *
+ * **Declared once, here, rather than mirrored on each side of the wire** --
+ * `./feeds.ts`'s `AddFeedInput` doc has the measurement of what mirroring
+ * a write input costs (issue #88): a host-side field rename left the whole
+ * web suite green, because nothing pinned the two copies together. A
+ * rename here is now a compile error in `@pickarr/web`, not a silent
+ * divergence.
+ *
+ * **Every field is a primitive, and none is a union or optional.** These
+ * values arrive unchecked out of a JSON request body, and
+ * `addDownloadClient` is the validator that narrows them, not a caller
+ * that has already done so. `implementation` is `string` rather than
+ * `Implementation` for exactly that reason -- typing it as the union would
+ * tell the compiler a check that module performs at runtime is already
+ * guaranteed.
+ *
+ * **`type` is absent, deliberately**, and cannot be sent. It is derived
+ * from `implementation` on the host (`clients/add.ts`'s
+ * `TYPE_FOR_IMPLEMENTATION`), because `readClientConfig` treats a
+ * `type`/`implementation` mismatch as a fatal misconfiguration -- so
+ * accepting both from a browser would be accepting the ability to
+ * construct a row that can never work.
+ *
+ * **`apiKey`, `username` and `password` are `string`, not `string | null`,
+ * and every one of the three is present on every request** -- an
+ * unsupplied credential is `''`, never an omitted key. That is not a
+ * convenience: `''` is what a blank form field sends, `readClientConfig`'s
+ * `optionalText` already folds a blank column to absent on the way back
+ * out, and the host reads a blank field as "this strategy sends no such
+ * credential", deciding the auth shape from which of the three are blank
+ * -- so omitting one would arrive as `undefined` and be read as a shape
+ * the operator never chose (`api/request-shapes.ts`'s
+ * `isDownloadClientBody`).
+ *
+ * The two credential fields cross the wire here and nowhere else. Neither
+ * is ever written to a column, a log line, an error message or a response
+ * body.
+ *
+ * **Those four are the channels inside the product, and they are not the
+ * whole list.** A credential typed into the browser form by an end-to-end
+ * test is recorded in cleartext by Playwright's trace -- in the `fill`
+ * action's parameters, in the action log, in the step title, in the POST
+ * body resource, and in the DOM snapshot, which serialises a
+ * `type="password"` input's `value` unredacted. `packages/e2e`'s
+ * `playwright.config.ts` keeps that trace on failure and `ci.yml:96-103`
+ * uploads it as a build artifact with 7-day retention, so a red build
+ * publishes it.
+ *
+ * Nothing in this file can prevent that and no change here would: the
+ * channel is the test harness, not the code under test, and it exists for
+ * any form field a browser test fills. It is enumerated here because this
+ * docblock is where someone goes to find out where a credential can end
+ * up, and a list that stops at the product boundary reads as exhaustive
+ * when it is not. The constraint that keeps it harmless -- every
+ * credential the e2e suite types is a literal committed to this repo --
+ * lives with the credentials, in `packages/e2e/tests/shell.spec.ts`'s
+ * module docblock.
+ *
+ * **`category` may be `''`, and that is a configuration rather than a
+ * missing value** -- which is why there is no refusal code for it and why
+ * none is wanted. An empty category means "file downloads under no
+ * category", and every consumer already understands it: `clients/add.ts`
+ * writes `''` to the column as-is, unlike the credential fields, where
+ * `''` is folded to `null`; a blank category is a real answer rather than
+ * an absent one.
+ */
+export interface AddDownloadClientInput {
+  name: string;
+  implementation: string;
+  url: string;
+  category: string;
+  apiKey: string;
+  username: string;
+  password: string;
+}
+
+/**
  * Every way `addDownloadClient` can decline to create a download client.
  *
  * Written in the order design spec §3 lists them, which is **not** the order

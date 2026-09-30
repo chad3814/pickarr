@@ -9,9 +9,12 @@
  * rather than on the HTTP status.
  *
  * **Never throws.** A rejected `fetch` and a body that fails to parse both
- * answer `{ refusal: 'offline' }`; a body that parses but matches neither
- * `{ accepted: true }` nor a known refusal answers
- * `{ refusal: 'unrecognised' }`. The feeds slice shipped a sibling that
+ * answer `{ refusal: 'offline' }`; a 401 -- an expired session -- answers
+ * `{ refusal: 'expired' }` (issue #94: it used to land in `unrecognised`,
+ * whose sentence blamed version skew); a body that parses but matches
+ * neither `{ accepted: true }` nor a known refusal answers
+ * `{ refusal: 'unrecognised' }`. The first two are decided by
+ * `auth/sendJson.ts`, which makes the request for every write path. The feeds slice shipped a sibling that
  * threw, and because its caller invoked it as `void handleSubmit(event)`
  * the rejection was swallowed: the pending flag never cleared and the form
  * wedged on five of six real host answers. `ReleaseList`'s button is
@@ -21,7 +24,9 @@
  * 202 for an accepted pick, 409 for `already-submitted`, 422 for the other
  * four and 400 for the two envelope refusals (`api/server.ts`'s
  * `statusForPickRefusal`); the codes are the stable contract and the
- * statuses are not. `response.status` is never read here.
+ * statuses are not. The status is never read here; the one status that
+ * does mean something on its own, the guard's 401, is read once in
+ * `sendJson` for every write path.
  *
  * **Why an unparseable body is `offline` and not `unrecognised`.**
  * `postDownloadClient`'s docblock argues this at length and the argument is
@@ -35,9 +40,9 @@
  *
  * `credentials: 'same-origin'` puts whatever session cookie the browser
  * already holds on the request; this function never reads, stores or
- * forwards the token itself (Global Constraint). Nothing here logs, and the
- * `catch` inspects no error: a `TypeError` from a rejected `fetch` names
- * the url.
+ * forwards the token itself (Global Constraint). Nothing here logs, and
+ * `sendJson`'s `catch` inspects no error: a `TypeError` from a rejected
+ * `fetch` names the url.
  *
  * **The codes are imported, never spelled again.** The download-clients
  * review found them hand-copied and required exactly this fix: a second
@@ -46,6 +51,7 @@
  */
 import { REQUEST_PICK_REFUSALS, type RequestPickRefusalCode } from '@pickarr/contract';
 import { PICK_REFUSAL_MESSAGES, type PickOutcome, type PickSubmit } from '@pickarr/plugin-ui';
+import { sendJson } from '../auth/sendJson.ts';
 
 /**
  * `PickOutcome`, `PickSubmit` and `PICK_REFUSAL_MESSAGES` all now live in
@@ -71,18 +77,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Submits a pick for release `rssItemId`. See this file's docblock; in particular, this never throws. */
 export async function postPick(rssItemId: number): Promise<PickOutcome> {
-  let body: unknown;
-  try {
-    const response = await fetch('/api/picks', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rssItemId }),
-    });
-    body = await response.json();
-  } catch {
-    return { refusal: 'offline' };
-  }
+  const result = await sendJson('/api/picks', { method: 'POST', body: { rssItemId } });
+  if (result.outcome !== 'answered') return { refusal: result.outcome };
+  const { body } = result;
   if (isRecord(body) && body.accepted === true) return { accepted: true };
   if (isRecord(body) && isRefusalCode(body.refusal)) return { refusal: body.refusal };
   return { refusal: 'unrecognised' };

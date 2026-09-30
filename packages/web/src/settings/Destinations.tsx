@@ -50,7 +50,7 @@
  * second, weaker copy of them in a browser could only disagree with the one
  * that decides. The one thing this form does interpret is a *blank*
  * unmatched folder, which means "use the default" and is documented on
- * `SaveDestinationInput.unmatchedDir` -- an encoding, not a validation.
+ * `SaveDestinationRequest.unmatchedDir` -- an encoding, not a validation.
  *
  * **Every name a screen reader announces is composed from text that is on
  * screen.** Each row is named by its own `<h3>` through `aria-labelledby`,
@@ -66,7 +66,7 @@ import {
   DESTINATION_REFUSAL_MESSAGES,
   destinationRefusalMessage,
   type DestinationSubmit,
-  type SaveDestinationInput,
+  type SaveDestinationRequest,
 } from './postDestination.ts';
 import { pluginFor } from '../plugins/registry.ts';
 
@@ -208,8 +208,8 @@ function DestinationRow({ plugin, destination, submit }: DestinationRowProps): R
     try {
       // A blank unmatched folder is **omitted**, not sent as `''`: the host
       // reads an absent field as design spec §6's default and an empty one
-      // as the `empty-path` refusal. See `SaveDestinationInput`.
-      const input: SaveDestinationInput =
+      // as the `empty-path` refusal. See `SaveDestinationRequest`.
+      const input: SaveDestinationRequest =
         shown.unmatchedDir === ''
           ? { root: shown.root, shape: shown.shape }
           : { root: shown.root, shape: shown.shape, unmatchedDir: shown.unmatchedDir };

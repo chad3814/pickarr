@@ -9,11 +9,8 @@ import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
 import { DownloadClients, type DownloadClientsListSource } from '../../src/settings/DownloadClients.tsx';
 import type { MappingSubmit } from '../../src/settings/postMapping.ts';
-import {
-  REFUSAL_MESSAGES,
-  type AddDownloadClientInput,
-  type AddDownloadClientOutcome,
-} from '../../src/settings/AddDownloadClient.tsx';
+import { REFUSAL_MESSAGES, type AddDownloadClientOutcome } from '../../src/settings/AddDownloadClient.tsx';
+import type { AddDownloadClientInput } from '@pickarr/contract';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -208,7 +205,7 @@ test('clicking Add download client calls submit, and the row appears through the
 });
 
 test('each refusal reads as its own sentence, and offline and unrecognised read differently again', async () => {
-  // Six outcomes, six sentences no other outcome produces. A collapsed map
+  // Seven outcomes, seven sentences no other outcome produces. A collapsed map
   // -- every refusal answering with one sentence -- is what this catches.
   const seen: string[] = [];
   for (const outcome of [
@@ -217,9 +214,10 @@ test('each refusal reads as its own sentence, and offline and unrecognised read 
     { refusal: 'duplicate-name' },
     { refusal: 'bad-url' },
     { refusal: 'offline' },
+    { refusal: 'expired' },
     { refusal: 'unrecognised' },
   ] as const) {
-    // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and cleans up before the next; the six outcomes cannot run concurrently against the one shared `screen` (`Feeds.test.tsx`'s own refusal walk takes the identical exception for the identical reason).
+    // eslint-disable-next-line no-await-in-loop -- each iteration renders, asserts and cleans up before the next; the seven outcomes cannot run concurrently against the one shared `screen` (`Feeds.test.tsx`'s own refusal walk takes the identical exception for the identical reason).
     const db = await freshDb();
     render(<DownloadClients source={sourceFor(db)} submit={submitFor(outcome)} submitMapping={neverSubmitMapping} />);
     fillClientForm();
@@ -230,7 +228,7 @@ test('each refusal reads as its own sentence, and offline and unrecognised read 
     cleanup();
   }
 
-  assert.equal(new Set(seen).size, 6, 'each of the six outcomes put a sentence of its own on screen');
+  assert.equal(new Set(seen).size, 7, 'each of the seven outcomes put a sentence of its own on screen');
   // And the sentences are the ones this client wrote, not something derived
   // from a code the server sent.
   assert.deepEqual(seen.toSorted(), Object.values(REFUSAL_MESSAGES).toSorted());

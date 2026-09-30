@@ -1226,12 +1226,15 @@ function migration19(db: DatabaseSync): void {
  * compile and then throw `no such column: NEW.id` on the first insert.
  * Measured.
  *
- * **What enforces that is a test, not `assertIntegerIdKey`.** That function
- * (`sync/registry.ts`) does refuse such a key, but its only callers iterate
- * `plugin.synced`, and `HOST_SYNCED_TABLES` is concatenated on *after* that
- * loop -- so it never runs on a host table and never would have caught
- * this one. `test/sync/tables.test.ts`'s `every synced table has an integer
- * primary key named id` walks `HOST_SYNCED_TABLES` and is the real guard.
+ * **What would have enforced that, until issue #102, was a test and not
+ * `assertIntegerIdKey`.** That function (`sync/registry.ts`) does refuse
+ * such a key, but its only callers iterated `plugin.synced`, and
+ * `HOST_SYNCED_TABLES` was concatenated on *after* that loop -- so it never
+ * ran on a host table and never would have caught this one.
+ * `createSyncRegistry` now runs it on every host synced table too, but
+ * `test/sync/tables.test.ts`'s `every synced table has an integer primary
+ * key named id` walks `HOST_SYNCED_TABLES` independently and stays as the
+ * guard that does not depend on that call site.
  * The unique index carries the grain instead, and `media/destinations.ts`
  * upserts against it by name.
  *
