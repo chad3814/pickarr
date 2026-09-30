@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BACKFILL_RETRY_DELAY_MS,
   VIDEO_RESOLUTION_BACKFILL_JOB,
   createVideoResolutionBackfillJob,
   videoResolutionBackfillMigration,
@@ -61,6 +62,7 @@ function handler(answer: (names: readonly string[]) => readonly LookupEnvelope[]
   const run = createVideoResolutionBackfillJob({
     pluginId: 'movie',
     category: 'movies',
+    now: () => NOW,
     batch: async (_ctx, _signal, names) => {
       requests.push(names);
       return answer(names);
@@ -120,15 +122,29 @@ test('a marked release that was deleted is cleared and never asked about', async
   assert.deepEqual(harness.enqueued, [], 'and nothing is re-enqueued for it');
 });
 
-test('a failing service throws with every mark intact', async () => {
-  // Review Focus 4: the runner's retry and backoff take over; a dead-letter
-  // row is how anyone learns the backfill stopped.
+test('a failing service asks again in ten minutes, with every mark intact', async () => {
+  // Review Focus 4. Throwing would hand the job to the runner's backoff --
+  // five attempts over about fifteen seconds -- and a dead-lettered backfill
+  // is never enqueued again, since the plugin migration inserts the only
+  // row. So an outage or a 429 schedules a successor instead.
   const { harness, ids } = seeded(['resolved', 'resolved']);
   videoResolutionBackfillMigration('movie', 4).up(harness.raw);
-  const { run } = handler(() => { throw new Error('429'); });
-  await assert.rejects(run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx));
-  assert.deepEqual(marked(harness), ids);
-  assert.equal(harness.media.videoResolutions.size, 0, 'nothing half-written');
+  const { run } = handler(() => { throw new Error('429 Too Many Requests'); });
+
+  await run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx);
+
+  assert.deepEqual(marked(harness), ids, 'every mark intact');
+  assert.equal(harness.media.videoResolutions.size, 0, 'nothing written');
+  assert.deepEqual(
+    harness.enqueued.map((job) => ({ kind: job.kind, runAt: job.runAt })),
+    [{ kind: VIDEO_RESOLUTION_BACKFILL_JOB, runAt: NOW + BACKFILL_RETRY_DELAY_MS }],
+    'exactly one delayed successor',
+  );
+  assert.equal(BACKFILL_RETRY_DELAY_MS, 600_000, 'ten minutes, spelled literally');
+  assert.equal(harness.logs.length, 1, 'one line logged');
+  const detail = JSON.stringify(harness.logs[0]?.detail ?? {});
+  assert.match(detail, /429 Too Many Requests/, 'naming the failure');
+  assert.ok(!detail.includes('release-'), 'and no filename');
 });
 
 test('with nothing marked, the job asks nothing', async () => {

@@ -20,6 +20,14 @@ import type { LookupCategory, LookupEnvelope } from './types.ts';
 
 export const VIDEO_RESOLUTION_BACKFILL_JOB = 'video-resolution-backfill';
 
+/**
+ * How long the backfill waits before asking again after the service failed
+ * or rate-limited a batch, or answered none of it yet. Ten minutes: far past
+ * the runner's own backoff (1s to 8s over five attempts, about fifteen
+ * seconds in all), which an outage or a 429 easily outlasts.
+ */
+export const BACKFILL_RETRY_DELAY_MS = 600_000;
+
 /** The host's `DEFAULT_MAX_ATTEMPTS`, restated: a plugin migration cannot import the host. */
 const MAX_ATTEMPTS = 5;
 
@@ -72,6 +80,8 @@ VALUES (?, ?, '{}', 0, ?, CAST(unixepoch('subsec') * 1000 AS INTEGER), 'ready', 
 export interface VideoResolutionBackfillDeps {
   readonly pluginId: string;
   readonly category: LookupCategory;
+  /** The clock a delayed successor's `runAt` is taken from -- `createLookupPlugin`'s own `deps.now`. */
+  readonly now: () => number;
   /** One batch lookup by filename -- `createLookupPlugin` passes its own client's `batch`. */
   readonly batch: (ctx: PluginContext, signal: AbortSignal | undefined, names: readonly string[]) => Promise<readonly LookupEnvelope[]>;
 }
@@ -93,9 +103,17 @@ function connection(ctx: PluginContext): DatabaseSync {
  * deleted can never be returned by the join below, and counting it as
  * remaining would re-enqueue this job for ever.
  *
- * **A failure throws with every mark intact** -- nothing is written until
- * the whole batch has answered -- so the runner's retry and backoff apply,
- * and after the last attempt the dead-letter row is the record.
+ * **An outage or a 429 schedules a successor instead of throwing.** A
+ * failed batch call is logged, the same job kind is enqueued again
+ * `BACKFILL_RETRY_DELAY_MS` from now, and the handler returns with every mark
+ * intact -- nothing is written until the batch has answered. Throwing would
+ * leave it to the runner's backoff, about fifteen seconds over five
+ * attempts, and a dead-lettered backfill is never enqueued again: the plugin
+ * migration inserts the only row there will ever be.
+ *
+ * **A local write fault still throws.** Once the answer is in, a failing
+ * `setVideoResolution` or mark clear is a fault, not an outage; the rows
+ * before it in the batch stay written and cleared, and the rest stay marked.
  */
 export function createVideoResolutionBackfillJob(deps: VideoResolutionBackfillDeps): JobHandler {
   const table = lookupTableName(deps.pluginId);
@@ -120,7 +138,19 @@ SELECT l.rss_item_id AS rssItemId, r.filename AS filename
     });
     if (rows.length === 0) return;
 
-    const answers = await deps.batch(ctx, signal, rows.map((row) => row.filename));
+    let answers: readonly LookupEnvelope[];
+    try {
+      answers = await deps.batch(ctx, signal, rows.map((row) => row.filename));
+    } catch (error) {
+      ctx.log('the video resolution backfill could not reach the lookup service, so it asks again later', {
+        // The message rather than the `Error`, the same shape `engine.ts`'s
+        // `logged` uses: the host's `redactDetail` walks string values only.
+        // No filename -- the batch's names are row contents.
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await ctx.jobs.enqueue({ kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, runAt: deps.now() + BACKFILL_RETRY_DELAY_MS });
+      return;
+    }
     const clear = raw.prepare(`UPDATE ${table} SET video_resolution_backfill = 0 WHERE rss_item_id = ?`);
     for (const [index, row] of rows.entries()) {
       const answer = answers[index];

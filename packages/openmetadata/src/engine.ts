@@ -743,6 +743,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   const backfill = createVideoResolutionBackfillJob({
     pluginId: spec.id,
     category: spec.category,
+    now: deps.now,
     batch: (ctx, signal, names) => logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).batch(spec.category, names)),
   });
 

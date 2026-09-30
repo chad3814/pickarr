@@ -216,11 +216,19 @@ running.
 4. If marked rows remain -- counted with the same join as step 1 -- enqueue
    the same job kind again.
 
-**Failure.** An HTTP failure or 429 throws, so the runner's retry and backoff
-apply. After the last attempt the job dead-letters and the rows it had not
-reached stay marked; the dead-letter row is how anyone learns of it. An
-answer with no usable resolution still clears its mark and stores `null`, so
-the job always makes progress and cannot loop.
+**Failure.** An HTTP failure or 429 on the batch call does not throw. The
+handler logs the error's message (never a filename), enqueues the same job
+kind again with `runAt` = now + `BACKFILL_RETRY_DELAY_MS` (ten minutes, from
+the plugin's injected clock), and returns with every mark intact. Throwing
+would hand it to the runner's backoff -- 1s, 2s, 4s, 8s over five attempts,
+about fifteen seconds -- which an outage or a rate limit easily outlasts, and
+a dead-lettered backfill is never enqueued again: the plugin migration
+inserts the only job row there will ever be. A fault in the local writes
+after the answer arrives still throws; the rows before it stay written and
+cleared, and the rest stay marked.
+
+A terminal answer with no usable resolution still clears its mark and
+stores `null`, so the job always makes progress and cannot loop.
 
 A fresh install has no resolved rows when this migration runs, so it marks
 nothing and enqueues nothing.
@@ -289,7 +297,8 @@ Every item below is a test written to fail first.
   - It clears the mark on a `null` answer.
   - It re-enqueues while marks remain.
   - It clears a mark whose release was deleted, and does not re-enqueue for it.
-  - It throws on HTTP failure with the marks intact.
+  - On HTTP failure it does not throw: marks intact, nothing written, one
+    delayed successor, one log line naming no filename.
 
 **Web / plugin-ui**
 - `ReleaseList` shows the stored value, and `unknown` for `null`.
