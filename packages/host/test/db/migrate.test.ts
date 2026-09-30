@@ -1860,10 +1860,12 @@ test('migration 24 renames the lookup state columns in place, so rss_item keeps 
   `);
   migrateHost(raw);
 
-  const columns = raw.prepare("SELECT name FROM pragma_table_info('rss_item')").all()
-    .map((row) => String((row as { name: unknown }).name));
-  assert.ok(columns.includes('lookup_state') && columns.includes('lookup_state_detail'), 'renamed');
-  assert.ok(!columns.includes('resolution') && !columns.includes('resolution_detail'), 'and the old names are gone');
+  const columns = new Set(
+    raw.prepare("SELECT name FROM pragma_table_info('rss_item')").all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  assert.ok(columns.has('lookup_state') && columns.has('lookup_state_detail'), 'renamed');
+  assert.ok(!columns.has('resolution') && !columns.has('resolution_detail'), 'and the old names are gone');
 
   const row = raw.prepare('SELECT lookup_state, lookup_state_detail FROM rss_item WHERE id = 1').get();
   assert.deepEqual({ ...row }, { lookup_state: 'unresolved', lookup_state_detail: 'not recognised' }, 'values carried across');
