@@ -58,13 +58,18 @@ Dune.Part.Two.2024.UHD.BluRay.REMUX.HDR.HEVC-GRP  resolved    quality.resolution
 ## Accepted values
 
 A stored video resolution matches `^[0-9]{3,4}[pi]$` (`480p`, `720p`,
-`1080i`, `2160p`) or is `null`. Anything else the service sends --
-another type, another string -- is stored as `null`.
+`1080i`, `2160p`) or is `null`. A value that matches ignoring case
+(`1080P`) is stored lowercased. Anything else the service sends -- another
+type, another string -- is stored as `null`.
 
 The check exists because the value reaches a library path through
 `{resolution}` and `parsed` is otherwise unvalidated third-party text. It is
-applied in two places that must agree: `videoResolutionOf` in
-`packages/openmetadata` (a regex) and the host migration's backfill (`GLOB`).
+one function, `normalizeVideoResolution(value: unknown): string | null` in
+`@pickarr/contract`. The host writer and `packages/openmetadata` both depend
+on it, and neither may depend on the other. The host migration's backfill
+restates it in SQL (`lower(...)` then `GLOB`). A migration is frozen once
+applied, so it must not call a helper that could later change, and the
+migration test pins the two against the same cases.
 
 ## 1. Data model: host migration
 
@@ -81,8 +86,11 @@ in this order:
    `GLOB`s as three or four digits followed by `p` or `i`. The marker
    `LOOKUP_JSON_TOO_LARGE` has no `parsed` and extracts `NULL`, so it needs no
    case of its own.
-5. Rotate `sync.generation` to a fresh random value through
-   `db/host-state.ts`'s writer.
+5. Rotate `sync.generation` by deleting its `host_state` row through a new
+   `forgetSyncGeneration(raw)` in `db/host-state.ts`. `ensureSyncGeneration`
+   mints a fresh value on its next call. A rebuilt database has no row
+   either, and that is already how it signals a reset, so the migration
+   reuses that mechanism instead of choosing a value itself.
 
 `docs/database-migrations.md` measures `RENAME COLUMN` and `ADD COLUMN` as
 keeping the sync triggers, with their bodies rewritten, so no trigger reinstall
@@ -110,9 +118,12 @@ implementation checks `sqlite_master` rather than assuming.
 - `MediaWriter.setResolution` → `setLookupState`. Same parameters, same
   required, never-defaulted `lookupJson`.
 - New `MediaWriter.setVideoResolution(rssItemId: number, value: string | null): Promise<void>`.
-  The writer re-checks the accepted pattern and throws on anything else. It
-  is a shared writer that any plugin can call, so the host does not trust
-  every caller to have run `videoResolutionOf` first.
+  The writer throws if `normalizeVideoResolution(value) !== value`, so only
+  `null` or an already-normalized value is stored. It is a shared writer that
+  any plugin can call, so the host does not trust every caller to have run
+  `videoResolutionOf` first.
+- New `normalizeVideoResolution(value: unknown): string | null`, described
+  under "Accepted values".
 - `tokens.ts`: `resolution` returns to the television, film and xxx token
   lists. The "`resolution` is not here" section is rewritten to say what the
   token now reads.
@@ -134,7 +145,7 @@ Every reader and writer of the old names moves with it: `host/src/media/writer.t
 
 - `videoResolutionOf(envelope: LookupEnvelope): string | null`, in
   `packages/openmetadata`. It reads `parsed.quality.resolution` by narrowing,
-  never by casting, and returns it only if it matches the accepted pattern.
+  never by casting, and passes it through `normalizeVideoResolution`.
 - `applyEnvelope` calls `ctx.media.setVideoResolution(target.rssItemId,
   videoResolutionOf(envelope))` once, beside the existing "recorded before
   the branch below decides anything" `lookupId` update. So every outcome
@@ -151,10 +162,12 @@ A resolved release's lookup answer was cleared when it was linked
 
 **Marking and enqueueing.** `packages/openmetadata` exports
 `videoResolutionBackfillMigration(pluginId: string, version: number): Migration`.
-Each plugin's `migrations.ts` lists it explicitly at **version 3**. The engine
-owns version 1 and every plugin already uses 2. Having each plugin assign the
-number means a collision is visible in its own list, rather than the engine
-appending a version a plugin might also use. `up(db)`:
+Each plugin's `migrations.ts` lists it explicitly at **version 4**. The engine
+owns version 1, and every plugin already uses 2 (its own tables) and 3
+(`placementTableMigration`). Having each plugin assign the number means a
+collision is visible in its own list, rather than the engine appending a
+version a plugin might also use. This is the pattern
+`placementTableMigration(pluginId, version)` already set. `up(db)`:
 
 1. `ALTER TABLE <plugin>_lookup ADD COLUMN video_resolution_backfill INTEGER NOT NULL DEFAULT 0`
 2. Set it to `1` for every lookup row whose `rss_item.lookup_state = 'resolved'`.
@@ -179,7 +192,10 @@ running.
 `jobs`):
 
 1. Select up to 100 marked rows joined to `rss_item` for the filename. 100 is
-   the service's maximum batch.
+   the service's maximum batch. Before selecting, clear the mark on any
+   marked row whose `rss_item` no longer exists. A row the join can never
+   return would otherwise stay marked, and step 4 would re-enqueue the job
+   for ever.
 2. One batch `POST /api/v1/lookup` with the plugin's category and those
    filenames -- the existing `client.batch`. It is a fresh question keyed on
    the name, and the service answers from its cache where it has one.
@@ -188,7 +204,8 @@ running.
    written -- no media item, cast, artwork or lookup state -- so the
    release's identification is untouched even if the fresh answer disagrees
    with the one that identified it.
-4. If marked rows remain, enqueue the same job kind again.
+4. If marked rows remain -- counted with the same join as step 1 -- enqueue
+   the same job kind again.
 
 **Failure.** An HTTP failure or 429 throws, so the runner's retry and backoff
 apply. After the last attempt the job dead-letters and the rows it had not
@@ -243,6 +260,8 @@ Every item below is a test written to fail first.
   old one.
 - `tokens.test.ts` counts become 8/7/6. `{resolution}` saves in a shape and
   resolves at import, both with a value and with `null`.
+- `normalizeVideoResolution`'s cases, and the migration's SQL restatement,
+  run against one shared table of inputs.
 - The backfill migration's job row is dispatched by the real runner, the
   coupling test above.
 
@@ -259,6 +278,7 @@ Every item below is a test written to fail first.
   - It writes only the resolution.
   - It clears the mark on a `null` answer.
   - It re-enqueues while marks remain.
+  - It clears a mark whose release was deleted, and does not re-enqueue for it.
   - It throws on HTTP failure with the marks intact.
 
 **Web / plugin-ui**
