@@ -434,6 +434,19 @@ ul[aria-label='releases'] li {
   font-size: var(--text-body);
 }
 
+/* The download-type glyph that leads each row (`icons.tsx`'s
+   `DownloadTypeIcon`), at the row's own text size and dimmed like the
+   detail after the filename. `align-self: center` because the row aligns
+   on the text baseline and an `<svg>` has none of its own, so it would
+   otherwise sit on the baseline with its whole height above it. */
+ul[aria-label='releases'] li > .icon {
+  flex: none;
+  align-self: center;
+  width: 1em;
+  height: 1em;
+  color: var(--color-text-dim);
+}
+
 /* The filename runs in mono so a column of similar names lines up on the
    characters that differ, the same reasoning 1.x's `rows.css` gave
    `.release-name`.

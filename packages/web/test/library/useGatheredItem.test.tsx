@@ -271,7 +271,7 @@ test("a notification on the item's own row, while enabled, replaces the cached r
   assert.equal(
     subscribedTable,
     'media_item',
-    "the per-row channel names the media item, and only it -- the download tables are watched through subscribeInserts instead, because a row that does not exist yet has no id to name here",
+    "with nothing picked, the per-row channel names the media item and only it -- a download that does not exist yet has no id to name here, so it is caught through subscribeInserts instead",
   );
   assert.equal(subscribedId, 7);
 
@@ -459,4 +459,105 @@ test('unmounting takes down the download insert subscriptions as well as the row
 
   unmount();
   assert.deepEqual([...live], [], 'and all three are down again, leaving nothing to touch a closed store');
+});
+
+/**
+ * A source whose every gather finds release 3 with torrent 11 under it, at
+ * the status and percentage `states` holds for that gather -- the sequence
+ * a download's progress produces. `subscribe` records every per-row
+ * listener by `table:id`, so a test can fire one exactly as `store/notify.ts`
+ * would for an update, and can see which rows are watched.
+ */
+function progressHarness(states: readonly { status: string; percentage: number | null }[]): {
+  source: GatheredSource;
+  gathers: () => number;
+  live: () => string[];
+  fire: (key: string) => void;
+} {
+  let gathers = 0;
+  const listeners = new Map<string, Set<() => void>>();
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) => {
+      const state = states[Math.min(gathers, states.length - 1)];
+      gathers += 1;
+      assert.ok(state !== undefined);
+      const row = { ...torrentRow(11, 3), ...state };
+      return stubItem(id, 'Title', [release(3, [{ table: 'torrent_download', id: 11, row }])]);
+    },
+    subscribe: (table: string, id: number, cb: () => void) => {
+      const key = `${table}:${String(id)}`;
+      let set = listeners.get(key);
+      if (set === undefined) {
+        set = new Set();
+        listeners.set(key, set);
+      }
+      set.add(cb);
+      return () => {
+        listeners.get(key)?.delete(cb);
+        if (listeners.get(key)?.size === 0) listeners.delete(key);
+      };
+    },
+  };
+  return {
+    source,
+    gathers: () => gathers,
+    live: () => [...listeners.keys()].toSorted(),
+    fire: (key) => {
+      const set = listeners.get(key);
+      assert.ok(set !== undefined, `nothing is subscribed to ${key}`);
+      for (const cb of set) cb();
+    },
+  };
+}
+
+function ProgressHarness({ source }: { source: GatheredSource }): ReactElement {
+  const gathered = useGatheredItem(source, 7, true);
+  return (
+    <div data-testid="progress">
+      {(gathered?.releases ?? [])
+        .flatMap((each) => each.downloads)
+        .map((download) => `${download.row.status}:${String(download.row.percentage)}`)
+        .join(',')}
+    </div>
+  );
+}
+
+test("an update to a download this item already shows re-gathers, so its progress moves", async () => {
+  // The defect: `subscribeInserts` fires only for a row that *became*
+  // visible, so once a pick's row had arrived nothing re-gathered on its
+  // progress, and the card sat at its first percentage until collapsed and
+  // reopened.
+  const { source, gathers, fire } = progressHarness([
+    { status: 'downloading', percentage: 10 },
+    { status: 'downloading', percentage: 55 },
+    { status: 'delivered', percentage: 55 },
+  ]);
+  render(<ProgressHarness source={source} />);
+  await waitFor(() => {
+    assert.equal(screen.getByTestId('progress').textContent, 'downloading:10');
+  });
+
+  fire('torrent_download:11');
+  await waitFor(() => {
+    assert.equal(screen.getByTestId('progress').textContent, 'downloading:55');
+  });
+
+  // And again: the subscription is re-made for the fresh gather, not left
+  // pointing at the first one's closure.
+  fire('torrent_download:11');
+  await waitFor(() => {
+    assert.equal(screen.getByTestId('progress').textContent, 'delivered:55');
+  });
+  assert.equal(gathers(), 3);
+});
+
+test('the per-download subscriptions follow the gather and come down on unmount', async () => {
+  const { source, live } = progressHarness([{ status: 'downloading', percentage: 10 }]);
+  const { unmount } = render(<ProgressHarness source={source} />);
+  await waitFor(() => {
+    assert.deepEqual(live(), ['media_item:7', 'torrent_download:11']);
+  });
+  unmount();
+  assert.deepEqual(live(), [], 'nothing is left subscribed once the card is gone');
 });

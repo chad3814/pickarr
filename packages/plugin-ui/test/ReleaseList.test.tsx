@@ -13,16 +13,16 @@ import {
 
 afterEach(cleanup);
 
-/** An `RssItemSyncRead` with everything but `id`, `filename`, `resolution` and `rankingScore` defaulted. */
+/** An `RssItemSyncRead` with everything but `id`, `filename` and `rankingScore` defaulted -- `resolution` is the lookup state, `resolved` unless a test says otherwise. */
 function rssItem({
   id,
   filename,
-  resolution,
+  resolution = 'resolved',
   rankingScore = null,
 }: {
   id: number;
   filename: string;
-  resolution: string;
+  resolution?: string;
   rankingScore?: number | null;
 }): RssItemSyncRead {
   return {
@@ -111,7 +111,7 @@ function releasesFor(count: number): GatheredRelease[] {
   for (let id = 1; id <= count; id += 1) {
     releases.push({
       id,
-      row: rssItem({ id, filename: `release-${String(id)}.mkv`, resolution: '1080p' }),
+      row: rssItem({ id, filename: `release-${String(id)}.mkv` }),
       downloads: [],
     });
   }
@@ -120,7 +120,7 @@ function releasesFor(count: number): GatheredRelease[] {
 
 /** Release 1, named `filename` and nothing else special -- for the two title-attribute tests. */
 function longRelease(filename: string): GatheredRelease {
-  return { id: 1, row: rssItem({ id: 1, filename, resolution: '2160p' }), downloads: [] };
+  return { id: 1, row: rssItem({ id: 1, filename }), downloads: [] };
 }
 
 /** One release row's Pick button, found through the row rather than by name, so these tests do not depend on how the button is announced. */
@@ -137,7 +137,7 @@ test('no releases still renders a releases list, with nothing inside it', () => 
 test('a release with a download shows its filename, resolution and download status', () => {
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', resolution: '2160p' }),
+    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv' }),
     downloads: [torrentDownload(torrent({ id: 9, status: 'downloading', percentage: 42 }))],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);
@@ -151,7 +151,7 @@ test('a release with a download shows its filename, resolution and download stat
 test('a release with no downloads shows no status label at all', () => {
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.1080p.mkv', resolution: '1080p' }),
+    row: rssItem({ id: 3, filename: 'the.thing.1080p.mkv' }),
     downloads: [],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);
@@ -168,7 +168,7 @@ test('a release with a torrent and an nzb download shows both statuses', () => {
   // in `ReleaseList.tsx`), which this pins directly.
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.mkv', resolution: '1080p' }),
+    row: rssItem({ id: 3, filename: 'the.thing.mkv' }),
     downloads: [
       torrentDownload(torrent({ id: 9, status: 'downloading', percentage: 42 })),
       nzbDownload(nzb({ id: 11, status: 'queued' })),
@@ -184,7 +184,7 @@ test('a release with a torrent and an nzb download shows both statuses', () => {
 test('a release with a download but no percentage shows the status without one', () => {
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.720p.mkv', resolution: '720p' }),
+    row: rssItem({ id: 3, filename: 'the.thing.720p.mkv' }),
     downloads: [torrentDownload(torrent({ id: 9, status: 'queued', percentage: null }))],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);
@@ -194,6 +194,87 @@ test('a release with a download but no percentage shows the status without one',
   assert.ok(!item.textContent?.includes('%'), 'nothing to show when the download carries no percentage');
 });
 
+test('a percentage is shown only while a download is downloading', () => {
+  // The host writes `percentage` from the client's queue and never clears
+  // it, so a download that left the queue at 97% keeps 97 on its row
+  // through `completed` and `delivered`. Rendering it there read as
+  // "delivered, 97% done".
+  const releases: GatheredRelease[] = ['downloading', 'completed', 'delivered', 'failed'].map((status, index) => {
+    const id = index + 1;
+    return {
+      id,
+      row: rssItem({ id, filename: `${status}.mkv` }),
+      downloads: [torrentDownload(torrent({ id, status, percentage: 97 }))],
+    };
+  });
+  render(<ReleaseList releases={releases} submit={accepts} />);
+
+  const text = (filename: string): string => screen.getByRole('listitem', { name: filename }).textContent ?? '';
+  assert.ok(text('downloading.mkv').includes('Status: downloading (97%)'), 'downloading shows how far along');
+  for (const status of ['completed', 'delivered', 'failed']) {
+    assert.ok(text(`${status}.mkv`).includes(`Status: ${status}`), `${status} still shows its status`);
+    assert.ok(!text(`${status}.mkv`).includes('%'), `${status} does not show a stale percentage`);
+  }
+});
+
+test("a row shows the release's video resolution from its filename, and unknown when it has none", () => {
+  const releases: GatheredRelease[] = [
+    { id: 1, row: rssItem({ id: 1, filename: 'the.thing.2160p.mkv' }), downloads: [] },
+    { id: 2, row: rssItem({ id: 2, filename: 'the.thing.mkv' }), downloads: [] },
+  ];
+  render(<ReleaseList releases={releases} submit={accepts} />);
+
+  const known = screen.getByRole('listitem', { name: 'the.thing.2160p.mkv' });
+  const unknown = screen.getByRole('listitem', { name: 'the.thing.mkv' });
+  assert.ok(
+    [...known.querySelectorAll('span')].some((span) => span.textContent === '2160p'),
+    'the resolution has a span of its own, not just a mention inside the filename',
+  );
+  assert.ok(
+    [...unknown.querySelectorAll('span')].some((span) => span.textContent === 'unknown'),
+    'no resolution in the name reads as unknown',
+  );
+});
+
+test("a row does not show the release's lookup state", () => {
+  // `rss_item.resolution` is the lookup state, not a video resolution. It
+  // says nothing on a browse card (every release there is `resolved`) that
+  // the screen does not already say.
+  const release: GatheredRelease = {
+    id: 1,
+    row: rssItem({ id: 1, filename: 'the.thing.1080p.mkv', resolution: 'resolved' }),
+    downloads: [],
+  };
+  render(<ReleaseList releases={[release]} submit={accepts} />);
+
+  const item = screen.getByRole('listitem', { name: 'the.thing.1080p.mkv' });
+  assert.ok(!item.textContent?.includes('resolved'), 'the lookup state is not rendered');
+});
+
+test('a row starts with an icon naming its download type', () => {
+  const releases: GatheredRelease[] = [
+    { id: 1, row: { ...rssItem({ id: 1, filename: 'a.torrent.mkv' }), downloadType: 'torrent' }, downloads: [] },
+    { id: 2, row: { ...rssItem({ id: 2, filename: 'an.nzb.mkv' }), downloadType: 'nzb' }, downloads: [] },
+  ];
+  render(<ReleaseList releases={releases} submit={accepts} />);
+
+  for (const [filename, type] of [['a.torrent.mkv', 'torrent'], ['an.nzb.mkv', 'nzb']] as const) {
+    const item = screen.getByRole('listitem', { name: filename });
+    const first = item.firstElementChild;
+    assert.ok(first?.tagName.toLowerCase() === 'svg', `${filename}'s first child is the icon`);
+    assert.ok(within(item).getByRole('img', { name: type }), `${filename}'s icon is named ${type}`);
+  }
+});
+
+test("the icon does not change the row's accessible name", () => {
+  // The row is named by `aria-labelledby` pointing at the filename alone,
+  // so an icon title cannot leak into it -- pinned because every Pick
+  // button's name is composed the same way.
+  render(<ReleaseList releases={releasesFor(1)} submit={accepts} />);
+  assert.ok(screen.getByRole('listitem', { name: 'release-1.mkv' }));
+  assert.ok(screen.getByRole('button', { name: 'Pick release-1.mkv' }));
+});
+
 test('a release shows its ranking score', () => {
   // Design spec §5 names the ranking score alongside the resolution and the
   // download status. It was dropped in the spec-to-plan translation and
@@ -201,7 +282,7 @@ test('a release shows its ranking score', () => {
   // against the plan.
   const release: GatheredRelease = {
     id: 3,
-    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', resolution: '2160p', rankingScore: 84 }),
+    row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', rankingScore: 84 }),
     downloads: [],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);
@@ -217,12 +298,12 @@ test('a ranking score of zero is shown, and an absent one shows nothing', () => 
   // the property is the distinction between them.
   const scoredZero: GatheredRelease = {
     id: 1,
-    row: rssItem({ id: 1, filename: 'scored.zero.mkv', resolution: '1080p', rankingScore: 0 }),
+    row: rssItem({ id: 1, filename: 'scored.zero.mkv', rankingScore: 0 }),
     downloads: [],
   };
   const unranked: GatheredRelease = {
     id: 2,
-    row: rssItem({ id: 2, filename: 'unranked.mkv', resolution: '1080p' }),
+    row: rssItem({ id: 2, filename: 'unranked.mkv' }),
     downloads: [],
   };
   render(<ReleaseList releases={[scoredZero, unranked]} submit={accepts} />);
@@ -246,12 +327,12 @@ test('a release with no download offers a Pick button, and one that has a downlo
   // instead.
   const pickable: GatheredRelease = {
     id: 1,
-    row: rssItem({ id: 1, filename: 'pickable.mkv', resolution: '1080p' }),
+    row: rssItem({ id: 1, filename: 'pickable.mkv' }),
     downloads: [],
   };
   const picked: GatheredRelease = {
     id: 2,
-    row: rssItem({ id: 2, filename: 'picked.mkv', resolution: '1080p' }),
+    row: rssItem({ id: 2, filename: 'picked.mkv' }),
     downloads: [torrentDownload(torrent({ id: 2, status: 'downloading', percentage: 7 }))],
   };
   render(<ReleaseList releases={[pickable, picked]} submit={accepts} />);
@@ -334,7 +415,7 @@ test('an accepted pick stays Picking… through the 202, and the status replaces
   const arrived: GatheredRelease[] = [
     {
       id: 1,
-      row: rssItem({ id: 1, filename: 'release-1.mkv', resolution: '1080p' }),
+      row: rssItem({ id: 1, filename: 'release-1.mkv' }),
       downloads: [torrentDownload(torrent({ id: 1, status: 'submitted', percentage: null }))],
     },
   ];

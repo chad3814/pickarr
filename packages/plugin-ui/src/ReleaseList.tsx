@@ -1,8 +1,14 @@
 /**
- * One media item's releases -- filename, resolution, ranking score, and
- * each download's status and percentage (design spec §5) -- and, on every
- * release that has no download, the `Pick` button that submits one (picks
- * design §2, §3).
+ * One media item's releases -- download type, filename, resolution, ranking
+ * score, and each download's status and percentage (design spec §5) -- and,
+ * on every release that has no download, the `Pick` button that submits one
+ * (picks design §2, §3).
+ *
+ * **The resolution is the video resolution the filename states, not
+ * `row.resolution`.** That column is the lookup state, and this row used to
+ * print it: `resolved` on every browse card, which is what being on a
+ * browse card already means. `videoResolutionOf` has why the filename is
+ * the only source a client has.
  *
  * A release with no `torrent_download` or `nzb_download` row is still not
  * an edge case here; it is the normal state of every release nobody has
@@ -73,6 +79,7 @@
  * `store/gather.ts` with no transformation of its own.
  */
 import { useState, type ReactElement } from 'react';
+import { DownloadTypeIcon } from './icons.tsx';
 import {
   PICK_REFUSAL_MESSAGES,
   type GatheredDownloadView as GatheredDownload,
@@ -80,6 +87,7 @@ import {
   type GatheredReleaseView as GatheredRelease,
   type PickSubmit,
 } from './types.ts';
+import { videoResolutionOf } from './videoResolution.ts';
 
 export interface ReleaseListProps {
   releases: GatheredItemView['releases'];
@@ -89,10 +97,18 @@ export interface ReleaseListProps {
 
 /**
  * One download's visible status text, e.g. `Status: downloading (42%)`.
+ *
+ * **The percentage only while `downloading`.** The host writes it from the
+ * client's queue and nothing clears it once the download leaves the queue
+ * (`host/src/clients/reconcile.ts`'s `walkQueueEntry` is its only writer),
+ * so a row that left at 97% still says 97 through `completed` and
+ * `delivered`. Before `downloading` there is nothing to show either.
  */
 function statusText(download: GatheredDownload): string {
   const { status, percentage } = download.row;
-  return percentage === null ? `Status: ${status}` : `Status: ${status} (${String(percentage)}%)`;
+  return status === 'downloading' && percentage !== null
+    ? `Status: ${status} (${String(percentage)}%)`
+    : `Status: ${status}`;
 }
 
 /**
@@ -240,8 +256,9 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
         on the card. `ReleaseList.test.tsx` pins the name against exactly
         that.
       */}
+      <DownloadTypeIcon type={release.row.downloadType} />
       <span id={filenameId} title={release.row.filename}>{release.row.filename}</span>{' '}
-      <span>{release.row.resolution}</span>
+      <span>{videoResolutionOf(release.row.filename) ?? 'unknown'}</span>
       {score !== undefined && <span> {score}</span>}
       {release.downloads.map((download) => (
         <span key={downloadKey(download)}> {statusText(download)}</span>
