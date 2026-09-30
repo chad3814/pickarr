@@ -197,6 +197,24 @@ export function ensureSyncGeneration(raw: DatabaseSync, at: number): string {
 }
 
 /**
+ * Deletes this database's sync generation, so the next
+ * `ensureSyncGeneration` mints a fresh one and every client discards its
+ * replica and bootstraps again.
+ *
+ * **A delete rather than a new value**, because absence is already what a
+ * rebuilt database looks like -- see `ensureSyncGeneration`. A migration
+ * that changes the shape of a synced row calls this so no client keeps a
+ * row in the old shape.
+ *
+ * **Migration 24 calls this**, so it is part of that migration's contract
+ * (`docs/database-migrations.md`): it must go on meaning "the next boot
+ * mints a new generation".
+ */
+export function forgetSyncGeneration(raw: DatabaseSync): void {
+  raw.prepare('DELETE FROM host_state WHERE key = ?').run(SYNC_GENERATION_KEY);
+}
+
+/**
  * The Better Auth signing secret, generating and persisting one on first
  * call. Stable across calls and across processes: Better Auth signs every
  * session cookie with this value, so a secret that changed on restart --

@@ -79,8 +79,8 @@ function seedRssItem(
 ): number {
   const info = raw.prepare(`
     INSERT INTO rss_item
-      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution, resolution_detail, guid)
-    VALUES (?, ?, ?, ?, ?, 'torrent', ?, '1080p', 'x264', ?)
+      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state, lookup_state_detail, guid)
+    VALUES (?, ?, ?, ?, ?, 'torrent', ?, 'resolved', 'x264', ?)
   `).run(feedId, filename, `https://example.com/${filename}`, updatedAt, updatedAt, mediaItemId, `guid-${filename}`);
   return Number(info.lastInsertRowid);
 }
@@ -665,8 +665,8 @@ test('an rss item page reads back its shape and pages by updated_at', () => {
       filename: 'a.mkv',
       link: 'https://example.com/a.mkv',
       mediaItemId: 1,
-      resolution: '1080p',
-      resolutionDetail: 'x264',
+      lookupState: 'resolved',
+      lookupStateDetail: 'x264',
       downloadType: 'torrent',
       deliveredAt: 150,
     },
@@ -676,8 +676,8 @@ test('an rss item page reads back its shape and pages by updated_at', () => {
       filename: 'b.mkv',
       link: 'https://example.com/b.mkv',
       mediaItemId: null,
-      resolution: '1080p',
-      resolutionDetail: 'x264',
+      lookupState: 'resolved',
+      lookupStateDetail: 'x264',
       downloadType: 'torrent',
       deliveredAt: null,
     },
@@ -731,8 +731,8 @@ test('rssItemsForMediaItem and downloadsForRssItem see only the plugin that owns
       filename: 'alpha.mkv',
       link: 'https://example.com/alpha.mkv',
       mediaItemId: mediaId,
-      resolution: '1080p',
-      resolutionDetail: 'x264',
+      lookupState: 'resolved',
+      lookupStateDetail: 'x264',
       downloadType: 'torrent',
       deliveredAt: null,
     },

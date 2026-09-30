@@ -13,16 +13,16 @@ import {
 
 afterEach(cleanup);
 
-/** An `RssItemSyncRead` with everything but `id`, `filename` and `rankingScore` defaulted -- `resolution` is the lookup state, `resolved` unless a test says otherwise. */
+/** An `RssItemSyncRead` with everything but `id`, `filename` and `rankingScore` defaulted -- `lookupState` is the lookup state, `resolved` unless a test says otherwise. */
 function rssItem({
   id,
   filename,
-  resolution = 'resolved',
+  lookupState = 'resolved',
   rankingScore = null,
 }: {
   id: number;
   filename: string;
-  resolution?: string;
+  lookupState?: string;
   rankingScore?: number | null;
 }): RssItemSyncRead {
   return {
@@ -34,8 +34,8 @@ function rssItem({
     downloadType: 'torrent',
     mediaItemId: null,
     rankingScore,
-    resolution,
-    resolutionDetail: null,
+    lookupState,
+    lookupStateDetail: null,
     lookupJson: null,
     deliveredAt: null,
   };
@@ -237,12 +237,12 @@ test("a row shows the release's video resolution from its filename, and unknown 
 });
 
 test("a row does not show the release's lookup state", () => {
-  // `rss_item.resolution` is the lookup state, not a video resolution. It
+  // `rss_item.lookup_state` is the lookup state, not a video resolution. It
   // says nothing on a browse card (every release there is `resolved`) that
   // the screen does not already say.
   const release: GatheredRelease = {
     id: 1,
-    row: rssItem({ id: 1, filename: 'the.thing.1080p.mkv', resolution: 'resolved' }),
+    row: rssItem({ id: 1, filename: 'the.thing.1080p.mkv', lookupState: 'resolved' }),
     downloads: [],
   };
   render(<ReleaseList releases={[release]} submit={accepts} />);

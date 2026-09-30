@@ -10,10 +10,10 @@
  */
 import type {
   DetailValue,
+  EnvelopeState,
   LookupBatchEntry,
   LookupBatchResponse,
   LookupEnvelope,
-  LookupState,
   Media,
   MediaKind,
   MediaParent,
@@ -62,10 +62,10 @@ function array(value: unknown, field: string): readonly unknown[] {
 const STATES: ReadonlySet<string> = new Set(['resolved', 'unresolved', 'pending']);
 const KINDS: ReadonlySet<string> = new Set(['movie', 'series', 'season', 'episode', 'book', 'scene']);
 
-function state(value: unknown): LookupState {
+function state(value: unknown): EnvelopeState {
   const text = string(value, 'state');
   if (!STATES.has(text)) fail('state', `is not a lookup state: ${text}`);
-  return text as LookupState;
+  return text as EnvelopeState;
 }
 
 function kind(value: unknown, field: string): MediaKind {

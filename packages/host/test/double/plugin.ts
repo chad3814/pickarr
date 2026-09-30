@@ -574,14 +574,14 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     // `@pickarr/openmetadata`'s `LookupEnvelope`/`lookupJsonFor` and carries
     // nothing to serialise there, and clearing with `null` is still correct
     // for a retry that resolves after an earlier failed attempt.
-    await ctx.media.setResolution(rssItemId, 'resolved', null, null);
+    await ctx.media.setLookupState(rssItemId, 'resolved', null, null);
 
     // A separate job, not fetched inline here, and only when the service
     // actually offered something: enqueuing an empty job would still be
     // correct but would give every plugin test an extra job row to filter
     // out. The point of the separation is retry isolation -- everything
     // above this line has already committed the media item, its provider
-    // claim and its resolution, so an image that never downloads, or one
+    // claim and its lookup state, so an image that never downloads, or one
     // `image-size` refuses to measure, can exhaust its own job's attempts
     // and dead-letter without touching any of that.
     if (entry.images.length > 0) {
@@ -606,7 +606,7 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
         payload: { lookupId: entry.lookupId, rssItemId },
         runAt: deps.now() + POLL_DELAY_MS,
       });
-      // Resolution stays `pending`: nothing is known about this item yet.
+      // The lookup state stays `pending`: nothing is known about this item yet.
       return;
     }
 
@@ -616,14 +616,14 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
       // `unresolved` would retry a subtitle forever and show it to a reader
       // as a problem they cannot fix.
       // `null`: as above, this double has no envelope shape to store.
-      await ctx.media.setResolution(rssItemId, 'refused', entry.refusal, null);
+      await ctx.media.setLookupState(rssItemId, 'refused', entry.refusal, null);
       return;
     }
 
     if (entry.status === 'unresolved') {
       // Not an error either: the name was not recognised, which is the state a
       // human might fix. Nothing is enqueued — a retry happens on request.
-      await ctx.media.setResolution(
+      await ctx.media.setLookupState(
         rssItemId,
         'unresolved',
         `the parser service did not recognise "${entry.name}"`,

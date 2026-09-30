@@ -168,7 +168,7 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  *
  * **Read off the record rather than off the narrowed type.**
  * {@link isRssItem} above answers `value is RssItemSyncRead`, and that
- * interface declares `resolution: string` and `lookupJson: string | null`
+ * interface declares `lookupState: string` and `lookupJson: string | null`
  * -- but it checks neither, so after the narrowing those two fields are
  * *typed* present and may be absent at run time. That is not hypothetical:
  * `store/gather.ts`'s own doc states the rule ("a replica *persists across
@@ -182,7 +182,7 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  * `Unmatched.test.tsx`'s `legacyRssOp` is a fixture hand-built in that
  * older shape, which is the only way any test here can see it.
  *
- * **What this buys over `value.resolution`, stated precisely, because an
+ * **What this buys over `value.lookupState`, stated precisely, because an
  * earlier version of this comment overclaimed and mutation testing caught
  * it.** Property access on a missing key already answers `undefined` in
  * JavaScript, so for *absence alone* a direct read behaves identically --
@@ -196,7 +196,7 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
  *   answer expands without an empty block", because `lookupJson` is
  *   genuinely `null` on the wire for a release whose lookup never ran.
  * - **The empty-string exclusion**, below.
- * - **Honesty about the type.** `value.resolution` types as `string`, so
+ * - **Honesty about the type.** `value.lookupState` types as `string`, so
  *   the `?? 'not recorded'` fallback at the render site would read as dead
  *   code to the next person, who would delete it. It is not dead: deleting
  *   it reds the legacy-shape test.
@@ -256,10 +256,10 @@ interface UnmatchedRow {
   readonly filename: string;
   /** Which feed delivered it, for {@link useFeedNames} to name. */
   readonly feedId: number | undefined;
-  /** `@pickarr/contract`'s `Resolution` vocabulary: what became of this release's identification. */
-  readonly resolution: string | undefined;
+  /** `@pickarr/contract`'s `LookupState`: what became of this release's identification. */
+  readonly lookupState: string | undefined;
   /** The host's own sentence about that outcome. */
-  readonly resolutionDetail: string | undefined;
+  readonly lookupStateDetail: string | undefined;
   /** The lookup service's answer, as stored -- or the `LOOKUP_JSON_TOO_LARGE` marker in place of one too big to keep. */
   readonly lookupJson: string | undefined;
   /**
@@ -267,9 +267,9 @@ interface UnmatchedRow {
    *
    * Read for the cursor already; carried onto the row so {@link RetryButton}
    * can tell that a retry has landed. Every write the lookup path makes
-   * bumps it -- `setResolution` sets `updated_at` unconditionally -- so it
+   * bumps it -- `setLookupState` sets `updated_at` unconditionally -- so it
    * advances even when the retry produces the very same answer, which a
-   * comparison of `resolution` would not catch.
+   * comparison of `lookupState` would not catch.
    */
   readonly updatedAt: number;
 }
@@ -336,8 +336,8 @@ async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<Un
         id: row.id,
         filename: value.filename,
         feedId: typeof value.feedId === 'number' ? value.feedId : undefined,
-        resolution: textOf(value, 'resolution'),
-        resolutionDetail: textOf(value, 'resolutionDetail'),
+        lookupState: textOf(value, 'lookupState'),
+        lookupStateDetail: textOf(value, 'lookupStateDetail'),
         updatedAt: updatedAtOf(row),
         lookupJson: textOf(value, 'lookupJson'),
       });
@@ -492,15 +492,13 @@ const REPORTS_NOTHING = (): void => {};
  * these four element types appear nowhere else in the rendered app, so no
  * class is needed and none is added (web's stylesheets set none anywhere).
  *
- * **`resolution` is rendered as the word the host recorded, not mapped to
- * a sentence.** The column is unconstrained TEXT and nothing narrows it on
- * the way here (`RssItemSyncRead.resolution`'s own doc), so any mapping
+ * **The lookup state is rendered as the word the host recorded, not mapped
+ * to a sentence.** The column is unconstrained TEXT and nothing narrows it
+ * on the way here (`RssItemSyncRead.lookupState`'s own doc), so any mapping
  * would need a fallback for a word this build does not know -- and the
  * vocabulary is already plain English: `pending`, `refused`, `unresolved`.
- * The sentence an operator actually wants is `resolutionDetail`, which the
- * host writes for exactly that purpose. The `<dt>` reads `State` rather
- * than `Resolution` because `ReleaseList` shows a *video* resolution under
- * that word, and the two are unrelated columns.
+ * The sentence an operator actually wants is `lookupStateDetail`, which the
+ * host writes for exactly that purpose.
  *
  * **A pair whose value is absent renders neither half.** There is no
  * empty `<pre>` for a release whose lookup never ran, and no `Lookup
@@ -519,7 +517,7 @@ const REPORTS_NOTHING = (): void => {};
  * measured there at 33ms against an answer that arrived at 2934ms. The
  * signal here is `row.updatedAt` advancing past what it was at the click:
  * every write the lookup path makes bumps it, so this clears even when
- * the retry lands on the very same answer, which watching `resolution`
+ * the retry lands on the very same answer, which watching `lookupState`
  * would miss.
  *
  * **The hang this accepts, deliberately.** If the job dies before writing
@@ -586,17 +584,17 @@ function UnmatchedDetail({ row, submit }: { row: UnmatchedRow; submit: RetrySubm
       {/*
         `not recorded` rather than omitting the pair, because unlike the
         other two this one is never legitimately absent: the host has
-        written `resolution` for every release since the column existed.
+        written `lookup_state` for every release since the column existed.
         Absent here means a replica row older than this build understands
         ({@link textOf}), and saying so is more use than a card that
         quietly opens onto less than the next one.
       */}
-      <dt>State</dt>
-      <dd>{row.resolution ?? 'not recorded'}</dd>
-      {row.resolutionDetail !== undefined && (
+      <dt>Lookup state</dt>
+      <dd>{row.lookupState ?? 'not recorded'}</dd>
+      {row.lookupStateDetail !== undefined && (
         <>
           <dt>Detail</dt>
-          <dd>{row.resolutionDetail}</dd>
+          <dd>{row.lookupStateDetail}</dd>
         </>
       )}
       {row.lookupJson !== undefined && (

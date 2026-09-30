@@ -44,8 +44,8 @@ function seedRssItem(raw: DatabaseSync, name: string): number {
   `).run(name, `https://example.test/${name}`);
   const feedId = Number((raw.prepare('SELECT id FROM rss_feed WHERE name = ?').get(name) as { id: unknown }).id);
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
-    VALUES (?, ?, ?, 1, 1, 'torrent', '1080p')
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
+    VALUES (?, ?, ?, 1, 1, 'torrent', 'resolved')
   `).run(feedId, `${name}.mkv`, `https://example.test/${name}.mkv`);
   return Number(result.lastInsertRowid);
 }
@@ -62,8 +62,8 @@ function seedRssItemOnNewFeed(raw: DatabaseSync, feedName: string, filename: str
   `).run(feedName, `https://example.test/${feedName}`);
   const feedId = Number((raw.prepare('SELECT id FROM rss_feed WHERE name = ?').get(feedName) as { id: unknown }).id);
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
-    VALUES (?, ?, ?, 1, 1, 'torrent', '1080p')
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
+    VALUES (?, ?, ?, 1, 1, 'torrent', 'resolved')
   `).run(feedId, filename, `https://example.test/${feedName}/${filename}`);
   return Number(result.lastInsertRowid);
 }

@@ -74,7 +74,7 @@ export function createFeedReader(deps: {
   // conflicting insert resolves `.get()` to `undefined` rather than a row or
   // a throw, and a successful one resolves to the new row.
   const insert = deps.raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, guid, download_type, resolution, created_at, updated_at)
+    INSERT INTO rss_item (feed_id, filename, link, guid, download_type, lookup_state, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
     ON CONFLICT (feed_id, guid) DO NOTHING
     RETURNING id

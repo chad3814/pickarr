@@ -150,8 +150,8 @@ export const rssItem = sqliteTable('rss_item', {
   downloadType: text('download_type').notNull(),
   mediaItemId: integer('media_item_id').references(() => mediaItem.id),
   rankingScore: integer('ranking_score'),
-  resolution: text('resolution').notNull(),
-  resolutionDetail: text('resolution_detail'),
+  lookupState: text('lookup_state').notNull(),
+  lookupStateDetail: text('lookup_state_detail'),
   // Written only while a release is unmatched, cleared when it resolves --
   // `@pickarr/contract`'s `RssItemSyncRead.lookupJson` carries why.
   lookupJson: text('lookup_json'),

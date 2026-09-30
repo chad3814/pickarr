@@ -1083,7 +1083,7 @@ test('the retry button on an unmatched card really reaches the host', async ({ p
     // 'Retry' })`. The first draft of this spec did exactly that and its
     // collapsed-state assertion failed against correct code.
     feedName: 'Nightly indexer',
-    resolution: 'unresolved',
+    lookupState: 'unresolved',
     detail: `the lookup service did not recognise "${filename}"`,
     lookupJson: null,
   });
@@ -1133,7 +1133,7 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
   await harness.seedUnmatchedRelease({
     filename: SPACED_FILENAME,
     feedName: 'Weekly torrents',
-    resolution: 'unresolved',
+    lookupState: 'unresolved',
     detail: `the lookup service did not recognise "${SPACED_FILENAME}"`,
     lookupJson: null,
   });
@@ -1141,11 +1141,11 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
   await harness.seedUnmatchedRelease({
     filename: UNMATCHED_FILENAME,
     feedName: UNMATCHED_FEED,
-    // `unresolved` -- `@pickarr/contract`'s `Resolution` word for "the
+    // `unresolved` -- `@pickarr/contract`'s `LookupState` word for "the
     // name was not recognised", which is the commonest reason a release
     // is on this screen and the state `describeUnresolved` writes its
     // sentence for.
-    resolution: 'unresolved',
+    lookupState: 'unresolved',
     detail: UNMATCHED_DETAIL,
     lookupJson: LOOKUP_ANSWER,
   });
@@ -1679,7 +1679,7 @@ test('an operator can pick a release and watch its status take the button’s pl
     pluginId: 'movie',
     title: 'A Movie',
     filename: RELEASE_FILENAME,
-    resolution: '1080p',
+    lookupState: 'resolved',
     withDownloadClient: true,
   });
 
@@ -1778,7 +1778,7 @@ test('a pick with no download client set up says so, in words that are styled as
     pluginId: 'movie',
     title: 'A Movie',
     filename: RELEASE_FILENAME,
-    resolution: '1080p',
+    lookupState: 'resolved',
     withDownloadClient: false,
   });
 

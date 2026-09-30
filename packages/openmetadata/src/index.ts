@@ -1,10 +1,10 @@
 export type {
   DetailValue,
+  EnvelopeState,
   LookupBatchEntry,
   LookupBatchResponse,
   LookupCategory,
   LookupEnvelope,
-  LookupState,
   Media,
   MediaKind,
   MediaParent,

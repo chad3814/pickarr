@@ -20,6 +20,7 @@ export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
   DownloadRead,
   ImageInit,
+  LookupState,
   MediaItemInit,
   MediaItemRead,
   MediaItemUpdate,
@@ -27,7 +28,6 @@ export type {
   MediaWriter,
   PersonInit,
   ProviderClaim,
-  Resolution,
   RoleInit,
   RssItemRead,
   Transport,

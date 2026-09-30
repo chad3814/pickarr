@@ -28,8 +28,8 @@ const addFeed = (raw: ReturnType<typeof open>['raw']) =>
   raw.prepare('INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?)')
     .run('tv', 'a feed', 'https://example.test/feed', 100, 100);
 const addRelease = (raw: ReturnType<typeof open>['raw'], id: number, mediaItemId: number, createdAt: number) =>
-  raw.prepare(`INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
-               VALUES (?, 1, ?, ?, ?, ?, 'torrent', ?, '1080p')`)
+  raw.prepare(`INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state)
+               VALUES (?, 1, ?, ?, ?, ?, 'torrent', ?, 'resolved')`)
     .run(id, `f${id}`, `l${id}`, createdAt, createdAt, mediaItemId);
 
 /**

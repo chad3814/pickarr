@@ -5,7 +5,7 @@
  * (picks design §2, §3).
  *
  * **The resolution is the video resolution the filename states, not
- * `row.resolution`.** That column is the lookup state, and this row used to
+ * `row.lookupState`.** That column is the lookup state, and this row used to
  * print it: `resolved` on every browse card, which is what being on a
  * browse card already means. `videoResolutionOf` has why the filename is
  * the only source a client has.

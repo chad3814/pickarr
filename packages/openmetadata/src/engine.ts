@@ -166,7 +166,7 @@ async function attachPeople(
  * An answer whose `kind` cannot belong to this plugin's category used to be
  * refused inside `spec.apply` -- by which point the media item existed, held
  * the provider-ref claim, and had the rss item relinked to it, with the
- * resolution left `pending` forever and nothing on any path to undo any of
+ * lookup state left `pending` forever and nothing on any path to undo any of
  * it. The pre-flight is deliberately cheap and synchronous: it reads the
  * answer and nothing else, so there is no failure of its own for it to add.
  */
@@ -215,7 +215,7 @@ async function applyResolved(
   // to clear: `relinkRssItem` above already cleared `lookup_json` in the
   // same statement that set `media_item_id`, because a stored answer is
   // only reachable while a release is unmatched. Passing `null` anyway is
-  // not ceremony -- `setResolution`'s fourth argument is required exactly
+  // not ceremony -- `setLookupState`'s fourth argument is required exactly
   // so no branch can forget what it means to do, and a resolved release
   // carrying an answer would be a contradiction whichever statement wrote
   // it.
@@ -225,7 +225,7 @@ async function applyResolved(
   // the row linked with its answer retained, and the job retries and then
   // dead-letters, so a persistently failing `apply` stranded it for good
   // on a row `/unmatched` no longer shows.
-  await ctx.media.setResolution(target.rssItemId, 'resolved', null, null);
+  await ctx.media.setLookupState(target.rssItemId, 'resolved', null, null);
 
   // Artwork, in a job of its own and enqueued last.
   //
@@ -312,7 +312,7 @@ export async function applyEnvelope(
       // The service never finished, so the last envelope it sent is the only
       // record of how far it got -- `lookupJsonFor` is what a reader of
       // `/unmatched` sees instead of a bare "gave up" sentence.
-      await ctx.media.setResolution(
+      await ctx.media.setLookupState(
         target.rssItemId,
         'unresolved',
         `the lookup service never finished lookup ${envelope.lookupId} for "${target.filename}"`,
@@ -325,7 +325,7 @@ export async function applyEnvelope(
       payload: { lookupId: envelope.lookupId, rssItemId: target.rssItemId, polls },
       runAt: deps.now + POLL_DELAY_MS,
     });
-    // The resolution stays `pending`: nothing is known about this item yet.
+    // The lookup state stays `pending`: nothing is known about this item yet.
     return;
   }
 
@@ -336,14 +336,14 @@ export async function applyEnvelope(
     // The refusal sentence says *that* the name was rejected; the envelope
     // behind `lookupJsonFor` is what the service actually saw, which is what
     // `/unmatched` shows for the second question a reader asks.
-    await ctx.media.setResolution(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
+    await ctx.media.setLookupState(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
     return;
   }
 
   // 3. Not an error either: the name was not recognised, which is the state a
   //    human might fix. Nothing is enqueued -- a retry happens on request.
   if (envelope.state === 'unresolved') {
-    await ctx.media.setResolution(
+    await ctx.media.setLookupState(
       target.rssItemId,
       'unresolved',
       describeUnresolved(target.filename, envelope.suggestions),
@@ -384,7 +384,7 @@ export interface LookupPluginSpec {
    * `media_item` row is created and its provider reference claimed, because
    * that is the only point at which refusing costs nothing. A plugin that
    * only refused inside `apply` would leave a media item holding the claim,
-   * an rss item relinked to it, and a resolution stuck `pending` while its
+   * an rss item relinked to it, and a lookup state stuck `pending` while its
    * job dead-lettered -- the write order (§3.4) and the per-plugin guards
    * (§4.3-4.5) were specified separately and neither saw the other.
    *

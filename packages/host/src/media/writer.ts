@@ -1,11 +1,11 @@
 import type {
   ImageInit,
+  LookupState,
   MediaItemInit,
   MediaItemUpdate,
   MediaWriter,
   PersonInit,
   ProviderClaim,
-  Resolution,
   RoleInit,
 } from '@pickarr/contract';
 import type { ArtworkStore } from '../artwork/store.ts';
@@ -198,7 +198,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       // the answer is unreachable, and anything that leaves it behind is
       // storage no UI can show and no code will revisit.
       //
-      // It used to be cleared two statements later, by `setResolution` at
+      // It used to be cleared two statements later, by `setLookupState` at
       // the end of `openmetadata/src/engine.ts`'s resolved branch -- with
       // the plugin's own `apply` and `attachPeople` in between. A throw in
       // either left the row linked and the answer retained; the lookup job
@@ -400,17 +400,17 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       `).run(mediaItemId, role.personId, role.role, role.name, role.billingOrder, at);
     },
 
-    async setResolution(
+    async setLookupState(
       rssItemId: number,
-      resolution: Resolution,
+      state: LookupState,
       detail: string | null,
       lookupJson: string | null,
     ): Promise<void> {
       const at = now();
       // `lookup_json` is written on every call, including with `null`,
       // which is what clears an answer left by an earlier failure.
-      raw.prepare('UPDATE rss_item SET resolution = ?, resolution_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
-        .run(resolution, detail, lookupJson, at, rssItemId);
+      raw.prepare('UPDATE rss_item SET lookup_state = ?, lookup_state_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
+        .run(state, detail, lookupJson, at, rssItemId);
     },
   };
 }

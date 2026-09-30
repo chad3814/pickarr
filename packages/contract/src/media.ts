@@ -6,8 +6,11 @@
  * or sidecar — and is terminal: retrying it forever, or showing it to a reader
  * as a problem, are both wrong. `unresolved` means the name was not
  * recognised, which is the state a human might fix.
+ *
+ * Called `Resolution`, and stored in a column named `resolution`, until issue
+ * #98: it is a lookup's outcome, never a video resolution.
  */
-export type Resolution = 'pending' | 'resolved' | 'refused' | 'unresolved';
+export type LookupState = 'pending' | 'resolved' | 'refused' | 'unresolved';
 
 export interface MediaItemInit {
   /** Which plugin owns this item. */
@@ -89,7 +92,7 @@ export interface ProviderClaim {
  * methods are handed none, and `createMediaItem` stores the `pluginId` in
  * `MediaItemInit` without checking it against the plugin doing the writing.
  * So every method acts on the bare row id it is given, whoever wrote that
- * row: `setResolution` on another plugin's rss item, `updateMediaItem` and
+ * row: `setLookupState` on another plugin's rss item, `updateMediaItem` and
  * `dropMediaItem` on another plugin's media item, all succeed. Verified by
  * execution against the real writer, not inferred.
  * `MediaReader` next door scopes every one of its four methods, and the
@@ -197,9 +200,9 @@ export interface MediaWriter {
    * it, which is the one mistake that makes this column grow without
    * bound (`RssItemSyncRead.lookupJson`).
    */
-  setResolution(
+  setLookupState(
     rssItemId: number,
-    resolution: Resolution,
+    state: LookupState,
     detail: string | null,
     lookupJson: string | null,
   ): Promise<void>;
@@ -238,8 +241,8 @@ export interface RssItemRead {
   filename: string;
   link: string;
   mediaItemId: number | null;
-  resolution: string;
-  resolutionDetail: string | null;
+  lookupState: string;
+  lookupStateDetail: string | null;
   downloadType: Transport;
   deliveredAt: number | null;
 }

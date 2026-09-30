@@ -237,12 +237,12 @@ export interface RssItemSyncRead {
   rankingScore: number | null;
   /**
    * What became of this release's identification -- `./media.ts`'s
-   * `Resolution` vocabulary. `string` rather than that union for the reason
+   * `LookupState`. `string` rather than that union for the reason
    * `downloadType` above gives: the column is unconstrained TEXT and nothing
    * narrows it between the `SELECT` and the wire.
    */
-  resolution: string;
-  resolutionDetail: string | null;
+  lookupState: string;
+  lookupStateDetail: string | null;
   /**
    * The lookup service's own answer for this release, as JSON, or `null`.
    *

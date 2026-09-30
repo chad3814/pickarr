@@ -54,8 +54,8 @@
  * ## `resolution` is not here, and design spec §3 is wrong about it
  *
  * §3 lists `resolution` among the tokens that "come from `rss_item`".
- * `rss_item.resolution` is the **lookup state** -- `'pending' | 'resolved' |
- * 'refused' | 'unresolved'`, `./media.ts`'s `Resolution`, inserted as the
+ * `rss_item.lookup_state` is the **lookup state** -- `'pending' | 'resolved' |
+ * 'refused' | 'unresolved'`, `./media.ts`'s `LookupState`, inserted as the
  * literal `'pending'` by `host/src/feeds/reader.ts` -- not a video
  * resolution, and 2.0 stores a video resolution nowhere. Interpolating it
  * would name an episode `The Bear - S03E01 resolved.mkv`, permanently,

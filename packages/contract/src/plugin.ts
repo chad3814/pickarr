@@ -58,7 +58,7 @@ export interface PluginContext {
   /**
    * The typed way to write the shared rows -- and, unlike `read` below,
    * **not** scoped to this plugin. It is one writer shared by every plugin
-   * context, closed over no plugin id, so `setResolution`,
+   * context, closed over no plugin id, so `setLookupState`,
    * `updateMediaItem` and `dropMediaItem` all act on any row id handed to
    * them regardless of who owns the row. See `MediaWriter` for why that
    * asymmetry stands for now.
@@ -215,7 +215,7 @@ export interface MediaPlugin {
    * `releaseDate`, which come from the shared `media_item` row, and
    * `filename` and `ext`, which come from the source path rather than from
    * the plugin's own tables. (`resolution` was a fifth until this branch
-   * removed it: `rss_item.resolution` is the *lookup* state, not a video
+   * removed it: `rss_item.lookup_state` is the *lookup* state, not a video
    * resolution, so it resolved to nothing and dropped a segment at every
    * import. Counted, not inherited -- `host/test/plugins/tokens.test.ts`
    * holds the lists, which are seven for television, six for film and five

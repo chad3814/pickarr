@@ -65,8 +65,8 @@ function summary({ id, title }: { id: number; title: string }): MediaItemSyncRea
   };
 }
 
-/** An `RssItemSyncRead` with everything but `id`, `filename` and `resolution` defaulted. */
-function rssItem({ id, filename, resolution }: { id: number; filename: string; resolution: string }): RssItemSyncRead {
+/** An `RssItemSyncRead` with everything but `id`, `filename` and `lookupState` defaulted. */
+function rssItem({ id, filename, lookupState }: { id: number; filename: string; lookupState: string }): RssItemSyncRead {
   return {
     id,
     feedId: 1,
@@ -76,8 +76,8 @@ function rssItem({ id, filename, resolution }: { id: number; filename: string; r
     downloadType: 'torrent',
     mediaItemId: null,
     rankingScore: null,
-    resolution,
-    resolutionDetail: null,
+    lookupState,
+    lookupStateDetail: null,
     lookupJson: null,
     deliveredAt: null,
   };
@@ -350,7 +350,7 @@ test('a release shows its resolution and its download status', async () => {
         releases: [
           {
             id: 3,
-            row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', resolution: '2160p' }),
+            row: rssItem({ id: 3, filename: 'the.thing.2160p.mkv', lookupState: 'resolved' }),
             downloads: [{ kind: 'torrent', row: torrent({ rssItemId: 3, status: 'downloading', percentage: 42 }) }],
           },
         ],
@@ -376,7 +376,7 @@ test('a release with no download row shows no status rather than a blank one', a
       gathered({
         id: 7,
         title: 'The Thing',
-        releases: [{ id: 3, row: rssItem({ id: 3, filename: 'the.thing.1080p.mkv', resolution: '1080p' }), downloads: [] }],
+        releases: [{ id: 3, row: rssItem({ id: 3, filename: 'the.thing.1080p.mkv', lookupState: 'resolved' }), downloads: [] }],
       }),
     subscribe: () => () => {},
   };
@@ -419,7 +419,7 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
       gathered({
         id,
         title: 'The Thing',
-        releases: [{ id: 31, row: rssItem({ id: 31, filename: 'the.thing.mkv', resolution: '1080p' }) }],
+        releases: [{ id: 31, row: rssItem({ id: 31, filename: 'the.thing.mkv', lookupState: 'resolved' }) }],
       }),
     subscribe: () => () => {},
   };

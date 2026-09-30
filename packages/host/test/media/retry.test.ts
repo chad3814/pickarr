@@ -28,7 +28,7 @@ function setup(): DatabaseSync {
 /** An unmatched release, which is the only kind this path acts on. */
 function seedRelease(raw: DatabaseSync, id: number, mediaItemId: number | null = null): void {
   raw.prepare(`
-    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, resolution, media_item_id)
+    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, lookup_state, media_item_id)
     VALUES (?, 1, 'a.mkv', 'https://tracker.example/a.torrent', 10, 10, 'torrent', 'unresolved', ?)
   `).run(id, mediaItemId);
 }

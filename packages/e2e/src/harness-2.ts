@@ -530,9 +530,9 @@ export interface Harness {
    * would recover too -- `library/useFeedNames.ts` subscribes to
    * `rss_feed` and re-reads -- but it cannot arise here.)
    *
-   * **`resolution` and `detail` are plain strings, not
-   * `@pickarr/contract`'s `Resolution` union and its nullable detail.**
-   * `rss_item.resolution` is unconstrained TEXT, and the screen prints
+   * **`lookupState` and `detail` are plain strings, not
+   * `@pickarr/contract`'s `LookupState` union and its nullable detail.**
+   * `rss_item.lookup_state` is unconstrained TEXT, and the screen prints
    * whatever word it holds rather than mapping it to a sentence
    * (`Unmatched.tsx`), so a seeder narrowed to the four words this build
    * knows could not stand in for a replica row some other build wrote --
@@ -544,7 +544,7 @@ export interface Harness {
   seedUnmatchedRelease(input: {
     filename: string;
     feedName: string;
-    resolution: string;
+    lookupState: string;
     detail: string;
     lookupJson: string | null;
   }): Promise<number>;
@@ -552,7 +552,7 @@ export interface Harness {
     pluginId: Category;
     title: string;
     filename: string;
-    resolution: string;
+    lookupState: string;
     /**
      * Whether to create the torrent client the pick needs. Required rather
      * than defaulted, for the reason every other required dependency in
@@ -880,7 +880,7 @@ export const test = base.extend<{ harness: Harness }>({
         seedMediaItem,
         seedTvRelease,
         seedXxxScene,
-        async seedUnmatchedRelease({ filename, feedName, resolution, detail, lookupJson }) {
+        async seedUnmatchedRelease({ filename, feedName, lookupState, detail, lookupJson }) {
           const feed = await host.addFeed({
             // `tv`, and the category is deliberately not a parameter.
             // `addFeed`'s own `isRegistered` check needs one of the three
@@ -923,13 +923,13 @@ export const test = base.extend<{ harness: Harness }>({
           const info = raw.prepare(`
             INSERT INTO rss_item
               (feed_id, filename, link, created_at, updated_at, download_type,
-               resolution, resolution_detail, lookup_json)
+               lookup_state, lookup_state_detail, lookup_json)
             VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?, ?)
-          `).run(feed.id, filename, MAGNET, at, at, resolution, detail, lookupJson);
+          `).run(feed.id, filename, MAGNET, at, at, lookupState, detail, lookupJson);
 
           return Number(info.lastInsertRowid);
         },
-        async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
+        async seedPickableRelease({ pluginId, title, filename, lookupState, withDownloadClient }) {
           if (withDownloadClient) {
             const client = await host.addDownloadClient({
               name: `${pluginId} seedbox`,
@@ -986,9 +986,9 @@ export const test = base.extend<{ harness: Harness }>({
           // rather than a status (`ReleaseList.tsx`, picks design §2).
           const info = raw.prepare(`
             INSERT INTO rss_item
-              (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
+              (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state)
             VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?)
-          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, resolution);
+          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, lookupState);
 
           return { mediaItemId, rssItemId: Number(info.lastInsertRowid) };
         },

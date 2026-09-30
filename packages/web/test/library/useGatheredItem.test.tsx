@@ -44,8 +44,8 @@ function rssItem(id: number): RssItemSyncRead {
     downloadType: 'torrent',
     mediaItemId: null,
     rankingScore: null,
-    resolution: '1080p',
-    resolutionDetail: null,
+    lookupState: 'resolved',
+    lookupStateDetail: null,
     lookupJson: null,
     deliveredAt: null,
   };

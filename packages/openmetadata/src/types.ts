@@ -10,7 +10,11 @@
 /** `POST /api/v1/lookup`'s `category`. Note `movies`, plural, against the contract's `movie`. */
 export type LookupCategory = 'tv' | 'movies' | 'books' | 'xxx';
 
-export type LookupState = 'resolved' | 'unresolved' | 'pending';
+/**
+ * Named `LookupState` until #98 gave that name to the contract's four-value
+ * outcome; this is the envelope's own three-value `state`.
+ */
+export type EnvelopeState = 'resolved' | 'unresolved' | 'pending';
 
 export type MediaKind = 'movie' | 'series' | 'season' | 'episode' | 'book' | 'scene';
 
@@ -69,7 +73,7 @@ export interface MediaSuggestions {
 
 export interface LookupEnvelope {
   readonly lookupId: string;
-  readonly state: LookupState;
+  readonly state: EnvelopeState;
   /** The lookup ran out of time; a background job will finish it. Read before `state`. */
   readonly partial: boolean;
   readonly cached: boolean;
