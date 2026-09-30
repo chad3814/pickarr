@@ -123,6 +123,7 @@ import {
   type Host,
   type ReadServer,
 } from '@pickarr/host';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { TV_MIGRATIONS, TV_SYNCED } from '@pickarr/plugin-tv';
 import { XXX_MIGRATIONS, XXX_SYNCED } from '@pickarr/plugin-xxx';
 import { webDist } from './paths.ts';
@@ -165,22 +166,26 @@ export type Category = 'tv' | 'movie' | 'xxx';
  * `movie` stays empty because its year comes off `media_item` and needs no
  * table at all.
  *
- * `TV_MIGRATIONS`' one migration is version 2, not 1 -- version 1 is the
- * lookup engine's own state table, which `createLookupPlugin` prepends and
- * this harness has no engine to prepend it (`plugin-tv/src/migrations.ts`'s
- * own doc). `migratePlugin` applies every version it holds no
+ * `TV_MIGRATIONS` and `XXX_MIGRATIONS` both start at version 2 -- version 1
+ * is the lookup engine's own state table (`<id>_lookup`), which
+ * `createLookupPlugin` prepends and this harness has no engine to prepend it
+ * (`plugin-tv/src/migrations.ts`'s own doc). Both lists now reach version 4,
+ * `videoResolutionBackfillMigration` (issue #98), whose `up()` runs `ALTER
+ * TABLE <id>_lookup` -- a table only version 1 creates -- so this harness
+ * prepends `lookupTableMigration` itself below, the one piece of the engine's
+ * prepend it still needs. `migratePlugin` applies every version it holds no
  * `plugin_migrations` row for, in sorted order, and asks for no contiguity
- * at all, so a list starting at 2 applies cleanly; what it does enforce is
- * the `<pluginId>_` prefix on every table `up()` creates, which all three
- * of television's carry.
+ * at all, so a list starting at 1 applies cleanly; what it does enforce is
+ * the `<pluginId>_` prefix on every table `up()` creates, which all of
+ * television's and the lookup table itself carry.
  */
 const PLUGIN_SCHEMA: Record<Category, {
   migrations: readonly Migration[];
   synced: readonly SyncedTable<unknown>[];
 }> = {
-  tv: { migrations: TV_MIGRATIONS, synced: TV_SYNCED },
+  tv: { migrations: [lookupTableMigration('tv'), ...TV_MIGRATIONS], synced: TV_SYNCED },
   movie: { migrations: [], synced: [] },
-  xxx: { migrations: XXX_MIGRATIONS, synced: XXX_SYNCED },
+  xxx: { migrations: [lookupTableMigration('xxx'), ...XXX_MIGRATIONS], synced: XXX_SYNCED },
 };
 
 /**

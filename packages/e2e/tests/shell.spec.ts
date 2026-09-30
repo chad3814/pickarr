@@ -1335,7 +1335,7 @@ test('an unmatched release reads as a card, and opens to show why it is unmatche
   // above it would be its one child that is not part of a pair. Pinned as
   // the whole list, so adding a fourth term is a decision someone makes
   // here rather than something that appears.
-  await expect(card.locator('dt')).toHaveText(['State', 'Detail', 'Lookup answer', 'Actions']);
+  await expect(card.locator('dt')).toHaveText(['Lookup state', 'Detail', 'Lookup answer', 'Actions']);
   await expect(card.locator('dd').nth(0)).toHaveText('unresolved');
   await expect(card.locator('dd').nth(1)).toHaveText(UNMATCHED_DETAIL);
 

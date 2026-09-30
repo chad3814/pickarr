@@ -10,7 +10,9 @@
   "dependencies": {
     "@pickarr/contract": "*",
     "@pickarr/host": "*",
-    "@pickarr/plugin-tv": "*"
+    "@pickarr/openmetadata": "*",
+    "@pickarr/plugin-tv": "*",
+    "@pickarr/plugin-xxx": "*"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"
