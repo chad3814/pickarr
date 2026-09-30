@@ -1924,3 +1924,39 @@ test("migration 24 backfills an unmatched release's video resolution from its st
   assert.equal(valueOf(malformed), null, 'malformed JSON is not an error, and is not a value');
   raw.close();
 });
+
+test('migration 24 leaves a resolved release null, because its answer was cleared when it matched', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1);
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+      VALUES (1, 'The.Bear.S03E01.2160p.WEB.h265-ETHEL.mkv', 'http://a', 1, 1, 'torrent', 'resolved', NULL);
+  `);
+  migrateHost(raw);
+  const row = raw.prepare('SELECT video_resolution FROM rss_item WHERE id = 1').get() as { video_resolution: unknown };
+  assert.equal(row.video_resolution, null, 'the filename says 2160p, but the migration reads only a stored answer');
+  raw.close();
+});
+
+test("migration 24 moves a backfilled row's updated_at, so an /api cursor reader sees the new value, and leaves the rest", () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1)");
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+    VALUES (1, ?, ?, 1, 1, 'torrent', 'unresolved', ?)
+  `);
+  const backfilled = Number(insert.run('a.mkv', 'http://a', '{"parsed":{"quality":{"resolution":"1080p"}}}').lastInsertRowid);
+  const untouched = Number(insert.run('b.mkv', 'http://b', '{"parsed":{"quality":{"resolution":"4K"}}}').lastInsertRowid);
+  const startedAt = Date.now();
+  migrateHost(raw);
+
+  const read = raw.prepare('SELECT updated_at FROM rss_item WHERE id = ?');
+  const updatedAt = (id: number): number => Number((read.get(id) as { updated_at: unknown }).updated_at);
+  // SQLite's clock and this process's are the same wall clock, in ms; a
+  // second of slack covers `subsec` rounding without admitting the seed.
+  assert.ok(updatedAt(backfilled) >= startedAt - 1000, `the backfilled row moved past its seeded 1 (got ${updatedAt(backfilled)})`);
+  assert.equal(updatedAt(untouched), 1, 'a row the backfill did not change keeps its updated_at');
+  raw.close();
+});

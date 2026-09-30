@@ -1716,7 +1716,7 @@ export const ROUTES: readonly Route[] = [
     // **202, on `/api/picks`'s reasoning and more plainly than there.**
     // Nothing is finished when this answers: `retryLookup` enqueues a job
     // and returns, the service has not been asked yet, and what the
-    // browser eventually sees -- a new resolution, or the release leaving
+    // browser eventually sees -- a new lookup state, or the release leaving
     // `/unmatched` entirely -- arrives through the sync replica rather
     // than through this response. There is no resource to point a 201 at.
     answer: async ({ deps, pathname }) => {

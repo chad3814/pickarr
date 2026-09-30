@@ -85,7 +85,10 @@ in this order:
    where `lookup_json` is not null, is valid JSON, and the extracted value
    `GLOB`s as three or four digits followed by `p` or `i`. The marker
    `LOOKUP_JSON_TOO_LARGE` has no `parsed` and extracts `NULL`, so it needs no
-   case of its own.
+   case of its own. The same `UPDATE` sets `updated_at` for the rows it
+   changes, from SQLite's clock in milliseconds
+   (`CAST(unixepoch('subsec') * 1000 AS INTEGER)`), so an `/api` reader paging
+   by `updated_at` sees the backfilled value; every other row keeps its own.
 5. Rotate `sync.generation` by deleting its `host_state` row through a new
    `forgetSyncGeneration(raw)` in `db/host-state.ts`. `ensureSyncGeneration`
    mints a fresh value on its next call. A rebuilt database has no row
@@ -281,6 +284,7 @@ Every item below is a test written to fail first.
   - `"hello"`, `42`, `null`, the too-large marker and malformed JSON all leave
     `null`.
   - A resolved row stays `null`.
+  - A backfilled row's `updated_at` moves; an untouched row's does not.
   - `sync.generation` changes.
 - `setVideoResolution` writes and logs, throws on a value outside the
   pattern, and leaves `updated_at` alone when the value is unchanged.

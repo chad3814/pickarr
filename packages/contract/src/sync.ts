@@ -254,12 +254,12 @@ export interface RssItemSyncRead {
    * The lookup service's own answer for this release, as JSON, or `null`.
    *
    * **Only present while a release is unmatched.** Written wherever the
-   * engine reaches a terminal resolution that is not `resolved` -- the
-   * two such resolutions are `refused` and `unresolved`, across **three**
+   * engine reaches a terminal lookup state that is not `resolved` -- the
+   * two such states are `refused` and `unresolved`, across **three**
    * call sites in `packages/openmetadata/src/engine.ts`, because
    * `unresolved` is reached both when the service says so and when it
    * never finishes inside `MAX_POLLS`. (This sentence said "the two
-   * terminal branches" and was miscounting branches as resolutions.)
+   * terminal branches" and was miscounting branches as outcomes.)
    * Cleared by the `UPDATE` that resolves one, so a matched release
    * carries no copy of the answer that matched it. That
    * bound is the whole reason this column is affordable: without it, every

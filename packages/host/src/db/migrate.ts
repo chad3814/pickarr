@@ -1381,6 +1381,12 @@ function migration20(db: DatabaseSync): void {
  * three or four digits and `p` or `i`. It is restated rather than called
  * because this migration is frozen once applied; the migration test runs it
  * over the contract's own cases.
+ *
+ * **A backfilled row's `updated_at` moves too**, from SQLite's own clock in
+ * milliseconds because a migration is given no clock. The sync triggers log
+ * the change regardless, but an `/api` reader pages by `updated_at` and
+ * would never see a value written under an unchanged one. Only the rows the
+ * `WHERE` matches are touched, so every other row keeps its timestamp.
  */
 function migration24(db: DatabaseSync): void {
   db.exec(`
@@ -1388,7 +1394,8 @@ ALTER TABLE rss_item RENAME COLUMN resolution TO lookup_state;
 ALTER TABLE rss_item RENAME COLUMN resolution_detail TO lookup_state_detail;
 ALTER TABLE rss_item ADD COLUMN video_resolution TEXT;
 UPDATE rss_item
-   SET video_resolution = lower(json_extract(lookup_json, '$.parsed.quality.resolution'))
+   SET video_resolution = lower(json_extract(lookup_json, '$.parsed.quality.resolution')),
+       updated_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
  WHERE json_valid(lookup_json)
    AND json_type(lookup_json, '$.parsed.quality.resolution') = 'text'
    AND (lower(json_extract(lookup_json, '$.parsed.quality.resolution')) GLOB '[0-9][0-9][0-9][pi]'
