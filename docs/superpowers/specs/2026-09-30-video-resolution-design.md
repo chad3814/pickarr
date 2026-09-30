@@ -208,13 +208,24 @@ running.
 2. One batch `POST /api/v1/lookup` with the plugin's category and those
    filenames -- the existing `client.batch`. It is a fresh question keyed on
    the name, and the service answers from its cache where it has one.
-3. For each answer, in order: `setVideoResolution(rssItemId,
-   videoResolutionOf(answer))`, then clear that row's mark. Nothing else is
-   written -- no media item, cast, artwork or lookup state -- so the
-   release's identification is untouched even if the fresh answer disagrees
-   with the one that identified it.
+3. For each answer, in order:
+   - if `videoResolutionOf(answer)` is non-null, `setVideoResolution` with it
+     and clear that row's mark, whatever the answer's state;
+   - else, if the answer is terminal (not `partial`, and `state` is not
+     `pending`), `setVideoResolution(rssItemId, null)` and clear the mark;
+   - else -- a partial or pending answer with no usable parse -- write
+     nothing and leave the mark. The answer has not arrived and nothing
+     polls a backfill's lookup, so clearing it would settle `null` for good.
+     Whether a live partial answer carries `parsed` at all is unverified: a
+     probe could not produce one.
+
+   Nothing else is written -- no media item, cast, artwork or lookup state
+   -- so the release's identification is untouched even if the fresh answer
+   disagrees with the one that identified it.
 4. If marked rows remain -- counted with the same join as step 1 -- enqueue
-   the same job kind again.
+   the same job kind again: at once if this batch cleared any mark, or with
+   `runAt` = now + `BACKFILL_RETRY_DELAY_MS` if it cleared none, so a batch
+   the service has answered only partially cannot hot-loop.
 
 **Failure.** An HTTP failure or 429 on the batch call does not throw. The
 handler logs the error's message (never a filename), enqueues the same job
@@ -294,7 +305,11 @@ Every item below is a test written to fail first.
 - The backfill handler:
   - It batches at 100.
   - It writes only the resolution.
-  - It clears the mark on a `null` answer.
+  - It clears the mark on a terminal `null` answer.
+  - It leaves the mark, and writes nothing, on a partial answer with no
+    parse; it stores and clears on a partial answer that carries one.
+  - It re-enqueues with the delay after a batch that cleared nothing, and
+    without it after one that cleared something.
   - It re-enqueues while marks remain.
   - It clears a mark whose release was deleted, and does not re-enqueue for it.
   - On HTTP failure it does not throw: marks intact, nothing written, one

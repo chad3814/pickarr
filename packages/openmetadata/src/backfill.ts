@@ -96,8 +96,12 @@ function connection(ctx: PluginContext): DatabaseSync {
 
 /**
  * One batch of the backfill: up to `MAX_BATCH` marked releases, one request,
- * each answer's resolution stored and its mark cleared, then the same job
- * again if marks remain.
+ * then per answer: a usable resolution is stored and the mark cleared, a
+ * terminal answer with none stores `null` and clears it, and a partial or
+ * pending answer with none is left marked with nothing written. Then the
+ * same job again if marks remain -- at once if this batch cleared anything,
+ * or `BACKFILL_RETRY_DELAY_MS` from now if it cleared nothing, so a batch
+ * the service has not answered yet cannot hot-loop.
  *
  * **Orphans are cleared first.** A marked lookup row whose release was
  * deleted can never be returned by the join below, and counting it as
@@ -152,12 +156,20 @@ SELECT l.rss_item_id AS rssItemId, r.filename AS filename
       return;
     }
     const clear = raw.prepare(`UPDATE ${table} SET video_resolution_backfill = 0 WHERE rss_item_id = ?`);
+    let cleared = 0;
     for (const [index, row] of rows.entries()) {
       const answer = answers[index];
       if (answer === undefined) throw new Error(`openmetadata: no backfill answer for release ${row.rssItemId}`);
+      const resolution = videoResolutionOf(answer);
+      // A partial or pending answer with no usable parse has not arrived,
+      // and nothing polls a backfill's lookup: storing `null` and clearing
+      // the mark would settle it for good. It stays marked and is asked
+      // about again. One that already carries a parse is as good as final.
+      if (resolution === null && (answer.partial || answer.state === 'pending')) continue;
       // eslint-disable-next-line no-await-in-loop -- one small UPDATE each; ordered so a throw leaves every later mark in place
-      await ctx.media.setVideoResolution(row.rssItemId, videoResolutionOf(answer));
+      await ctx.media.setVideoResolution(row.rssItemId, resolution);
       clear.run(row.rssItemId);
+      cleared += 1;
     }
 
     const remaining = raw.prepare(`
@@ -165,7 +177,12 @@ SELECT 1 AS found FROM ${table} l JOIN rss_item r ON r.id = l.rss_item_id
  WHERE l.video_resolution_backfill = 1 LIMIT 1
 `).get();
     if (remaining !== undefined) {
-      await ctx.jobs.enqueue({ kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {} });
+      // A batch that cleared nothing -- every answer still partial -- waits
+      // before asking again, so it cannot spin against the service; one that
+      // made progress goes straight on to the next batch.
+      await ctx.jobs.enqueue(cleared === 0
+        ? { kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, runAt: deps.now() + BACKFILL_RETRY_DELAY_MS }
+        : { kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {} });
     }
   };
 }

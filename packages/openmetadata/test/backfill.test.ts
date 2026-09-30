@@ -8,7 +8,7 @@ import {
 } from '../src/backfill.ts';
 import { lookupTableMigration } from '../src/table.ts';
 import { MAX_BATCH } from '../src/client.ts';
-import { createTestHarness, unresolvedEnvelope, withResolution, type TestHarness } from '../src/testing.ts';
+import { createTestHarness, partialEnvelope, pendingEnvelope, unresolvedEnvelope, withResolution, type TestHarness } from '../src/testing.ts';
 import type { LookupEnvelope } from '../src/types.ts';
 
 const NOW = 1_700_000_000_000;
@@ -145,6 +145,61 @@ test('a failing service asks again in ten minutes, with every mark intact', asyn
   const detail = JSON.stringify(harness.logs[0]?.detail ?? {});
   assert.match(detail, /429 Too Many Requests/, 'naming the failure');
   assert.ok(!detail.includes('release-'), 'and no filename');
+});
+
+test('a partial answer with no parse keeps its mark and writes nothing', async () => {
+  // The answer has not arrived, and nothing polls a backfill's lookup, so
+  // clearing the mark here would store `null` for good on a release whose
+  // resolution the service had simply not reached yet.
+  const { harness, ids } = seeded(['resolved', 'resolved']);
+  videoResolutionBackfillMigration('movie', 4).up(harness.raw);
+  const { run } = handler((names) => [
+    partialEnvelope({ lookupId: names[0] ?? '' }),
+    withResolution(unresolvedEnvelope({ lookupId: names[1] ?? '' }), '720p'),
+  ]);
+  await run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx);
+  assert.deepEqual(marked(harness), [ids[0]], 'the partial one is still marked');
+  assert.ok(!harness.media.videoResolutions.has(ids[0] ?? -1), 'and nothing was written for it');
+  assert.equal(harness.media.videoResolutions.get(ids[1] ?? -1), '720p');
+});
+
+test('a partial answer that already carries a resolution stores it and clears the mark', async () => {
+  const { harness, ids } = seeded(['resolved']);
+  videoResolutionBackfillMigration('movie', 4).up(harness.raw);
+  const { run } = handler((names) => names.map((name) => withResolution(partialEnvelope({ lookupId: name }), '1080p')));
+  await run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx);
+  assert.equal(harness.media.videoResolutions.get(ids[0] ?? -1), '1080p');
+  assert.deepEqual(marked(harness), []);
+  assert.deepEqual(harness.enqueued, [], 'nothing left, nothing queued');
+});
+
+test('a batch that made no progress asks again only after the delay, so it cannot hot-loop', async () => {
+  const { harness, ids } = seeded(['resolved', 'resolved']);
+  videoResolutionBackfillMigration('movie', 4).up(harness.raw);
+  const { run } = handler((names) => [
+    partialEnvelope({ lookupId: names[0] ?? '' }),
+    pendingEnvelope({ lookupId: names[1] ?? '' }),
+  ]);
+  await run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx);
+  assert.deepEqual(marked(harness), ids);
+  assert.equal(harness.media.videoResolutions.size, 0);
+  assert.deepEqual(
+    harness.enqueued.map((job) => ({ kind: job.kind, runAt: job.runAt })),
+    [{ kind: VIDEO_RESOLUTION_BACKFILL_JOB, runAt: NOW + BACKFILL_RETRY_DELAY_MS }],
+  );
+});
+
+test('a batch that made some progress asks again at once', async () => {
+  const { harness } = seeded(['resolved', 'resolved']);
+  videoResolutionBackfillMigration('movie', 4).up(harness.raw);
+  const { run } = handler((names) => [
+    partialEnvelope({ lookupId: names[0] ?? '' }),
+    withResolution(unresolvedEnvelope({ lookupId: names[1] ?? '' }), null),
+  ]);
+  await run({ id: 1, kind: VIDEO_RESOLUTION_BACKFILL_JOB, payload: {}, attempts: 1 }, harness.ctx);
+  assert.equal(harness.enqueued.length, 1);
+  assert.equal(harness.enqueued[0]?.kind, VIDEO_RESOLUTION_BACKFILL_JOB);
+  assert.equal(harness.enqueued[0]?.runAt, undefined, 'no delay');
 });
 
 test('with nothing marked, the job asks nothing', async () => {
