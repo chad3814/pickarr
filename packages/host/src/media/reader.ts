@@ -36,7 +36,7 @@
  * honestly from one of its own scoped reads, that this closes off. It is
  * only the id an id-guessing caller invents that now finds nothing.
  *
- * **`MediaWriter` remains unscoped.** `ctx.media.setResolution` and
+ * **`MediaWriter` remains unscoped.** `ctx.media.setLookupState` and
  * `ctx.media.dropMediaItem` still take any id and act on it regardless of
  * who wrote the row underneath -- that asymmetry between what a plugin can
  * read and what it can change is real and outlives this file. Scoping the

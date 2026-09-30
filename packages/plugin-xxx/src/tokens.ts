@@ -13,6 +13,7 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
 } from '@pickarr/openmetadata';
 
@@ -36,6 +37,7 @@ export const XXX_TOKENS: TokensFor<XxxTokenName> = {
   site: resolveSite,
   title: resolveTitle,
   releaseDate: resolveReleaseDate,
+  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };

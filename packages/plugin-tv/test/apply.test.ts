@@ -2,14 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyTv, checkTv } from '../src/apply.ts';
 import { TV_MIGRATIONS } from '../src/migrations.ts';
 
 const NOW = 1_700_000_000_000;
 
+/** `TV_MIGRATIONS` starts at version 2; version 1, the engine's own
+ * `tv_lookup` state table, is prepended here the way `createLookupPlugin`
+ * does it for real -- `videoResolutionBackfillMigration` (version 4) reads
+ * that table. */
 function harnessWithTables() {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
   return harness;
 }
@@ -217,8 +223,9 @@ test('a series parent carrying no date does not erase the date a fuller answer t
 
 test('migration 3 creates the placement table the engine records imports in', () => {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
-  assert.deepEqual(TV_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  assert.deepEqual(TV_MIGRATIONS.map((migration) => migration.version), [2, 3, 4]);
   const row = harness.raw
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tv_placement'")
     .get();

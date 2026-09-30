@@ -5,7 +5,7 @@ import type { PluginContext } from '@pickarr/contract';
 import { ARTWORK_JOB } from '../src/artwork/job.ts';
 import { applyEnvelope } from '../src/engine.ts';
 import { lookupTable, lookupTableMigration } from '../src/table.ts';
-import { createTestHarness, refusedEnvelope, resolvedEnvelope, unresolvedEnvelope } from '../src/testing.ts';
+import { createTestHarness, refusedEnvelope, resolvedEnvelope, unresolvedEnvelope, withResolution } from '../src/testing.ts';
 import type { ApplyArgs } from '../src/engine.ts';
 import type { Media } from '../src/types.ts';
 
@@ -84,8 +84,8 @@ test('creates the media item from the answer and claims its provider reference',
   assert.equal(item?.provider, 'tmdb');
   assert.equal(item?.providerRef, 'tmdb:movie:693134');
   assert.deepEqual(
-    harness.media.resolutions.get(rssItemId),
-    { resolution: 'resolved', detail: null, lookupJson: null },
+    harness.media.lookupStates.get(rssItemId),
+    { state: 'resolved', detail: null, lookupJson: null },
   );
 });
 
@@ -94,7 +94,7 @@ test('a resolved answer stores no envelope, and clears one left by an earlier fa
   // `rss_item.lookup_json`: a release that failed, was retried and matched
   // must not keep a copy of the answer that failed it. Driven through two
   // real `applyEnvelope` calls against the same rss item -- an unresolved
-  // attempt first, so there is a real envelope in `resolutions` to lose --
+  // attempt first, so there is a real envelope in `lookupStates` to lose --
   // rather than asserting `null` as if nothing had ever been written.
   const { harness, deps, rssItemId } = fixture();
 
@@ -104,7 +104,7 @@ test('a resolved answer stores no envelope, and clears one left by an earlier fa
     deps,
   );
   assert.notEqual(
-    harness.media.resolutions.get(rssItemId)?.lookupJson,
+    harness.media.lookupStates.get(rssItemId)?.lookupJson,
     null,
     'the failed attempt left an envelope behind',
   );
@@ -116,12 +116,12 @@ test('a resolved answer stores no envelope, and clears one left by an earlier fa
   );
 
   // Asserted as an explicit `null` fourth argument, not as "absent": the
-  // recording fake stores exactly what `setResolution` was called with, so
+  // recording fake stores exactly what `setLookupState` was called with, so
   // this fails if the resolved branch ever stops passing a fourth argument
   // at all just as surely as if it passed something other than `null`.
-  const setResolutionCalls = harness.media.calls.filter((call) => call.method === 'setResolution');
-  assert.deepEqual(setResolutionCalls.at(-1)?.args, [rssItemId, 'resolved', null, null]);
-  assert.equal(harness.media.resolutions.get(rssItemId)?.lookupJson, null, 'the retry clears the earlier envelope');
+  const setLookupStateCalls = harness.media.calls.filter((call) => call.method === 'setLookupState');
+  assert.deepEqual(setLookupStateCalls.at(-1)?.args, [rssItemId, 'resolved', null, null]);
+  assert.equal(harness.media.lookupStates.get(rssItemId)?.lookupJson, null, 'the retry clears the earlier envelope');
 });
 
 test('records the lookup id, the reference and the confidence on its own row', async () => {
@@ -187,9 +187,12 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   );
 
   const methods = harness.media.calls.map((call) => call.method);
-  assert.deepEqual(methods.slice(0, 4), ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem']);
+  assert.deepEqual(
+    methods.slice(1, 5),
+    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem'],
+  );
   assert.equal(harness.media.items.has(1), false, 'the row that lost is gone');
-  assert.deepEqual(harness.media.calls[3]?.args, [rssItemId, 99]);
+  assert.deepEqual(harness.media.calls[4]?.args, [rssItemId, 99]);
   assert.equal(applied[0]?.mediaItemId, 99, 'the plugin writes against the winner');
   assert.equal(stateRow(harness)?.['media_item_id'], 99);
 });
@@ -227,12 +230,12 @@ test('the release is linked before the plugin applies, so a throwing apply stran
   const methods = harness.media.calls.map((call) => call.method);
   assert.ok(methods.includes('relinkRssItem'), 'the link happened before the plugin could fail');
   assert.ok(
-    !methods.includes('setResolution'),
-    'and the resolution did not -- which is exactly why the clear cannot be left to it',
+    !methods.includes('setLookupState'),
+    'and the lookup state did not -- which is exactly why the clear cannot be left to it',
   );
 });
 
-test('the resolution is written last, after the rows a reader would then look for', async () => {
+test('the lookup state is written last, after the rows a reader would then look for', async () => {
   const { harness, deps, rssItemId } = fixture();
 
   await applyEnvelope(
@@ -242,7 +245,7 @@ test('the resolution is written last, after the rows a reader would then look fo
   );
 
   const methods = harness.media.calls.map((call) => call.method);
-  assert.equal(methods.at(-1), 'setResolution');
+  assert.equal(methods.at(-1), 'setLookupState');
 });
 
 test('a plugin that cannot represent the answer refuses it before a single shared row exists', async () => {
@@ -270,8 +273,8 @@ test('a plugin that cannot represent the answer refuses it before a single share
 
   assert.deepEqual(
     harness.media.calls.map((call) => call.method),
-    [],
-    'no media item, no claim, no relink, no resolution',
+    ['setVideoResolution'],
+    'no media item, no claim, no relink, no lookup state -- the resolution write happens before check() runs',
   );
   assert.equal(applied.length, 0, 'and the plugin was never asked to write its own rows');
   assert.equal(stateRow(harness)?.['media_item_id'], null);
@@ -415,8 +418,8 @@ test('a refused or unresolved lookup enqueues nothing', async () => {
   assert.deepEqual(unresolved.harness.enqueued.map((job) => job.kind), []);
 });
 
-test('the enqueue happens after the resolution is recorded', async () => {
-  // One direction only: a job that ran before `setResolution` could read a
+test('the enqueue happens after the lookup state is recorded', async () => {
+  // One direction only: a job that ran before `setLookupState` could read a
   // row mid-write. Pinned by asking the recording writer what it had been
   // told *at the moment* `enqueue` was called, which is what the fake's
   // call list already captures -- `enqueue` itself is not a `ctx.media`
@@ -441,7 +444,7 @@ test('the enqueue happens after the resolution is recorded', async () => {
   );
 
   assert.equal(seen.length, 1);
-  assert.equal(seen[0]?.at(-1), 'setResolution', 'the release was resolved before the job was queued');
+  assert.equal(seen[0]?.at(-1), 'setLookupState', 'the release was resolved before the job was queued');
 });
 
 test('a failing enqueue does not fail the lookup', async () => {
@@ -463,11 +466,21 @@ test('a failing enqueue does not fail the lookup', async () => {
   );
 
   assert.deepEqual(
-    harness.media.resolutions.get(rssItemId),
-    { resolution: 'resolved', detail: null, lookupJson: null },
+    harness.media.lookupStates.get(rssItemId),
+    { state: 'resolved', detail: null, lookupJson: null },
     'the release stays identified',
   );
   const logged = harness.logs.filter((entry) => entry.detail?.['error'] === 'the job queue is unavailable');
   assert.equal(logged.length, 1, 'and the failure is logged rather than swallowed');
   assert.equal(logged[0]?.detail?.['mediaItemId'], 1);
+});
+
+test('a resolved answer records its parsed video resolution too', async () => {
+  const { harness, deps, rssItemId } = fixture();
+  await applyEnvelope(
+    withResolution(resolvedEnvelope({ lookupId: 'lookup-r', media: movieMedia() }), '2160p'),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+  assert.equal(harness.media.videoResolutions.get(rssItemId), '2160p');
 });

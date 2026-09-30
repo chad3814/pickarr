@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { writeSecretValue } from '../secrets/store.ts';
 import { installSyncTriggers, seedSyncLog } from '../sync/log.ts';
+import { forgetSyncGeneration } from './host-state.ts';
 
 /**
  * The shared tables, in dependency order so every `REFERENCES` names a table
@@ -1359,6 +1360,51 @@ function migration20(db: DatabaseSync): void {
 }
 
 /**
+ * Issue #98: `rss_item.resolution` was never a video resolution. It is the
+ * lookup state, `@pickarr/contract`'s `LookupState`, and its name had the
+ * browse list and the importer both reading it as one.
+ *
+ * **Renamed in place.** `RENAME COLUMN` keeps all three sync triggers and
+ * rewrites their bodies (`docs/database-migrations.md`'s table), so
+ * `rss_item` goes on replicating with nothing reinstalled.
+ *
+ * **Then the sync generation is forgotten.** Every client's replica holds
+ * `rss_item` rows keyed `resolution`; a new generation is what makes a client
+ * discard its replica and bootstrap again (`web/src/store/sync.ts`), so no
+ * client code has to read both names. That costs one full re-bootstrap per
+ * client, once.
+ *
+ * **And `video_resolution` is added**, backfilled only for unmatched
+ * releases, because they are the only ones still holding a lookup answer
+ * (`relinkRssItem` clears it on a match). The `WHERE` restates
+ * `@pickarr/contract`'s `normalizeVideoResolution` in SQL -- `lower`, then
+ * three or four digits and `p` or `i`. It is restated rather than called
+ * because this migration is frozen once applied; the migration test runs it
+ * over the contract's own cases.
+ *
+ * **A backfilled row's `updated_at` moves too**, from SQLite's own clock in
+ * milliseconds because a migration is given no clock. The sync triggers log
+ * the change regardless, but an `/api` reader pages by `updated_at` and
+ * would never see a value written under an unchanged one. Only the rows the
+ * `WHERE` matches are touched, so every other row keeps its timestamp.
+ */
+function migration24(db: DatabaseSync): void {
+  db.exec(`
+ALTER TABLE rss_item RENAME COLUMN resolution TO lookup_state;
+ALTER TABLE rss_item RENAME COLUMN resolution_detail TO lookup_state_detail;
+ALTER TABLE rss_item ADD COLUMN video_resolution TEXT;
+UPDATE rss_item
+   SET video_resolution = lower(json_extract(lookup_json, '$.parsed.quality.resolution')),
+       updated_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+ WHERE json_valid(lookup_json)
+   AND json_type(lookup_json, '$.parsed.quality.resolution') = 'text'
+   AND (lower(json_extract(lookup_json, '$.parsed.quality.resolution')) GLOB '[0-9][0-9][0-9][pi]'
+     OR lower(json_extract(lookup_json, '$.parsed.quality.resolution')) GLOB '[0-9][0-9][0-9][0-9][pi]');
+`);
+  forgetSyncGeneration(db);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1387,6 +1433,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 21, up: (db) => db.exec(MIGRATION_21) },
   { version: 22, up: (db) => db.exec(MIGRATION_22) },
   { version: 23, up: (db) => db.exec(MIGRATION_23) },
+  { version: 24, up: (db) => migration24(db) },
 ];
 
 /**

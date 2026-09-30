@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DownloadedFile, PluginContext } from '@pickarr/contract';
 import type { Media } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyXxx } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
@@ -53,6 +54,7 @@ async function resolveAll(ctx: PluginContext): Promise<Record<string, string | n
 
 async function seeded(media: Media): Promise<PluginContext> {
   const harness = createTestHarness();
+  lookupTableMigration('xxx').up(harness.raw);
   for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
   const id = await harness.ctx.media.createMediaItem({
     pluginId: 'xxx', title: media.title, releaseDate: media.releaseDate, description: null,
@@ -71,6 +73,10 @@ test('every declared token resolves, and the whole map is what a scene shape may
     site: 'A Site',
     title: 'A Scene',
     releaseDate: '2026-01-15',
+    // No `rss_item` row exists for this harness's `rssItemId` (7), so the
+    // resolver's own hole -- a row that is gone -- is what shows here, not
+    // a stored value; `openmetadata/test/tokens.test.ts` pins the stored case.
+    resolution: null,
     filename: 'A.Site.26.01.15.A.Scene.XXX.1080p',
     // Lowercased from `MP4`, so two spellings of one release cannot land as
     // two files.

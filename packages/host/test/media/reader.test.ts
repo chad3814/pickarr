@@ -53,8 +53,8 @@ function seedRssItem(
 ): number {
   const info = raw.prepare(`
     INSERT INTO rss_item
-      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution, resolution_detail, guid)
-    VALUES (?, ?, ?, 30, 40, 'torrent', ?, '1080p', 'x264', ?)
+      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state, lookup_state_detail, guid)
+    VALUES (?, ?, ?, 30, 40, 'torrent', ?, 'resolved', 'x264', ?)
   `).run(feedId, filename, `https://example.com/${filename}`, mediaItemId, `guid-${filename}`);
   return Number(info.lastInsertRowid);
 }
@@ -131,8 +131,9 @@ test('a reader reaches an item\'s rss items and their downloads', async () => {
     filename: 'fight.club.mkv',
     link: 'https://example.com/fight.club.mkv',
     mediaItemId,
-    resolution: '1080p',
-    resolutionDetail: 'x264',
+    lookupState: 'resolved',
+    lookupStateDetail: 'x264',
+    videoResolution: null,
     downloadType: 'torrent',
     deliveredAt: null,
   }]);

@@ -155,7 +155,7 @@ function pollJobRows(raw: DatabaseSync): { id: number; feedId: number; state: st
 
 function insertRssItem(raw: DatabaseSync, feedId: number): number {
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
     VALUES (?, 'x.mkv', 'https://example.test/x', 0, 0, 'nzb', 'pending')
   `).run(feedId);
   return Number(result.lastInsertRowid);

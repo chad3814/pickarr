@@ -93,7 +93,7 @@ function setup() {
  */
 function insertRawItem(raw: DatabaseSync, feedId: number, guid: string): number {
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, guid, download_type, resolution, created_at, updated_at)
+    INSERT INTO rss_item (feed_id, filename, link, guid, download_type, lookup_state, created_at, updated_at)
     VALUES (?, ?, ?, ?, 'torrent', 'pending', 0, 0)
   `).run(feedId, `${guid}.mkv`, `https://feed.example/${guid}`, guid);
   return Number(result.lastInsertRowid);

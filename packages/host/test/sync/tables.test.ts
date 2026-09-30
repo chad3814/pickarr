@@ -213,10 +213,10 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
   `).run();
   raw.prepare(`
     INSERT INTO rss_item (
-      id, feed_id, filename, link, guid, created_at, updated_at, download_type, resolution
+      id, feed_id, filename, link, guid, created_at, updated_at, download_type, lookup_state
     ) VALUES (
       1, 1, 'The.Grid.mkv', 'https://tracker.example/dl?passkey=abc123', 'https://tracker.example/dl?passkey=abc123',
-      10, 20, 'torrent', '1080p'
+      10, 20, 'torrent', 'resolved'
     )
   `).run();
   raw.prepare(`
@@ -238,8 +238,9 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
 
   const rssItem = readHostRows(raw, 'rss_item', [1])[1] as Record<string, unknown>;
   assert.deepEqual(Object.keys(rssItem).toSorted(), [
-    'createdAt', 'deliveredAt', 'downloadType', 'feedId', 'filename',
-    'id', 'lookupJson', 'mediaItemId', 'rankingScore', 'resolution', 'resolutionDetail', 'updatedAt',
+    'createdAt', 'deliveredAt', 'downloadType', 'feedId', 'filename', 'id',
+    'lookupJson', 'lookupState', 'lookupStateDetail', 'mediaItemId', 'rankingScore', 'updatedAt',
+    'videoResolution',
   ]);
   assert.ok(!('link' in rssItem), 'rss_item.link must never be projected');
   assert.ok(!('guid' in rssItem), 'rss_item.guid must never be projected');
@@ -674,7 +675,7 @@ function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw'
   raw.prepare(`
     INSERT INTO rss_item (
       id, feed_id, filename, link, guid, created_at, updated_at, download_type, media_item_id,
-      ranking_score, resolution, resolution_detail, delivered_at
+      ranking_score, lookup_state, lookup_state_detail, delivered_at
     ) VALUES (
       1, 1, 'The.Grid.mkv', 'https://tracker.example/dl', 'guid-1', 10, 20, 'torrent', 1,
       42, 'resolved', 'season pack', 30
@@ -797,8 +798,8 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
   } satisfies Record<keyof MediaItemSyncRead, true>,
   rss_item: {
     id: true, feedId: true, filename: true, createdAt: true, updatedAt: true,
-    downloadType: true, mediaItemId: true, rankingScore: true, resolution: true,
-    resolutionDetail: true, lookupJson: true, deliveredAt: true,
+    downloadType: true, mediaItemId: true, rankingScore: true, lookupState: true,
+    lookupStateDetail: true, videoResolution: true, lookupJson: true, deliveredAt: true,
   } satisfies Record<keyof RssItemSyncRead, true>,
   torrent_download: {
     id: true, rssItemId: true, downloadClientId: true, infohash: true, clientRef: true,

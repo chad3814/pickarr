@@ -36,7 +36,7 @@ function seedFeed(raw: DatabaseSync, id: number, url = `https://tracker.example/
 
 function seedItem(raw: DatabaseSync, id: number, feedId: number): void {
   raw.prepare(`
-    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
     VALUES (?, ?, 'a.mkv', 'https://tracker.example/a.torrent', 10, 10, 'torrent', 'pending')
   `).run(id, feedId);
 }

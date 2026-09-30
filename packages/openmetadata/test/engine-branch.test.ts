@@ -17,8 +17,9 @@ import {
   pendingEnvelope,
   refusedEnvelope,
   unresolvedEnvelope,
+  withResolution,
 } from '../src/testing.ts';
-import type { Media } from '../src/types.ts';
+import type { LookupEnvelope, Media } from '../src/types.ts';
 
 const PLUGIN_ID = 'tv';
 const NOW = 1_700_000_000_000;
@@ -52,7 +53,7 @@ function fixture(filename = 'item.mkv') {
   return { harness, deps, rssItemId, table, db, applied };
 }
 
-test('a partial answer polls, and leaves the resolution alone', async () => {
+test('a partial answer polls, and leaves the lookup state alone', async () => {
   const { harness, deps, rssItemId } = fixture();
 
   await applyEnvelope(partialEnvelope({ lookupId: 'lookup-1' }), { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
@@ -62,22 +63,22 @@ test('a partial answer polls, and leaves the resolution alone', async () => {
   assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-1', rssItemId, polls: 1 });
   assert.equal(harness.enqueued[0]?.runAt, NOW + POLL_DELAY_MS);
   // Nothing is known about the item yet, so nothing is recorded about it.
-  assert.equal(harness.media.resolutions.size, 0);
+  assert.equal(harness.media.lookupStates.size, 0);
 });
 
 test('a lookup still pending stores nothing, because nothing is known yet', async () => {
   // Pinned separately from the partial case above, and against
-  // `setResolution` directly rather than only the size of `resolutions`:
+  // `setLookupState` directly rather than only the size of `lookupStates`:
   // a later change that starts writing a half-answer for every pending
-  // release would still leave `resolutions.size` at 0 today (nothing else
+  // release would still leave `lookupStates.size` at 0 today (nothing else
   // populates it in this fixture), but it would show up here as a call
   // this test does not expect.
   const { harness, deps, rssItemId } = fixture();
 
   await applyEnvelope(pendingEnvelope({ lookupId: 'lookup-1b' }), { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
 
-  const setResolutionCalls = harness.media.calls.filter((call) => call.method === 'setResolution');
-  assert.deepEqual(setResolutionCalls, [], 'the poll branch returns before calling setResolution at all');
+  const setLookupStateCalls = harness.media.calls.filter((call) => call.method === 'setLookupState');
+  assert.deepEqual(setLookupStateCalls, [], 'the poll branch returns before calling setLookupState at all');
 });
 
 test('a pending state polls too -- the state, not only the flag', async () => {
@@ -94,15 +95,15 @@ test('the last permitted poll gives up, naming the lookup id, and stores the env
   await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: MAX_POLLS }, deps);
 
   assert.equal(harness.enqueued.length, 0, 'no further poll is scheduled');
-  const recorded = harness.media.resolutions.get(rssItemId);
-  assert.equal(recorded?.resolution, 'unresolved');
+  const recorded = harness.media.lookupStates.get(rssItemId);
+  assert.equal(recorded?.state, 'unresolved');
   assert.match(recorded?.detail ?? '', /lookup-3/);
   // The service never finished, so the last envelope it sent -- whatever it
   // managed to fill in -- is the only record of how far it got.
   assert.equal(recorded?.lookupJson, lookupJsonFor(envelope));
 });
 
-test('a refusal is terminal: the resolution says so and nothing else is written', async () => {
+test('a refusal is terminal: the lookup state says so and nothing else is written', async () => {
   const { harness, deps, rssItemId, applied } = fixture('item.srt');
 
   await applyEnvelope(
@@ -111,8 +112,8 @@ test('a refusal is terminal: the resolution says so and nothing else is written'
     deps,
   );
 
-  assert.deepEqual(harness.media.resolutions.get(rssItemId), {
-    resolution: 'refused',
+  assert.deepEqual(harness.media.lookupStates.get(rssItemId), {
+    state: 'refused',
     detail: 'a subtitle',
     lookupJson: lookupJsonFor(refusedEnvelope({ lookupId: 'lookup-4', refusal: 'a subtitle' })),
   });
@@ -127,8 +128,8 @@ test('an unresolved answer stores the envelope behind it', async () => {
 
   await applyEnvelope(envelope, { rssItemId, filename: 'mystery2.mkv', polls: 0 }, deps);
 
-  const recorded = harness.media.resolutions.get(rssItemId);
-  assert.equal(recorded?.resolution, 'unresolved');
+  const recorded = harness.media.lookupStates.get(rssItemId);
+  assert.equal(recorded?.state, 'unresolved');
   assert.equal(recorded?.lookupJson, lookupJsonFor(envelope));
 });
 
@@ -145,7 +146,7 @@ test('an envelope over the cap is stored as the marker', async () => {
 
   await applyEnvelope(envelope, { rssItemId, filename: 'huge.mkv', polls: 0 }, deps);
 
-  assert.equal(harness.media.resolutions.get(rssItemId)?.lookupJson, LOOKUP_JSON_TOO_LARGE);
+  assert.equal(harness.media.lookupStates.get(rssItemId)?.lookupJson, LOOKUP_JSON_TOO_LARGE);
 });
 
 test('an unrecognised name is unresolved, and says only that', async () => {
@@ -153,8 +154,8 @@ test('an unrecognised name is unresolved, and says only that', async () => {
 
   await applyEnvelope(unresolvedEnvelope({ lookupId: 'lookup-5' }), { rssItemId, filename: 'mystery.mkv', polls: 0 }, deps);
 
-  const recorded = harness.media.resolutions.get(rssItemId);
-  assert.equal(recorded?.resolution, 'unresolved');
+  const recorded = harness.media.lookupStates.get(rssItemId);
+  assert.equal(recorded?.state, 'unresolved');
   assert.match(recorded?.detail ?? '', /mystery\.mkv/);
   assert.equal(harness.enqueued.length, 0, 'a retry happens on request, not on a schedule');
 });
@@ -174,7 +175,7 @@ test('an unresolved answer with suggestions names what was recognised', async ()
     deps,
   );
 
-  const detail = harness.media.resolutions.get(rssItemId)?.detail ?? '';
+  const detail = harness.media.lookupStates.get(rssItemId)?.detail ?? '';
   assert.match(detail, /Maddie Wren/);
   assert.match(detail, /A Performer/);
 });
@@ -203,7 +204,7 @@ test('a partial answer that is also refused still polls -- partial is read first
   await applyEnvelope(both, { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
 
   assert.equal(harness.enqueued[0]?.kind, POLL_JOB);
-  assert.equal(harness.media.resolutions.size, 0);
+  assert.equal(harness.media.lookupStates.size, 0);
 });
 
 /**
@@ -240,4 +241,50 @@ test('every outcome records the service lookup id, not only the resolved one', a
     assert.equal(row?.['lookup_id'], envelope.lookupId, `the ${outcome} outcome records its lookup id`);
     assert.equal(row?.['updated_at'], NOW, `the ${outcome} outcome stamps the row from the injected clock`);
   }
+});
+
+test('a terminal non-resolved outcome records the video resolution the answer parsed', async () => {
+  // The resolved outcome is `engine-resolved.test.ts`'s.
+  const cases: readonly [string, LookupEnvelope, string | null][] = [
+    ['unresolved', withResolution(unresolvedEnvelope({ lookupId: 'b' }), '720p'), '720p'],
+    ['refused', refusedEnvelope({ lookupId: 'c', refusal: 'a sidecar' }), null],
+    ['malformed', withResolution(unresolvedEnvelope({ lookupId: 'f' }), '4K'), null],
+  ];
+  for (const [name, envelope, expected] of cases) {
+    const { harness, deps, rssItemId } = fixture();
+    // eslint-disable-next-line no-await-in-loop -- one fresh fixture per case, in order
+    await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
+    assert.ok(harness.media.videoResolutions.has(rssItemId), `${name}: written`);
+    assert.equal(harness.media.videoResolutions.get(rssItemId), expected, `${name}: value`);
+  }
+});
+
+test('a partial or pending answer that polls again writes no video resolution', async () => {
+  // Any write to `rss_item` moves its `updated_at`, which `/unmatched`'s
+  // Retry button reads as "the retry landed" -- so a write here would
+  // re-enable the button while polling continues, and rewrite the row on
+  // every poll. Even a partial answer that already carries a parse waits.
+  const cases: readonly [string, LookupEnvelope][] = [
+    ['partial', withResolution(partialEnvelope({ lookupId: 'd' }), '2160p')],
+    ['pending', withResolution(pendingEnvelope({ lookupId: 'e' }), '1080p')],
+  ];
+  for (const [name, envelope] of cases) {
+    const { harness, deps, rssItemId } = fixture();
+    // eslint-disable-next-line no-await-in-loop -- one fresh fixture per case, in order
+    await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: 0 }, deps);
+    assert.equal(harness.enqueued[0]?.kind, POLL_JOB, `${name}: it polls again`);
+    assert.ok(!harness.media.videoResolutions.has(rssItemId), `${name}: nothing written`);
+  }
+});
+
+test('the poll that gives up records the video resolution of the last envelope', async () => {
+  // The service never finished, so its last envelope is the best parse there is.
+  const { harness, deps, rssItemId } = fixture();
+  const envelope = withResolution(pendingEnvelope({ lookupId: 'lookup-expired' }), '720p');
+
+  await applyEnvelope(envelope, { rssItemId, filename: 'item.mkv', polls: MAX_POLLS }, deps);
+
+  assert.equal(harness.enqueued.length, 0, 'no further poll is scheduled');
+  assert.ok(harness.media.videoResolutions.has(rssItemId), 'written');
+  assert.equal(harness.media.videoResolutions.get(rssItemId), '720p');
 });

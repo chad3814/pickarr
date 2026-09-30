@@ -150,8 +150,13 @@ export const rssItem = sqliteTable('rss_item', {
   downloadType: text('download_type').notNull(),
   mediaItemId: integer('media_item_id').references(() => mediaItem.id),
   rankingScore: integer('ranking_score'),
-  resolution: text('resolution').notNull(),
-  resolutionDetail: text('resolution_detail'),
+  lookupState: text('lookup_state').notNull(),
+  lookupStateDetail: text('lookup_state_detail'),
+  // The lookup service's parse of this release's video resolution --
+  // `normalizeVideoResolution`'s output, or NULL. Added by migration 24,
+  // backfilled there only for unmatched releases; the lookup engine writes
+  // it going forward.
+  videoResolution: text('video_resolution'),
   // Written only while a release is unmatched, cleared when it resolves --
   // `@pickarr/contract`'s `RssItemSyncRead.lookupJson` carries why.
   lookupJson: text('lookup_json'),

@@ -522,7 +522,7 @@ export function createHost(deps: {
   // the eleventh — `createMediaItem`, through `MediaItemInit.pluginId` —
   // stores the id it is handed without checking it against the plugin doing
   // the writing. So there is nothing per-plugin here to close over, and equally
-  // nothing that stops `ctx.media.setResolution(anyRssItemId, …)` or
+  // nothing that stops `ctx.media.setLookupState(anyRssItemId, …)` or
   // `ctx.media.dropMediaItem(anyId)` from reaching another plugin's rows.
   // What this writer holds is the shared-row invariants, in one place; what
   // keeps a plugin on its own side of them is convention and explicit

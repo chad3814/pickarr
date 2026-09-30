@@ -201,7 +201,7 @@ function seedFeed(raw: DatabaseSync, pluginId: string, filename: string): { feed
   ).get(pluginId, `${pluginId} feed`, `https://feed.test/${pluginId}`, NOW, NOW);
   const feedId = Number((feed as { id: unknown }).id);
   const item = raw.prepare(
-    `INSERT INTO rss_item (feed_id, filename, link, resolution, download_type, created_at, updated_at)
+    `INSERT INTO rss_item (feed_id, filename, link, lookup_state, download_type, created_at, updated_at)
      VALUES (?, ?, ?, 'pending', 'torrent', ?, ?) RETURNING id`,
   ).get(feedId, filename, `https://feed.test/${filename}`, NOW, NOW);
   return { feedId, rssItemId: Number((item as { id: unknown }).id) };
@@ -307,12 +307,12 @@ test('each plugin identifies its own feed item end to end, through the job the h
     { plugin_id: 'tv', title: 'Tomorrow', provider_ref: 'tmdb:episode:1' },
     { plugin_id: 'xxx', title: 'A Scene', provider_ref: 'tpdb:scene:1' },
   ]);
-  // `filename` as well as `resolution`: ordered by id alone, three identical
+  // `filename` as well as `lookup_state`: ordered by id alone, three identical
   // rows cannot say which plugin was the one that failed.
-  assert.deepEqual(rows(raw, 'SELECT filename, resolution FROM rss_item ORDER BY id'), [
-    { filename: 'episode.mkv', resolution: 'resolved' },
-    { filename: 'film.mkv', resolution: 'resolved' },
-    { filename: 'scene.mp4', resolution: 'resolved' },
+  assert.deepEqual(rows(raw, 'SELECT filename, lookup_state FROM rss_item ORDER BY id'), [
+    { filename: 'episode.mkv', lookup_state: 'resolved' },
+    { filename: 'film.mkv', lookup_state: 'resolved' },
+    { filename: 'scene.mp4', lookup_state: 'resolved' },
   ]);
   assert.deepEqual(rows(raw, 'SELECT name FROM person'), [{ name: 'A Actor' }]);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM role').get()?.['n'], 1);

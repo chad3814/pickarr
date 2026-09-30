@@ -257,7 +257,7 @@ function given(raw: DatabaseSync, filenames: readonly string[]): number[] {
   const feedId = Number(feed.lastInsertRowid);
   return filenames.map((filename) => {
     const item = raw.prepare(`
-      INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+      INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
       VALUES (?, ?, ?, 0, 0, 'nzb', 'pending')
     `).run(feedId, filename, `https://feed.test/${filename}`);
     return Number(item.lastInsertRowid);
@@ -327,19 +327,19 @@ function mediaItems(raw: DatabaseSync): MediaItemState[] {
 
 interface RssItemState {
   mediaItemId: number | null;
-  resolution: string;
-  resolutionDetail: string | null;
+  lookupState: string;
+  lookupStateDetail: string | null;
 }
 
 function rssItemState(raw: DatabaseSync, id: number): RssItemState {
   const row = only(
-    rowsOf(raw, 'SELECT media_item_id, resolution, resolution_detail FROM rss_item WHERE id = ?', id),
+    rowsOf(raw, 'SELECT media_item_id, lookup_state, lookup_state_detail FROM rss_item WHERE id = ?', id),
     `rss item ${id}`,
   );
   return {
     mediaItemId: readIntegerOrNull(row, 'media_item_id'),
-    resolution: readText(row, 'resolution'),
-    resolutionDetail: readTextOrNull(row, 'resolution_detail'),
+    lookupState: readText(row, 'lookup_state'),
+    lookupStateDetail: readTextOrNull(row, 'lookup_state_detail'),
   };
 }
 
@@ -570,7 +570,7 @@ function createGatedImages(bytesByUrl: ReadonlyMap<string, Uint8Array>): GatedIm
   };
 }
 
-test('a resolved entry writes the media item, its provider ref, its people, and resolution resolved', async () => {
+test('a resolved entry writes the media item, its provider ref, its people, and the lookup state resolved', async () => {
   const grid = resolvedEntry(MOVIE, {
     lookupId: 'lk-grid',
     provider: 'tmdb',
@@ -608,8 +608,8 @@ test('a resolved entry writes the media item, its provider ref, its people, and 
   assert.equal(media.description, 'A film about a grid.');
 
   const item = rssItemState(raw, itemId);
-  assert.equal(item.resolution, 'resolved');
-  assert.equal(item.resolutionDetail, null, 'a resolved item has nothing to explain');
+  assert.equal(item.lookupState, 'resolved');
+  assert.equal(item.lookupStateDetail, null, 'a resolved item has nothing to explain');
   assert.equal(item.mediaItemId, media.id);
 
   // People are de-duplicated on the provider's own person id, and each role
@@ -641,7 +641,7 @@ test('a resolved entry writes the media item, its provider ref, its people, and 
   assert.equal(own.lookupJobId, job.id);
 });
 
-test('a refused entry is terminal: resolution refused, no retry enqueued, no media rows', async () => {
+test('a refused entry is terminal: the lookup state refused, no retry enqueued, no media rows', async () => {
   // A refusal is a successful identification of a non-media file. Retrying it
   // forever, or surfacing it as a failure, are both wrong.
   const refusal = 'subtitle track, not media';
@@ -659,10 +659,10 @@ test('a refused entry is terminal: resolution refused, no retry enqueued, no med
   // below proves: it throws if a second job exists.
 
   const item = rssItemState(raw, itemId);
-  assert.equal(item.resolution, 'refused', 'a refusal is not an unresolved item');
+  assert.equal(item.lookupState, 'refused', 'a refusal is not an unresolved item');
   // The service's own words, carried through: a refusal a reader cannot read
   // is indistinguishable from a failure.
-  assert.equal(item.resolutionDetail, refusal);
+  assert.equal(item.lookupStateDetail, refusal);
   assert.equal(item.mediaItemId, null);
 
   assert.deepEqual(mediaItems(raw), [], 'a refused file is not media, so it has no media row');
@@ -678,7 +678,7 @@ test('a refused entry is terminal: resolution refused, no retry enqueued, no med
   assert.equal(job.attempts, 1);
 });
 
-test('an unresolved entry records resolution unresolved and does not enqueue a retry', async () => {
+test('an unresolved entry records the lookup state unresolved and does not enqueue a retry', async () => {
   const { raw, host, setTimeoutCalls } = setup(script([unresolvedEntry(GIBBERISH, { lookupId: 'lk-zzz' })]));
   const ids = given(raw, [GIBBERISH]);
   const itemId = only(ids, 'rss item');
@@ -693,9 +693,9 @@ test('an unresolved entry records resolution unresolved and does not enqueue a r
   // `only(jobs(raw), ...)` below proves: it throws if a second job exists.
 
   const item = rssItemState(raw, itemId);
-  assert.equal(item.resolution, 'unresolved', 'a name the service did not recognise is not a refusal');
-  assert.ok(item.resolutionDetail, 'an unresolved item must record why it is unresolved');
-  assert.match(item.resolutionDetail, /did not recognise/);
+  assert.equal(item.lookupState, 'unresolved', 'a name the service did not recognise is not a refusal');
+  assert.ok(item.lookupStateDetail, 'an unresolved item must record why it is unresolved');
+  assert.match(item.lookupStateDetail, /did not recognise/);
   assert.equal(item.mediaItemId, null);
   assert.deepEqual(mediaItems(raw), []);
 
@@ -730,13 +730,13 @@ test('a partial entry enqueues a poll job carrying its lookupId, and its sibling
   // Half one: the entries either side of the slow one are already finished.
   // One entry with no answer yet must not stall its siblings, and the entry
   // *after* it in the same batch is the one a response-level read loses.
-  assert.equal(rssItemState(raw, firstId).resolution, 'resolved');
-  assert.equal(rssItemState(raw, lastId).resolution, 'resolved');
+  assert.equal(rssItemState(raw, firstId).lookupState, 'resolved');
+  assert.equal(rssItemState(raw, lastId).lookupState, 'resolved');
   assert.equal(mediaItems(raw).length, 2, 'only the two answered entries have media rows');
 
   // The slow one is none of resolved, refused or unresolved: it has no answer.
   const slow = rssItemState(raw, slowId);
-  assert.equal(slow.resolution, 'pending');
+  assert.equal(slow.lookupState, 'pending');
   assert.equal(slow.mediaItemId, null);
 
   // Half two: the poll exists and carries that entry's own lookup id. Without
@@ -769,8 +769,8 @@ test('the poll job completes the item once the fake service answers', async () =
   assert.deepEqual(service.pollRequests, ['lk-slow', 'lk-slow'], 'the first poll was answered "not yet"');
 
   const item = rssItemState(raw, itemId);
-  assert.equal(item.resolution, 'resolved');
-  assert.equal(item.resolutionDetail, null);
+  assert.equal(item.lookupState, 'resolved');
+  assert.equal(item.lookupStateDetail, null);
   const media = only(mediaItems(raw), 'media item');
   assert.equal(item.mediaItemId, media.id);
   assert.equal(media.providerRef, 'movie:slow');
@@ -842,8 +842,8 @@ test('two rss items resolving to one provider ref end up sharing one media item'
   // Both rss items point at the survivor, and so do the double's own rows.
   assert.equal(rssItemState(raw, firstId).mediaItemId, media.id);
   assert.equal(rssItemState(raw, secondId).mediaItemId, media.id);
-  assert.equal(rssItemState(raw, firstId).resolution, 'resolved');
-  assert.equal(rssItemState(raw, secondId).resolution, 'resolved');
+  assert.equal(rssItemState(raw, firstId).lookupState, 'resolved');
+  assert.equal(rssItemState(raw, secondId).lookupState, 'resolved');
   assert.deepEqual(doubleRows(raw).map((row) => row.mediaItemId), [media.id, media.id]);
 
   // Both answers' people land on the one survivor, once each. The loser's
@@ -955,7 +955,7 @@ test('artwork runs as its own job, so a failed image does not undo a resolved it
     assert.equal(media.title, 'The Grid');
     const item = rssItemState(raw, itemId);
     assert.equal(item.mediaItemId, media.id);
-    assert.equal(item.resolution, 'resolved', 'the lookup outcome must not be undone by the artwork job failing');
+    assert.equal(item.lookupState, 'resolved', 'the lookup outcome must not be undone by the artwork job failing');
 
     // The artwork job itself is what failed, and dead-lettered on its own.
     const artworkJob = only(jobs(raw).filter((job) => job.kind === 'artwork'), 'artwork job');
@@ -1245,7 +1245,7 @@ test('a handler that runs to completion twice does not double-write', async () =
   // `snapshot` leaves `jobs.attempts` out, which is the one column a second
   // run legitimately moves. Everything the handler wrote must be untouched:
   // not one extra media item, person, role or double_media row, and no
-  // rewritten resolution.
+  // rewritten lookup state.
   assert.deepEqual(snapshot(raw), afterFirstRun);
   assert.equal(lookupAttempts(raw), 2, 'the re-run consumed a second attempt');
 });

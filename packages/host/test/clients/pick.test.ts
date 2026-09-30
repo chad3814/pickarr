@@ -197,7 +197,7 @@ function seedFeed(raw: DatabaseSync, overrides: {
 /** Inserts one `rss_item` row linking to {@link MAGNET} and returns its id. */
 function seedRssItem(raw: DatabaseSync, feedId: number, downloadType = 'torrent'): number {
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
     VALUES (?, 'Some Show', ?, 1, 1, ?, 'pending')
   `).run(feedId, MAGNET, downloadType);
   return Number(result.lastInsertRowid);

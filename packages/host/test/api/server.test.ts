@@ -711,8 +711,8 @@ function seedFeed(raw: DatabaseSync, url: string, pluginId = 'alpha'): number {
 function seedRssItem(raw: DatabaseSync, feedId: number, updatedAt: number, filename: string): number {
   const info = raw.prepare(`
     INSERT INTO rss_item
-      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution, resolution_detail, guid)
-    VALUES (?, ?, ?, ?, ?, 'torrent', NULL, '1080p', 'x264', ?)
+      (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state, lookup_state_detail, guid)
+    VALUES (?, ?, ?, ?, ?, 'torrent', NULL, 'resolved', 'x264', ?)
   `).run(feedId, filename, `https://example.com/${filename}`, updatedAt, updatedAt, `guid-${filename}`);
   return Number(info.lastInsertRowid);
 }
@@ -1105,8 +1105,9 @@ test('rss items, downloads and deletions each page their own stream', async () =
         filename: 'One.Movie.1080p.mkv',
         link: 'https://example.com/One.Movie.1080p.mkv',
         mediaItemId: null,
-        resolution: '1080p',
-        resolutionDetail: 'x264',
+        lookupState: 'resolved',
+        lookupStateDetail: 'x264',
+        videoResolution: null,
         downloadType: 'torrent',
         deliveredAt: null,
       }],

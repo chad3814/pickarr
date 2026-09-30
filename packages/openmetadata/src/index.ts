@@ -1,10 +1,10 @@
 export type {
   DetailValue,
+  EnvelopeState,
   LookupBatchEntry,
   LookupBatchResponse,
   LookupCategory,
   LookupEnvelope,
-  LookupState,
   Media,
   MediaKind,
   MediaParent,
@@ -15,6 +15,7 @@ export type {
 } from './types.ts';
 export { API_KEY_SECRET } from './types.ts';
 export { readBatchResponse, readEnvelope } from './validate.ts';
+export { videoResolutionOf } from './quality.ts';
 export type { LookupClient, LookupClientDeps } from './client.ts';
 export { MAX_BATCH, createLookupClient } from './client.ts';
 export { lookupTable, lookupTableMigration, lookupTableName } from './table.ts';
@@ -26,6 +27,7 @@ export {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
   resolveYear,
 } from './tokens.ts';
@@ -40,6 +42,12 @@ export {
   createLookupPlugin,
   describeUnresolved,
 } from './engine.ts';
+export {
+  VIDEO_RESOLUTION_BACKFILL_JOB,
+  createVideoResolutionBackfillJob,
+  videoResolutionBackfillMigration,
+} from './backfill.ts';
+export type { VideoResolutionBackfillDeps } from './backfill.ts';
 export type { Expectation, Selection, SelectionRefusal, SelectionRefusalCode } from './select.ts';
 export { episodeMarker, isCandidate, select } from './select.ts';
 export type {

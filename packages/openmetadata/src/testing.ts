@@ -19,6 +19,7 @@ import type {
   ImportRefusal,
   JobEnqueue,
   JobQueue,
+  LookupState,
   MediaItemInit,
   MediaItemRead,
   MediaItemUpdate,
@@ -26,7 +27,6 @@ import type {
   MediaWriter,
   PluginContext,
   ProviderClaim,
-  Resolution,
   HostFetch,
   LibraryImporter,
   TokenValues,
@@ -83,6 +83,11 @@ export function partialEnvelope(fields: { lookupId: string }): LookupEnvelope {
 /** The other way the service says "not yet": a state rather than a flag. */
 export function pendingEnvelope(fields: { lookupId: string }): LookupEnvelope {
   return { ...BASE, lookupId: fields.lookupId, state: 'pending' };
+}
+
+/** `envelope` with the parse the live service sends for a name stating `resolution` -- the shape `videoResolutionOf` reads. */
+export function withResolution(envelope: LookupEnvelope, resolution: unknown): LookupEnvelope {
+  return { ...envelope, parsed: { quality: { resolution } } };
 }
 
 export interface FakeLookupScript {
@@ -212,7 +217,8 @@ export interface RecordingMedia {
   readonly reader: MediaReader;
   readonly calls: readonly RecordedCall[];
   readonly items: ReadonlyMap<number, MediaItemRead>;
-  readonly resolutions: ReadonlyMap<number, { resolution: Resolution; detail: string | null; lookupJson: string | null }>;
+  readonly lookupStates: ReadonlyMap<number, { state: LookupState; detail: string | null; lookupJson: string | null }>;
+  readonly videoResolutions: ReadonlyMap<number, string | null>;
   readonly roles: readonly { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[];
   /** Makes the next `claimProviderRef` report `winner` as the keeper. */
   loseNextClaim(winner: number): void;
@@ -228,7 +234,8 @@ export function createRecordingMedia(): RecordingMedia {
   const calls: RecordedCall[] = [];
   const items = new Map<number, MediaItemRead>();
   const people = new Map<string, number>();
-  const resolutions = new Map<number, { resolution: Resolution; detail: string | null; lookupJson: string | null }>();
+  const lookupStates = new Map<number, { state: LookupState; detail: string | null; lookupJson: string | null }>();
+  const videoResolutions = new Map<number, string | null>();
   const roles: { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[] = [];
   const links = new Map<number, number | null>();
   let nextItem = 0;
@@ -298,9 +305,13 @@ export function createRecordingMedia(): RecordingMedia {
       record('attachRole', mediaItemId, role);
       roles.push({ mediaItemId, ...role });
     },
-    async setResolution(rssItemId, resolution, detail, lookupJson): Promise<void> {
-      record('setResolution', rssItemId, resolution, detail, lookupJson);
-      resolutions.set(rssItemId, { resolution, detail, lookupJson });
+    async setLookupState(rssItemId, state, detail, lookupJson): Promise<void> {
+      record('setLookupState', rssItemId, state, detail, lookupJson);
+      lookupStates.set(rssItemId, { state, detail, lookupJson });
+    },
+    async setVideoResolution(rssItemId, value): Promise<void> {
+      record('setVideoResolution', rssItemId, value);
+      videoResolutions.set(rssItemId, value);
     },
   };
 
@@ -325,7 +336,8 @@ export function createRecordingMedia(): RecordingMedia {
     reader,
     calls,
     items,
-    resolutions,
+    lookupStates,
+    videoResolutions,
     roles,
     loseNextClaim(winner: number): void { claimLoser = winner; },
   };
@@ -400,13 +412,24 @@ export interface TestHarness {
  * never looks. They stay because that is exactly what `engine-jobs.test.ts`
  * drops in order to prove it, and a plugin cannot be shown not to read a
  * table that was never created.
+ *
+ * `rss_item.lookup_state` and `.video_resolution` are here for
+ * `videoResolutionBackfillMigration`'s own read and `setVideoResolution`'s
+ * write. `jobs` is the host's table, for that same migration, which writes
+ * it directly with raw SQL because a plugin migration cannot reach
+ * `JobQueue`. The real `jobs` table is pinned against that insert by
+ * `host/test/plugins/backfill.test.ts`, not by this stub.
  */
 export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = OFF');
   raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER)');
-  raw.exec('CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL)');
+  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT)");
   raw.exec('CREATE TABLE media_item (id INTEGER PRIMARY KEY)');
+  raw.exec(`CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL, run_at INTEGER NOT NULL,
+    state TEXT NOT NULL, last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
 
   const media = createRecordingMedia();
   const enqueued: (JobEnqueue & { id: number })[] = [];

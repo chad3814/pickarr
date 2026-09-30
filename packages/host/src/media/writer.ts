@@ -1,13 +1,14 @@
 import type {
   ImageInit,
+  LookupState,
   MediaItemInit,
   MediaItemUpdate,
   MediaWriter,
   PersonInit,
   ProviderClaim,
-  Resolution,
   RoleInit,
 } from '@pickarr/contract';
+import { normalizeVideoResolution } from '@pickarr/contract';
 import type { ArtworkStore } from '../artwork/store.ts';
 import type { HostDb } from '../db/open.ts';
 
@@ -198,7 +199,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       // the answer is unreachable, and anything that leaves it behind is
       // storage no UI can show and no code will revisit.
       //
-      // It used to be cleared two statements later, by `setResolution` at
+      // It used to be cleared two statements later, by `setLookupState` at
       // the end of `openmetadata/src/engine.ts`'s resolved branch -- with
       // the plugin's own `apply` and `attachPeople` in between. A throw in
       // either left the row linked and the answer retained; the lookup job
@@ -400,17 +401,28 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       `).run(mediaItemId, role.personId, role.role, role.name, role.billingOrder, at);
     },
 
-    async setResolution(
+    async setLookupState(
       rssItemId: number,
-      resolution: Resolution,
+      state: LookupState,
       detail: string | null,
       lookupJson: string | null,
     ): Promise<void> {
       const at = now();
       // `lookup_json` is written on every call, including with `null`,
       // which is what clears an answer left by an earlier failure.
-      raw.prepare('UPDATE rss_item SET resolution = ?, resolution_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
-        .run(resolution, detail, lookupJson, at, rssItemId);
+      raw.prepare('UPDATE rss_item SET lookup_state = ?, lookup_state_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
+        .run(state, detail, lookupJson, at, rssItemId);
+    },
+
+    async setVideoResolution(rssItemId: number, value: string | null): Promise<void> {
+      if (value !== null && normalizeVideoResolution(value) !== value) {
+        throw new TypeError('media writer: not a video resolution Pickarr stores');
+      }
+      // `IS NOT`, not `!=`, so `null` compares as a value: an unchanged
+      // resolution writes nothing, which keeps `updated_at` -- the Retry
+      // button's "landed" signal and the sync log's cursor -- still.
+      raw.prepare('UPDATE rss_item SET video_resolution = ?, updated_at = ? WHERE id = ? AND video_resolution IS NOT ?')
+        .run(value, now(), rssItemId, value);
     },
   };
 }

@@ -123,6 +123,7 @@ import {
   type Host,
   type ReadServer,
 } from '@pickarr/host';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { TV_MIGRATIONS, TV_SYNCED } from '@pickarr/plugin-tv';
 import { XXX_MIGRATIONS, XXX_SYNCED } from '@pickarr/plugin-xxx';
 import { webDist } from './paths.ts';
@@ -165,22 +166,26 @@ export type Category = 'tv' | 'movie' | 'xxx';
  * `movie` stays empty because its year comes off `media_item` and needs no
  * table at all.
  *
- * `TV_MIGRATIONS`' one migration is version 2, not 1 -- version 1 is the
- * lookup engine's own state table, which `createLookupPlugin` prepends and
- * this harness has no engine to prepend it (`plugin-tv/src/migrations.ts`'s
- * own doc). `migratePlugin` applies every version it holds no
+ * `TV_MIGRATIONS` and `XXX_MIGRATIONS` both start at version 2 -- version 1
+ * is the lookup engine's own state table (`<id>_lookup`), which
+ * `createLookupPlugin` prepends and this harness has no engine to prepend it
+ * (`plugin-tv/src/migrations.ts`'s own doc). Both lists now reach version 4,
+ * `videoResolutionBackfillMigration` (issue #98), whose `up()` runs `ALTER
+ * TABLE <id>_lookup` -- a table only version 1 creates -- so this harness
+ * prepends `lookupTableMigration` itself below, the one piece of the engine's
+ * prepend it still needs. `migratePlugin` applies every version it holds no
  * `plugin_migrations` row for, in sorted order, and asks for no contiguity
- * at all, so a list starting at 2 applies cleanly; what it does enforce is
- * the `<pluginId>_` prefix on every table `up()` creates, which all three
- * of television's carry.
+ * at all, so a list starting at 1 applies cleanly; what it does enforce is
+ * the `<pluginId>_` prefix on every table `up()` creates, which all of
+ * television's and the lookup table itself carry.
  */
 const PLUGIN_SCHEMA: Record<Category, {
   migrations: readonly Migration[];
   synced: readonly SyncedTable<unknown>[];
 }> = {
-  tv: { migrations: TV_MIGRATIONS, synced: TV_SYNCED },
+  tv: { migrations: [lookupTableMigration('tv'), ...TV_MIGRATIONS], synced: TV_SYNCED },
   movie: { migrations: [], synced: [] },
-  xxx: { migrations: XXX_MIGRATIONS, synced: XXX_SYNCED },
+  xxx: { migrations: [lookupTableMigration('xxx'), ...XXX_MIGRATIONS], synced: XXX_SYNCED },
 };
 
 /**
@@ -530,9 +535,9 @@ export interface Harness {
    * would recover too -- `library/useFeedNames.ts` subscribes to
    * `rss_feed` and re-reads -- but it cannot arise here.)
    *
-   * **`resolution` and `detail` are plain strings, not
-   * `@pickarr/contract`'s `Resolution` union and its nullable detail.**
-   * `rss_item.resolution` is unconstrained TEXT, and the screen prints
+   * **`lookupState` and `detail` are plain strings, not
+   * `@pickarr/contract`'s `LookupState` union and its nullable detail.**
+   * `rss_item.lookup_state` is unconstrained TEXT, and the screen prints
    * whatever word it holds rather than mapping it to a sentence
    * (`Unmatched.tsx`), so a seeder narrowed to the four words this build
    * knows could not stand in for a replica row some other build wrote --
@@ -544,7 +549,7 @@ export interface Harness {
   seedUnmatchedRelease(input: {
     filename: string;
     feedName: string;
-    resolution: string;
+    lookupState: string;
     detail: string;
     lookupJson: string | null;
   }): Promise<number>;
@@ -552,7 +557,7 @@ export interface Harness {
     pluginId: Category;
     title: string;
     filename: string;
-    resolution: string;
+    lookupState: string;
     /**
      * Whether to create the torrent client the pick needs. Required rather
      * than defaulted, for the reason every other required dependency in
@@ -880,7 +885,7 @@ export const test = base.extend<{ harness: Harness }>({
         seedMediaItem,
         seedTvRelease,
         seedXxxScene,
-        async seedUnmatchedRelease({ filename, feedName, resolution, detail, lookupJson }) {
+        async seedUnmatchedRelease({ filename, feedName, lookupState, detail, lookupJson }) {
           const feed = await host.addFeed({
             // `tv`, and the category is deliberately not a parameter.
             // `addFeed`'s own `isRegistered` check needs one of the three
@@ -923,13 +928,13 @@ export const test = base.extend<{ harness: Harness }>({
           const info = raw.prepare(`
             INSERT INTO rss_item
               (feed_id, filename, link, created_at, updated_at, download_type,
-               resolution, resolution_detail, lookup_json)
+               lookup_state, lookup_state_detail, lookup_json)
             VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?, ?)
-          `).run(feed.id, filename, MAGNET, at, at, resolution, detail, lookupJson);
+          `).run(feed.id, filename, MAGNET, at, at, lookupState, detail, lookupJson);
 
           return Number(info.lastInsertRowid);
         },
-        async seedPickableRelease({ pluginId, title, filename, resolution, withDownloadClient }) {
+        async seedPickableRelease({ pluginId, title, filename, lookupState, withDownloadClient }) {
           if (withDownloadClient) {
             const client = await host.addDownloadClient({
               name: `${pluginId} seedbox`,
@@ -986,9 +991,9 @@ export const test = base.extend<{ harness: Harness }>({
           // rather than a status (`ReleaseList.tsx`, picks design §2).
           const info = raw.prepare(`
             INSERT INTO rss_item
-              (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
+              (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state)
             VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?)
-          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, resolution);
+          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, lookupState);
 
           return { mediaItemId, rssItemId: Number(info.lastInsertRowid) };
         },

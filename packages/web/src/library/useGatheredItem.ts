@@ -114,18 +114,27 @@
  * immediately after `getRow` -- which is the comparison that would have
  * changed the code.
  *
- * **What it still does not subscribe to, and what that costs.** An
- * *update* to a row already gathered wakes nothing here: `store/apply.ts`
- * counts an upsert over a row that already carried a value as `touched`,
- * never `inserted` (`Changed`'s own doc), so a download's status and
- * percentage advancing from `queued` to `downloading` to done is not
- * something this hook notices -- the first pick is, the progress after it is
- * not. Nor is a new `rss_item`: a release arriving for an item already on
- * screen is still only caught the next time something touches the media item
- * itself, or the next time this hook gathers this id from cold. Neither is
- * the filter's doing; both are rows this hook does not watch at all. The
- * filter has one cost of its own: a download insert that lands before the
- * first gather resolves has no release set to be matched against and is
+ * **And every download a gather found is watched by its own row.** An
+ * insert subscription does not fire for an update: `store/apply.ts` counts
+ * an upsert over a row that already carried a value as `touched`, never
+ * `inserted` (`Changed`'s own doc). This paragraph used to say so and stop
+ * there, and that was the defect it described -- a download's status and
+ * percentage advancing from `submitted` to `downloading` to `delivered`
+ * woke nothing, so a card sat at its first percentage until it was
+ * collapsed and reopened. A download row *does* have an id once a gather
+ * has seen it, so after every gather this hook subscribes to each one with
+ * `subscribe` and drops the previous gather's set. The cost is one gather
+ * per progress write per open card showing that download, and the host
+ * writes progress once per `RECONCILE_INTERVAL_S` (60s) per client
+ * (`host/src/clients/reconcile-job.ts`), so it is small.
+ *
+ * **What it still does not subscribe to.** A new `rss_item`: a release
+ * arriving for an item already on screen is still only caught the next time
+ * something touches the media item itself, or the next time this hook
+ * gathers this id from cold. That is not the filter's doing; it is a row
+ * this hook does not watch at all. The filter has one cost of its own: a
+ * download insert that lands before the first gather resolves has no
+ * release set to be matched against and is
  * dropped, which is sound for the pick path -- a release must have been
  * gathered and rendered for anyone to press its button -- and is not a claim
  * about any other writer. That is the honest scope of "corrects on the next
@@ -218,9 +227,28 @@ export function useGatheredItem(
     if (!enabled) return;
     let cancelled = false;
 
+    // The per-row subscriptions on the downloads the latest gather found --
+    // see this file's docblock. Replaced wholesale on every gather, so a
+    // download that is gone from the replica stops being watched with it.
+    let downloadOffs: (() => void)[] = [];
+
+    function unwatchDownloads(): void {
+      for (const off of downloadOffs) off();
+      downloadOffs = [];
+    }
+
+    function watchDownloads(result: GatheredItem | undefined): void {
+      unwatchDownloads();
+      downloadOffs = (result?.releases ?? []).flatMap((release) =>
+        release.downloads.map((download) => source.subscribe(download.table, download.id, safeGather)),
+      );
+    }
+
     function apply(result: GatheredItem | undefined): void {
       cache.current.set(mediaItemId, result);
-      if (!cancelled) setItem(result);
+      if (cancelled) return;
+      setItem(result);
+      watchDownloads(result);
     }
 
     function safeGather(): void {
@@ -269,9 +297,10 @@ export function useGatheredItem(
       };
     }
 
-    // Re-gathers on a notification for this item's own row, and on a
-    // download inserted under one of its releases -- see this file's
-    // docblock for exactly what those do and do not correct.
+    // Re-gathers on a notification for this item's own row, on a download
+    // inserted under one of its releases, and (through `watchDownloads`) on
+    // any change to a download it already shows -- see this file's docblock
+    // for exactly what those do and do not correct.
     const unsubscribe = source.subscribe('media_item', mediaItemId, safeGather);
     const unsubscribeInserts = DOWNLOAD_TABLES.map((table) =>
       source.subscribeInserts(table, safeRegatherIfOurs(table)),
@@ -280,6 +309,7 @@ export function useGatheredItem(
       cancelled = true;
       unsubscribe();
       for (const off of unsubscribeInserts) off();
+      unwatchDownloads();
     };
   }, [source, mediaItemId, enabled]);
 

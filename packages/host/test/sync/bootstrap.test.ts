@@ -32,8 +32,8 @@ const addItem = (raw: DatabaseSync, id: number, pluginId: string, updatedAt: num
     .run(id, pluginId, updatedAt, updatedAt, `t${id}`);
 
 const addRelease = (raw: DatabaseSync, id: number, mediaItemId: number | null) =>
-  raw.prepare(`INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, resolution)
-               VALUES (?, 1, ?, ?, 1, 1, 'torrent', ?, '1080p')`)
+  raw.prepare(`INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state)
+               VALUES (?, 1, ?, ?, 1, 1, 'torrent', ?, 'resolved')`)
     .run(id, `f${id}`, `l${id}`, mediaItemId);
 
 /** The log, as `<id>:<table>/<row>`, which is how the brief's measurements read. */

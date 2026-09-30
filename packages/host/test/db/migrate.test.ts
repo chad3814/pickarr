@@ -4,10 +4,12 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Migration } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { HOST_MIGRATIONS, migrateHost, migrateHostWith, migratePlugin } from '../../src/db/migrate.ts';
+import { readHostState, writeHostState, SYNC_GENERATION_KEY } from '../../src/db/host-state.ts';
 import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
 import { DOWNLOAD_STATUSES } from '../../src/clients/rows.ts';
+import { VIDEO_RESOLUTION_CASES } from '../../../contract/test/videoResolutionCases.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -283,7 +285,14 @@ test('migrating renames an existing feed from usenet to nzb', () => {
  * are needed before any insert into torrent_download or nzb_download can
  * succeed. Every row after the client is id 1, which is all callers below need.
  */
-function seedDownloadTarget(raw: DatabaseSync): void {
+function seedDownloadTarget(
+  raw: DatabaseSync,
+  // Two of this function's callers seed a schema stopped before migration
+  // 24 (`HOST_MIGRATIONS.filter((m) => m.version <= 6 or 7)`), where the
+  // column is still named `resolution`; every other caller runs against the
+  // head schema, where migration 24 has already renamed it.
+  lookupStateColumn: string = 'lookup_state',
+): void {
   raw.prepare(`
     INSERT INTO download_client (name, type, url, category, import_mode, created_at, updated_at)
     VALUES ('Client', 'torrent', 'https://example.com', 'movies', 'copy', 1, 1)
@@ -299,8 +308,8 @@ function seedDownloadTarget(raw: DatabaseSync): void {
   // download tables' unique indexes, and an unused second `rss_item` costs
   // the other four nothing.
   const insertItem = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
-    VALUES (1, ?, ?, 1, 1, 'torrent', '1080p')
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, ${lookupStateColumn})
+    VALUES (1, ?, ?, 1, 1, 'torrent', 'resolved')
   `);
   insertItem.run('a.mkv', 'https://example.com/a');
   insertItem.run('b.mkv', 'https://example.com/b');
@@ -549,7 +558,7 @@ test('the new columns are nullable, so an existing row needs no back-filled gues
   // any of the four reconcile columns yet -- the shape a real database has
   // the moment before this migration runs.
   migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 6));
-  seedDownloadTarget(raw);
+  seedDownloadTarget(raw, 'resolution');
   raw.prepare(`
     INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
     VALUES (1, 1, 'pending', 1, 1)
@@ -606,7 +615,7 @@ test('reclaimed_at is nullable, so a row that predates it needs no back-filled g
   // reclaimed_at yet -- the shape a real database has the moment before this
   // migration runs.
   migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 7));
-  seedDownloadTarget(raw);
+  seedDownloadTarget(raw, 'resolution');
   raw.prepare(`
     INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
     VALUES (1, 1, 'delivered', 1, 1)
@@ -1834,5 +1843,120 @@ test('migration 23 adds person_image, and does not replicate it', () => {
     "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'person_image'",
   ).all();
   assert.deepEqual(triggers, [], 'artwork is not replicated, so this table has no sync triggers');
+  raw.close();
+});
+
+test('migration 24 renames the lookup state columns in place, so rss_item keeps replicating', () => {
+  // A rename, not a rebuild: `docs/database-migrations.md` measures RENAME
+  // COLUMN as keeping all three triggers with their bodies rewritten, and a
+  // rebuild as silently dropping them. Asserted by writing through the
+  // triggers, because a trigger that survived with a body still naming
+  // `resolution` would fail on the first UPDATE, not at migration time.
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1);
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, resolution_detail)
+      VALUES (1, 'a.mkv', 'http://a', 1, 1, 'torrent', 'unresolved', 'not recognised');
+  `);
+  migrateHost(raw);
+
+  const columns = new Set(
+    raw.prepare("SELECT name FROM pragma_table_info('rss_item')").all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  assert.ok(columns.has('lookup_state') && columns.has('lookup_state_detail'), 'renamed');
+  assert.ok(!columns.has('resolution') && !columns.has('resolution_detail'), 'and the old names are gone');
+
+  const row = raw.prepare('SELECT lookup_state, lookup_state_detail FROM rss_item WHERE id = 1').get();
+  assert.deepEqual({ ...row }, { lookup_state: 'unresolved', lookup_state_detail: 'not recognised' }, 'values carried across');
+
+  // `sync_log` collapses to one entry per changed row (`sync/log.ts`'s own
+  // doc), so a repeat write to the same row leaves `COUNT(*)` exactly where
+  // it was -- the row's insert already logged it, above. What a client
+  // actually watches is the id: `AUTOINCREMENT` issues one strictly higher
+  // than any before it, and that is what carries the update past a cursor
+  // already sitting on the insert's entry.
+  const before = Number((raw.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM sync_log').get() as { n: unknown }).n);
+  raw.exec("UPDATE rss_item SET lookup_state = 'resolved' WHERE id = 1");
+  const after = Number((raw.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM sync_log').get() as { n: unknown }).n);
+  assert.ok(after > before, 'an update after the rename still logs');
+  raw.close();
+});
+
+test('migration 24 forgets the sync generation, so every client re-bootstraps into the new shape', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  writeHostState(raw, SYNC_GENERATION_KEY, 'before-the-rename', 1);
+  migrateHost(raw);
+  // `assert.ok` rather than `assert.equal`: `readHostState` reads
+  // `host_state.value`, which `check-test-hygiene.ts`'s Rule 2 treats as a
+  // credential column regardless of which key is asked for, and
+  // `assert.equal` formats both operands into its failure message.
+  assert.ok(readHostState(raw, SYNC_GENERATION_KEY) === null, 'the next ensureSyncGeneration mints a new one');
+  raw.close();
+});
+
+test("migration 24 backfills an unmatched release's video resolution from its stored answer, by the contract's rule", () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1)");
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+    VALUES (1, ?, ?, 1, 1, 'torrent', 'unresolved', ?)
+  `);
+  const expected = new Map<number, string | null>();
+  for (const [index, [input, want]] of VIDEO_RESOLUTION_CASES.entries()) {
+    const quality = input === undefined ? {} : { resolution: input };
+    const id = Number(insert.run(`case-${index}.mkv`, `http://${index}`, JSON.stringify({ parsed: { quality } })).lastInsertRowid);
+    expected.set(id, want);
+  }
+  const noAnswer = Number(insert.run('no-answer.mkv', 'http://n', null).lastInsertRowid);
+  const tooLarge = Number(insert.run('too-large.mkv', 'http://t', '{"pickarr":"lookup-answer-too-large"}').lastInsertRowid);
+  const malformed = Number(insert.run('malformed.mkv', 'http://m', 'not json').lastInsertRowid);
+  migrateHost(raw);
+
+  const read = raw.prepare('SELECT video_resolution FROM rss_item WHERE id = ?');
+  const valueOf = (id: number): unknown => (read.get(id) as { video_resolution: unknown }).video_resolution;
+  for (const [id, want] of expected) assert.equal(valueOf(id), want, `row ${id}`);
+  assert.equal(valueOf(noAnswer), null, 'nothing stored, nothing backfilled');
+  assert.equal(valueOf(tooLarge), null, 'the too-large marker has no parse');
+  assert.equal(valueOf(malformed), null, 'malformed JSON is not an error, and is not a value');
+  raw.close();
+});
+
+test('migration 24 leaves a resolved release null, because its answer was cleared when it matched', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec(`
+    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1);
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+      VALUES (1, 'The.Bear.S03E01.2160p.WEB.h265-ETHEL.mkv', 'http://a', 1, 1, 'torrent', 'resolved', NULL);
+  `);
+  migrateHost(raw);
+  const row = raw.prepare('SELECT video_resolution FROM rss_item WHERE id = 1').get() as { video_resolution: unknown };
+  assert.equal(row.video_resolution, null, 'the filename says 2160p, but the migration reads only a stored answer');
+  raw.close();
+});
+
+test("migration 24 moves a backfilled row's updated_at, so an /api cursor reader sees the new value, and leaves the rest", () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1)");
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+    VALUES (1, ?, ?, 1, 1, 'torrent', 'unresolved', ?)
+  `);
+  const backfilled = Number(insert.run('a.mkv', 'http://a', '{"parsed":{"quality":{"resolution":"1080p"}}}').lastInsertRowid);
+  const untouched = Number(insert.run('b.mkv', 'http://b', '{"parsed":{"quality":{"resolution":"4K"}}}').lastInsertRowid);
+  const startedAt = Date.now();
+  migrateHost(raw);
+
+  const read = raw.prepare('SELECT updated_at FROM rss_item WHERE id = ?');
+  const updatedAt = (id: number): number => Number((read.get(id) as { updated_at: unknown }).updated_at);
+  // SQLite's clock and this process's are the same wall clock, in ms; a
+  // second of slack covers `subsec` rounding without admitting the seed.
+  assert.ok(updatedAt(backfilled) >= startedAt - 1000, `the backfilled row moved past its seeded 1 (got ${updatedAt(backfilled)})`);
+  assert.equal(updatedAt(untouched), 1, 'a row the backfill did not change keeps its updated_at');
   raw.close();
 });

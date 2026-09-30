@@ -20,6 +20,7 @@ export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
   DownloadRead,
   ImageInit,
+  LookupState,
   MediaItemInit,
   MediaItemRead,
   MediaItemUpdate,
@@ -27,11 +28,11 @@ export type {
   MediaWriter,
   PersonInit,
   ProviderClaim,
-  Resolution,
   RoleInit,
   RssItemRead,
   Transport,
 } from './media.ts';
+export { normalizeVideoResolution } from './videoResolution.ts';
 export type { AddFeedRefusalCode } from './feeds.ts';
 export { ADD_FEED_REFUSALS } from './feeds.ts';
 export type { AddDownloadClientRefusalCode } from './download-clients.ts';

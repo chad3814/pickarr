@@ -58,7 +58,7 @@ export interface PluginContext {
   /**
    * The typed way to write the shared rows -- and, unlike `read` below,
    * **not** scoped to this plugin. It is one writer shared by every plugin
-   * context, closed over no plugin id, so `setResolution`,
+   * context, closed over no plugin id, so `setLookupState`,
    * `updateMediaItem` and `dropMediaItem` all act on any row id handed to
    * them regardless of who owns the row. See `MediaWriter` for why that
    * asymmetry stands for now.
@@ -211,17 +211,15 @@ export interface MediaPlugin {
    * every import for ever. A token being declared here is necessary for a
    * shape naming it to save, and not sufficient.
    *
-   * Includes the four tokens every plugin shares -- `title` and
-   * `releaseDate`, which come from the shared `media_item` row, and
-   * `filename` and `ext`, which come from the source path rather than from
-   * the plugin's own tables. (`resolution` was a fifth until this branch
-   * removed it: `rss_item.resolution` is the *lookup* state, not a video
-   * resolution, so it resolved to nothing and dropped a segment at every
-   * import. Counted, not inherited -- `host/test/plugins/tokens.test.ts`
-   * holds the lists, which are seven for television, six for film and five
-   * for xxx.) They are listed by each plugin rather than merged in here so
-   * that one list answers "what may I type", with nothing a reader has to
-   * know to add to it.
+   * Includes the five tokens every plugin shares -- `title` and
+   * `releaseDate`, which come from the shared `media_item` row; `resolution`,
+   * which comes from `rss_item.video_resolution`, the lookup service's own
+   * parse (issue #98); and `filename` and `ext`, which come from the source
+   * path rather than from the plugin's own tables. Counted, not inherited --
+   * `host/test/plugins/tokens.test.ts` holds the lists, which are eight for
+   * television, seven for film and six for xxx. They are listed by each
+   * plugin rather than merged in here so that one list answers "what may I
+   * type", with nothing a reader has to know to add to it.
    */
   readonly tokens: PluginTokens;
 

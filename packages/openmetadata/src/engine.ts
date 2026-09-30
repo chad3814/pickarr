@@ -23,11 +23,13 @@ import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
 import type { ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
 import { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';
+import { VIDEO_RESOLUTION_BACKFILL_JOB, createVideoResolutionBackfillJob } from './backfill.ts';
 import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
 import { lookupTable, lookupTableMigration } from './table.ts';
 import { lookupJsonFor } from './lookupJson.ts';
+import { videoResolutionOf } from './quality.ts';
 import { isPlaced, recordPlacement } from './placement.ts';
 import { select } from './select.ts';
 import type { Expectation } from './select.ts';
@@ -166,7 +168,7 @@ async function attachPeople(
  * An answer whose `kind` cannot belong to this plugin's category used to be
  * refused inside `spec.apply` -- by which point the media item existed, held
  * the provider-ref claim, and had the rss item relinked to it, with the
- * resolution left `pending` forever and nothing on any path to undo any of
+ * lookup state left `pending` forever and nothing on any path to undo any of
  * it. The pre-flight is deliberately cheap and synchronous: it reads the
  * answer and nothing else, so there is no failure of its own for it to add.
  */
@@ -215,7 +217,7 @@ async function applyResolved(
   // to clear: `relinkRssItem` above already cleared `lookup_json` in the
   // same statement that set `media_item_id`, because a stored answer is
   // only reachable while a release is unmatched. Passing `null` anyway is
-  // not ceremony -- `setResolution`'s fourth argument is required exactly
+  // not ceremony -- `setLookupState`'s fourth argument is required exactly
   // so no branch can forget what it means to do, and a resolved release
   // carrying an answer would be a contradiction whichever statement wrote
   // it.
@@ -225,7 +227,7 @@ async function applyResolved(
   // the row linked with its answer retained, and the job retries and then
   // dead-letters, so a persistently failing `apply` stranded it for good
   // on a row `/unmatched` no longer shows.
-  await ctx.media.setResolution(target.rssItemId, 'resolved', null, null);
+  await ctx.media.setLookupState(target.rssItemId, 'resolved', null, null);
 
   // Artwork, in a job of its own and enqueued last.
   //
@@ -311,8 +313,10 @@ export async function applyEnvelope(
     if (polls > MAX_POLLS) {
       // The service never finished, so the last envelope it sent is the only
       // record of how far it got -- `lookupJsonFor` is what a reader of
-      // `/unmatched` sees instead of a bare "gave up" sentence.
-      await ctx.media.setResolution(
+      // `/unmatched` sees instead of a bare "gave up" sentence, and its parse
+      // is the best video resolution there is (issue #98).
+      await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
+      await ctx.media.setLookupState(
         target.rssItemId,
         'unresolved',
         `the lookup service never finished lookup ${envelope.lookupId} for "${target.filename}"`,
@@ -325,9 +329,19 @@ export async function applyEnvelope(
       payload: { lookupId: envelope.lookupId, rssItemId: target.rssItemId, polls },
       runAt: deps.now + POLL_DELAY_MS,
     });
-    // The resolution stays `pending`: nothing is known about this item yet.
+    // The lookup state stays `pending`: nothing is known about this item yet.
     return;
   }
+
+  // The video resolution the answer parsed (issue #98), recorded once here
+  // so every terminal outcome below -- refused (always `null`), unresolved
+  // and resolved -- writes it and none can forget to; the expiry above
+  // writes its own. Not before the block above: any write to `rss_item`
+  // moves its `updated_at`, which `/unmatched`'s Retry button reads as "the
+  // retry landed", so recording a partial answer would re-enable the button
+  // while polling continues and rewrite the row on every poll. A later
+  // answer for the same release overwrites it; the latest parse is kept.
+  await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
 
   // 2. A non-media file, successfully identified. Terminal: folding this into
   //    `unresolved` would retry a subtitle forever and show it to a reader as
@@ -336,14 +350,14 @@ export async function applyEnvelope(
     // The refusal sentence says *that* the name was rejected; the envelope
     // behind `lookupJsonFor` is what the service actually saw, which is what
     // `/unmatched` shows for the second question a reader asks.
-    await ctx.media.setResolution(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
+    await ctx.media.setLookupState(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
     return;
   }
 
   // 3. Not an error either: the name was not recognised, which is the state a
   //    human might fix. Nothing is enqueued -- a retry happens on request.
   if (envelope.state === 'unresolved') {
-    await ctx.media.setResolution(
+    await ctx.media.setLookupState(
       target.rssItemId,
       'unresolved',
       describeUnresolved(target.filename, envelope.suggestions),
@@ -375,7 +389,7 @@ export interface LookupPluginSpec {
    * state table, prepended by `createLookupPlugin`.
    */
   readonly migrations: readonly Migration[];
-  /** Job handlers beyond the engine's `lookup` and `poll`. */
+  /** Job handlers beyond the engine's `lookup`, `poll`, artwork and the video-resolution backfill. */
   readonly jobs?: Readonly<Record<string, JobHandler>>;
   /**
    * The pre-flight: throws for an answer this plugin cannot represent.
@@ -384,7 +398,7 @@ export interface LookupPluginSpec {
    * `media_item` row is created and its provider reference claimed, because
    * that is the only point at which refusing costs nothing. A plugin that
    * only refused inside `apply` would leave a media item holding the claim,
-   * an rss item relinked to it, and a resolution stuck `pending` while its
+   * an rss item relinked to it, and a lookup state stuck `pending` while its
    * job dead-lettered -- the write order (§3.4) and the per-plugin guards
    * (§4.3-4.5) were specified separately and neither saw the other.
    *
@@ -726,6 +740,13 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   // once rather than once per release. See `createArtworkJob`.
   const artwork = createArtworkJob({ resolveSecret: deps.resolveSecret });
 
+  const backfill = createVideoResolutionBackfillJob({
+    pluginId: spec.id,
+    category: spec.category,
+    now: deps.now,
+    batch: (ctx, signal, names) => logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).batch(spec.category, names)),
+  });
+
   const poll: JobHandler = async (job, ctx, signal) => {
     const { raw, db } = ownTables(ctx);
     // The rss item comes from the payload, never from `job.id`: both are
@@ -747,7 +768,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     id: spec.id,
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
-    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork },
+    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork, [VIDEO_RESOLUTION_BACKFILL_JOB]: backfill },
     // Defaults to empty: `LookupPluginSpec.synced` is optional, so a spec
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.

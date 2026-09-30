@@ -1633,9 +1633,10 @@ test('shippedPlugins builds one plugin per media type, each with its own prefix'
   assert.deepEqual(plugins.map((plugin) => plugin.id), ['tv', 'movie', 'xxx']);
   assert.deepEqual(plugins.map((plugin) => plugin.mediaType), ['tv', 'movie', 'xxx']);
   // Migration 1 is the engine's state table; each plugin adds its own at 2,
-  // then the placement table every plugin generates at 3.
+  // then the placement table every plugin generates at 3, then the
+  // video-resolution backfill (issue #98) every plugin lists at 4.
   for (const plugin of plugins) {
-    assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2, 3]);
+    assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2, 3, 4]);
   }
 });
 

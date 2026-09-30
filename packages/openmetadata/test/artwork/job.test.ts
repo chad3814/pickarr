@@ -88,7 +88,7 @@ function bytesFetch(table: Readonly<Record<string, Uint8Array | Error>>): {
 /**
  * The eight `MediaWriter` methods the artwork job must never reach. Throwing
  * rather than recording is deliberate: a double that quietly tolerated a
- * `createMediaItem` or a `setResolution` could not tell anyone the job made
+ * `createMediaItem` or a `setLookupState` could not tell anyone the job made
  * one.
  */
 function unused(method: string): () => never {
@@ -135,7 +135,8 @@ function attachWriter(): AttachWriter {
     dropMediaItem: unused('dropMediaItem'),
     upsertPerson: unused('upsertPerson'),
     attachRole: unused('attachRole'),
-    setResolution: unused('setResolution'),
+    setLookupState: unused('setLookupState'),
+    setVideoResolution: unused('setVideoResolution'),
     async attachPoster(mediaItemId, poster): Promise<void> { record('poster', mediaItemId, poster); },
     async attachBackground(mediaItemId, background): Promise<void> { record('background', mediaItemId, background); },
     async attachLogo(mediaItemId, logo): Promise<void> { record('logo', mediaItemId, logo); },
@@ -674,7 +675,8 @@ function storingWriter(): { writer: MediaWriter; rows(table: string): number; fi
     dropMediaItem: unused('dropMediaItem'),
     upsertPerson: unused('upsertPerson'),
     attachRole: unused('attachRole'),
-    setResolution: unused('setResolution'),
+    setLookupState: unused('setLookupState'),
+    setVideoResolution: unused('setVideoResolution'),
     async attachPoster(id, init): Promise<void> { write('poster', 'media_item_id', id, init, `${id}:${init.url}`); },
     async attachBackground(id, init): Promise<void> { write('background', 'media_item_id', id, init, `${id}:${init.url}`); },
     async attachLogo(id, init): Promise<void> { write('logo', 'media_item_id', id, init, `${id}:${init.url}`); },

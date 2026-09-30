@@ -4,12 +4,10 @@
  *
  * `series`, `season` and `episode` are this plugin's own -- they come from
  * `tv_series`, `tv_season` and `tv_release`, which no other plugin has.
- * `title`, `releaseDate`, `filename` and `ext` are resolved by functions
- * shared with every plugin, because they come from `media_item` and the
- * source path rather than from any plugin's tables. There is no
- * `resolution`, which design spec §3 lists and issue #98 removes: the
- * column of that name is the lookup state, not a video resolution, and 2.0
- * records no video resolution anywhere.
+ * `title`, `releaseDate`, `resolution`, `filename` and `ext` are resolved by
+ * functions shared with every plugin: the first two and the last two come
+ * from `media_item` and the source path, and `resolution` from
+ * `rss_item.video_resolution`, the lookup service's own parse (issue #98).
  *
  * **Every key is written out here**, shared resolvers included, rather than
  * spread in from a constant: `MediaPlugin.tokens` promises that one object
@@ -26,6 +24,7 @@ import {
   resolveExtension,
   resolveFilename,
   resolveReleaseDate,
+  resolveResolution,
   resolveTitle,
 } from '@pickarr/openmetadata';
 
@@ -104,6 +103,7 @@ export const TV_TOKENS: TokensFor<TvTokenName> = {
   episode: resolveEpisode,
   title: resolveTitle,
   releaseDate: resolveReleaseDate,
+  resolution: resolveResolution,
   filename: resolveFilename,
   ext: resolveExtension,
 };

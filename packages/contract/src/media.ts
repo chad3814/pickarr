@@ -6,8 +6,11 @@
  * or sidecar — and is terminal: retrying it forever, or showing it to a reader
  * as a problem, are both wrong. `unresolved` means the name was not
  * recognised, which is the state a human might fix.
+ *
+ * Called `Resolution`, and stored in a column named `resolution`, until issue
+ * #98: it is a lookup's outcome, never a video resolution.
  */
-export type Resolution = 'pending' | 'resolved' | 'refused' | 'unresolved';
+export type LookupState = 'pending' | 'resolved' | 'refused' | 'unresolved';
 
 export interface MediaItemInit {
   /** Which plugin owns this item. */
@@ -89,7 +92,7 @@ export interface ProviderClaim {
  * methods are handed none, and `createMediaItem` stores the `pluginId` in
  * `MediaItemInit` without checking it against the plugin doing the writing.
  * So every method acts on the bare row id it is given, whoever wrote that
- * row: `setResolution` on another plugin's rss item, `updateMediaItem` and
+ * row: `setLookupState` on another plugin's rss item, `updateMediaItem` and
  * `dropMediaItem` on another plugin's media item, all succeed. Verified by
  * execution against the real writer, not inferred.
  * `MediaReader` next door scopes every one of its four methods, and the
@@ -197,12 +200,26 @@ export interface MediaWriter {
    * it, which is the one mistake that makes this column grow without
    * bound (`RssItemSyncRead.lookupJson`).
    */
-  setResolution(
+  setLookupState(
     rssItemId: number,
-    resolution: Resolution,
+    state: LookupState,
     detail: string | null,
     lookupJson: string | null,
   ): Promise<void>;
+  /**
+   * Records a release's video resolution, or clears it with `null`.
+   *
+   * Throws for any value `normalizeVideoResolution` would not return
+   * unchanged. This writer is shared by every plugin (see this interface's
+   * docblock), so it is the one place a caller that skipped the
+   * normalization is caught before the value can reach a library path.
+   *
+   * **A no-op when the stored value already equals `value`** (`null`
+   * included): the row and its `updated_at` are left as they were, so
+   * re-reading an unchanged parse neither signals a change to a reader of
+   * `updatedAt` nor adds a row to the sync log.
+   */
+  setVideoResolution(rssItemId: number, value: string | null): Promise<void>;
 }
 
 /**
@@ -238,8 +255,10 @@ export interface RssItemRead {
   filename: string;
   link: string;
   mediaItemId: number | null;
-  resolution: string;
-  resolutionDetail: string | null;
+  lookupState: string;
+  lookupStateDetail: string | null;
+  /** See `RssItemSyncRead.videoResolution`. */
+  videoResolution: string | null;
   downloadType: Transport;
   deliveredAt: number | null;
 }

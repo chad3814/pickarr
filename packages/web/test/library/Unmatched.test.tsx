@@ -49,8 +49,8 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
  * no-op over a row already held"), silently refusing to apply the very
  * update the second test below drives.
  *
- * `resolution` defaults to `unresolved` -- `@pickarr/contract`'s
- * `Resolution` vocabulary, meaning "the name was not recognised", which is
+ * `lookupState` defaults to `unresolved` -- `@pickarr/contract`'s
+ * `LookupState` vocabulary, meaning "the name was not recognised", which is
  * the commonest reason a release is on this screen at all. An earlier
  * version of this helper defaulted it to `'1080p'`, a *video* resolution,
  * which is a different column on a different table; nothing rendered the
@@ -62,8 +62,8 @@ function rssOp({
   mediaItemId,
   updatedAt,
   feedId = 1,
-  resolution = 'unresolved',
-  resolutionDetail = null,
+  lookupState = 'unresolved',
+  lookupStateDetail = null,
   lookupJson = null,
 }: {
   id: number;
@@ -71,8 +71,8 @@ function rssOp({
   mediaItemId: number | null;
   updatedAt: number;
   feedId?: number;
-  resolution?: string;
-  resolutionDetail?: string | null;
+  lookupState?: string;
+  lookupStateDetail?: string | null;
   lookupJson?: string | null;
 }): SyncOp {
   const value: RssItemSyncRead = {
@@ -84,8 +84,9 @@ function rssOp({
     downloadType: 'torrent',
     mediaItemId,
     rankingScore: null,
-    resolution,
-    resolutionDetail,
+    lookupState,
+    lookupStateDetail,
+    videoResolution: null,
     lookupJson,
     deliveredAt: null,
   };
@@ -261,14 +262,14 @@ test('a feed named with the empty string renders no trailing label', async () =>
 });
 
 test('an empty detail sentence renders no label standing over nothing', async () => {
-  // `resolutionDetail` is `string | null` on the wire and the host writes
+  // `lookupStateDetail` is `string | null` on the wire and the host writes
   // `envelope.refusal` straight into it on the refused branch, gated on
   // `!== null` -- so a service answering with an empty refusal string
   // stores `''`. That is the state `textOf`'s empty-string exclusion is
   // for, and it is the one of its three guards that no other test reaches.
   const db = await freshDb();
   await seed(db, [
-    rssOp({ id: 1, filename: 'blank-detail.mkv', mediaItemId: null, updatedAt: 10, resolutionDetail: '' }),
+    rssOp({ id: 1, filename: 'blank-detail.mkv', mediaItemId: null, updatedAt: 10, lookupStateDetail: '' }),
   ]);
 
   render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
@@ -293,7 +294,7 @@ test('collapsed, a card shows no detail and no JSON', async () => {
       filename: 'closed.mkv',
       mediaItemId: null,
       updatedAt: 10,
-      resolutionDetail: 'no title matched',
+      lookupStateDetail: 'no title matched',
       lookupJson: '{"query":"closed"}',
     }),
   ]);
@@ -308,7 +309,7 @@ test('collapsed, a card shows no detail and no JSON', async () => {
 });
 
 test('expanded, a card says why the release is unmatched', async () => {
-  // `resolution` and `resolutionDetail`, which the host has always sent
+  // `lookupState` and `lookupStateDetail`, which the host has always sent
   // and nothing has ever rendered.
   const db = await freshDb();
   await seed(db, [
@@ -317,8 +318,8 @@ test('expanded, a card says why the release is unmatched', async () => {
       filename: 'why.mkv',
       mediaItemId: null,
       updatedAt: 10,
-      resolution: 'refused',
-      resolutionDetail: 'identified as a subtitle, not a film',
+      lookupState: 'refused',
+      lookupStateDetail: 'identified as a subtitle, not a film',
     }),
   ]);
 
@@ -357,7 +358,7 @@ test('a release with no stored answer expands without an empty block', async () 
   // `<pre>` is a bordered box containing nothing, which reads as a bug.
   const db = await freshDb();
   await seed(db, [
-    rssOp({ id: 1, filename: 'unasked.mkv', mediaItemId: null, updatedAt: 10, resolution: 'pending' }),
+    rssOp({ id: 1, filename: 'unasked.mkv', mediaItemId: null, updatedAt: 10, lookupState: 'pending' }),
   ]);
 
   render(<Unmatched retry={neverRetries} source={sourceFor(db)} />);
@@ -375,7 +376,7 @@ test('a release with no stored answer expands without an empty block', async () 
 /**
  * One `rss_item` `upsert` op in the shape the replica held **before**
  * `lookupJson` was on the wire: no `lookupJson` key at all, and no
- * `resolution` either.
+ * `lookupState` either.
  *
  * **Hand-built, and deliberately not typed `RssItemSyncRead`.** That is
  * the whole point of it existing. `CLAUDE.md`: "a test whose fixtures all
@@ -393,9 +394,9 @@ test('a release with no stored answer expands without an empty block', async () 
  * -- the wire shape is exactly what a replica holds, and a replica
  * outlives the build that wrote it.
  *
- * `resolution` is the second omission rather than the only one because
+ * `lookupState` is the second omission rather than the only one because
  * the two are tolerated by different code: `textOf` for `lookupJson`,
- * and `?? 'not recorded'` at the render site for `resolution`.
+ * and `?? 'not recorded'` at the render site for `lookupState`.
  */
 function legacyRssOp({ id, filename, updatedAt }: { id: number; filename: string; updatedAt: number }): SyncOp {
   return {
@@ -411,7 +412,7 @@ function legacyRssOp({ id, filename, updatedAt }: { id: number; filename: string
       downloadType: 'torrent',
       mediaItemId: null,
       rankingScore: null,
-      resolutionDetail: null,
+      lookupStateDetail: null,
       deliveredAt: null,
     },
   };
@@ -936,8 +937,8 @@ test('an accepted retry stays pending until the row actually changes', async () 
   );
 
   // The same release, written again by the lookup path -- a *later*
-  // `updatedAt` and, deliberately, the very same resolution. Watching
-  // `resolution` instead would miss this, and a retry that lands on the
+  // `updatedAt` and, deliberately, the very same lookup state. Watching
+  // `lookupState` instead would miss this, and a retry that lands on the
   // same answer is the commonest outcome of all.
   await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 20 })]);
 

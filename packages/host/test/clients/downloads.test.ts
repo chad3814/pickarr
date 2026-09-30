@@ -151,7 +151,7 @@ function seedRssItem(raw: DatabaseSync, feedId: number, overrides: {
 } = {}): number {
   const row = { link: 'https://example.test/file', filename: 'Some File', downloadType: 'torrent', ...overrides };
   const result = raw.prepare(`
-    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution)
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
     VALUES (?, ?, ?, 1, 1, ?, 'pending')
   `).run(feedId, row.filename, row.link, row.downloadType);
   return Number(result.lastInsertRowid);

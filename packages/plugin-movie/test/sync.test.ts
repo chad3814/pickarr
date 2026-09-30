@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MovieRead } from '@pickarr/contract';
 import type { Media } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { MOVIE_SYNCED } from '../src/sync.ts';
 import { MOVIE_PLUGIN_ID } from '../src/index.ts';
@@ -13,6 +14,7 @@ const MARKER = 'MOVIE-DETAILS-MARKER-9d4e7b';
 
 function harnessWithTables() {
   const harness = createTestHarness();
+  lookupTableMigration('movie').up(harness.raw);
   for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
   // A placeholder row with a high id, so every row a test then writes has an
   // `id` that differs from its `media_item_id`. Without it both are 1 for the
@@ -114,6 +116,7 @@ test('a detail read carries its media item and its own columns', async () => {
  */
 function seededDbWithMovie(overrides: { imdbId?: string | null } = {}) {
   const harness = createTestHarness();
+  lookupTableMigration('movie').up(harness.raw);
   for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
   harness.raw.prepare(
     'INSERT INTO movie_detail (id, media_item_id, runtime_minutes, imdb_id, tagline, created_at, updated_at) VALUES (1, 1, NULL, ?, NULL, 0, 0)',

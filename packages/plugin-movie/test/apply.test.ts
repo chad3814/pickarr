@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Media } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyMovie, checkMovie } from '../src/apply.ts';
 import { MOVIE_MIGRATIONS } from '../src/migrations.ts';
@@ -8,8 +9,13 @@ import { createMoviePlugin } from '../src/index.ts';
 
 const NOW = 1_700_000_000_000;
 
+/** `MOVIE_MIGRATIONS` starts at version 2; version 1, the engine's own
+ * `movie_lookup` state table, is prepended here the way `createLookupPlugin`
+ * does it for real -- `videoResolutionBackfillMigration` (version 4) reads
+ * that table. */
 function harnessWithTables() {
   const harness = createTestHarness();
+  lookupTableMigration('movie').up(harness.raw);
   for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
   return harness;
 }
@@ -134,8 +140,9 @@ test('the pre-flight refuses what a film cannot be, before the engine writes any
 
 test('migration 3 creates the placement table the engine records imports in', () => {
   const harness = createTestHarness();
+  lookupTableMigration('movie').up(harness.raw);
   for (const migration of MOVIE_MIGRATIONS) migration.up(harness.raw);
-  assert.deepEqual(MOVIE_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  assert.deepEqual(MOVIE_MIGRATIONS.map((migration) => migration.version), [2, 3, 4]);
   const row = harness.raw
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'movie_placement'")
     .get();

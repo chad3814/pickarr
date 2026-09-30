@@ -11,7 +11,7 @@ import type { JobHandler, MediaPlugin, PluginContext } from '../src/index.ts';
 const lookup: JobHandler = async (job, ctx) => {
   // The rss item id comes from the payload, not from `job.id`. Both are
   // numbers, so passing the job's own id would compile and be wrong — it would
-  // set the resolution of whatever rss item happens to share that rowid. A
+  // set the lookup state of whatever rss item happens to share that rowid. A
   // handler's payload is the only thing that knows which item it is about.
   const { rssItemId } = job.payload as { rssItemId: number };
 
@@ -40,7 +40,7 @@ const lookup: JobHandler = async (job, ctx) => {
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });
   // No envelope to store for a resolved answer -- and `null` clears any
   // an earlier failed attempt at this item left behind.
-  await ctx.media.setResolution(rssItemId, 'resolved', null, null);
+  await ctx.media.setLookupState(rssItemId, 'resolved', null, null);
 };
 
 const fixture: MediaPlugin = {
