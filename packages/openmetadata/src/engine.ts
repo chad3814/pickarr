@@ -23,6 +23,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
 import type { ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
 import { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';
+import { VIDEO_RESOLUTION_BACKFILL_JOB, createVideoResolutionBackfillJob } from './backfill.ts';
 import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
@@ -383,7 +384,7 @@ export interface LookupPluginSpec {
    * state table, prepended by `createLookupPlugin`.
    */
   readonly migrations: readonly Migration[];
-  /** Job handlers beyond the engine's `lookup` and `poll`. */
+  /** Job handlers beyond the engine's `lookup`, `poll`, artwork and the video-resolution backfill. */
   readonly jobs?: Readonly<Record<string, JobHandler>>;
   /**
    * The pre-flight: throws for an answer this plugin cannot represent.
@@ -734,6 +735,12 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   // once rather than once per release. See `createArtworkJob`.
   const artwork = createArtworkJob({ resolveSecret: deps.resolveSecret });
 
+  const backfill = createVideoResolutionBackfillJob({
+    pluginId: spec.id,
+    category: spec.category,
+    batch: (ctx, signal, names) => logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).batch(spec.category, names)),
+  });
+
   const poll: JobHandler = async (job, ctx, signal) => {
     const { raw, db } = ownTables(ctx);
     // The rss item comes from the payload, never from `job.id`: both are
@@ -755,7 +762,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     id: spec.id,
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
-    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork },
+    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork, [VIDEO_RESOLUTION_BACKFILL_JOB]: backfill },
     // Defaults to empty: `LookupPluginSpec.synced` is optional, so a spec
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Media } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyXxx, checkXxx } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
@@ -9,8 +10,13 @@ import { createXxxPlugin } from '../src/index.ts';
 
 const NOW = 1_700_000_000_000;
 
+/** `XXX_MIGRATIONS` starts at version 2; version 1, the engine's own
+ * `xxx_lookup` state table, is prepended here the way `createLookupPlugin`
+ * does it for real -- `videoResolutionBackfillMigration` (version 4) reads
+ * that table. */
 function harnessWithTables() {
   const harness = createTestHarness();
+  lookupTableMigration('xxx').up(harness.raw);
   for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
   return harness;
 }
@@ -167,8 +173,9 @@ test('the pre-flight refuses what a scene cannot be, before the engine writes an
 
 test('migration 3 creates the placement table the engine records imports in', () => {
   const harness = createTestHarness();
+  lookupTableMigration('xxx').up(harness.raw);
   for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
-  assert.deepEqual(XXX_MIGRATIONS.map((migration) => migration.version), [2, 3]);
+  assert.deepEqual(XXX_MIGRATIONS.map((migration) => migration.version), [2, 3, 4]);
   const found = harness.raw
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'xxx_placement'")
     .get();

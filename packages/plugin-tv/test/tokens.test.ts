@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DownloadedFile, PluginContext } from '@pickarr/contract';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyTv } from '../src/apply.ts';
 import { TV_MIGRATIONS } from '../src/migrations.ts';
@@ -66,6 +67,7 @@ async function resolveAll(ctx: PluginContext, file = downloaded()): Promise<Reco
 /** A harness with this plugin's tables, one media item, and `media` applied to it. */
 async function seeded(media: Media): Promise<PluginContext> {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
   const id = await harness.ctx.media.createMediaItem({
     pluginId: 'tv', title: media.title, releaseDate: media.releaseDate, description: null,

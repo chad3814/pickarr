@@ -412,13 +412,24 @@ export interface TestHarness {
  * never looks. They stay because that is exactly what `engine-jobs.test.ts`
  * drops in order to prove it, and a plugin cannot be shown not to read a
  * table that was never created.
+ *
+ * `rss_item.lookup_state` and `.video_resolution` are here for
+ * `videoResolutionBackfillMigration`'s own read and `setVideoResolution`'s
+ * write. `jobs` is the host's table, for that same migration, which writes
+ * it directly with raw SQL because a plugin migration cannot reach
+ * `JobQueue`. The real `jobs` table is pinned against that insert by
+ * `host/test/plugins/backfill.test.ts`, not by this stub.
  */
 export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = OFF');
   raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER)');
-  raw.exec('CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL)');
+  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT)");
   raw.exec('CREATE TABLE media_item (id INTEGER PRIMARY KEY)');
+  raw.exec(`CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL, run_at INTEGER NOT NULL,
+    state TEXT NOT NULL, last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
 
   const media = createRecordingMedia();
   const enqueued: (JobEnqueue & { id: number })[] = [];

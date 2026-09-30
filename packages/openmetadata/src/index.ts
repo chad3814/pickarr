@@ -41,6 +41,12 @@ export {
   createLookupPlugin,
   describeUnresolved,
 } from './engine.ts';
+export {
+  VIDEO_RESOLUTION_BACKFILL_JOB,
+  createVideoResolutionBackfillJob,
+  videoResolutionBackfillMigration,
+} from './backfill.ts';
+export type { VideoResolutionBackfillDeps } from './backfill.ts';
 export type { Expectation, Selection, SelectionRefusal, SelectionRefusalCode } from './select.ts';
 export { episodeMarker, isCandidate, select } from './select.ts';
 export type {

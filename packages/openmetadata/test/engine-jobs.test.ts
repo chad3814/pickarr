@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARTWORK_JOB } from '../src/artwork/job.ts';
+import { VIDEO_RESOLUTION_BACKFILL_JOB } from '../src/backfill.ts';
 import { LOOKUP_JOB, POLL_JOB, createLookupPlugin } from '../src/engine.ts';
 import {
   createFakeLookupService,
@@ -103,7 +104,7 @@ test('carries the engine state table as migration 1, before the spec migrations'
   assert.deepEqual(plugin.migrations.map((migration) => migration.version), [1, 2]);
   assert.equal(plugin.id, 'xxx');
   assert.equal(plugin.mediaType, 'xxx');
-  assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [ARTWORK_JOB, LOOKUP_JOB, POLL_JOB]);
+  assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [ARTWORK_JOB, LOOKUP_JOB, POLL_JOB, VIDEO_RESOLUTION_BACKFILL_JOB]);
 });
 
 test("carries the spec's tokens through to the plugin, unchanged and unmerged", () => {
@@ -142,7 +143,7 @@ test('keeps a spec job handler alongside its own two', () => {
     expects: async () => ({ kind: 'single' }),
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
 
-  assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [ARTWORK_JOB, LOOKUP_JOB, POLL_JOB, 'sweep']);
+  assert.deepEqual(Object.keys(plugin.jobs).toSorted(), [ARTWORK_JOB, LOOKUP_JOB, POLL_JOB, 'sweep', VIDEO_RESOLUTION_BACKFILL_JOB]);
 });
 
 test('records a row per new rss item and one lookup job for the batch', async () => {

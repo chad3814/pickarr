@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { TvRead } from '@pickarr/contract';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { TV_SYNCED } from '../src/sync.ts';
 import { TV_PLUGIN_ID } from '../src/index.ts';
@@ -13,6 +14,7 @@ const MARKER = 'TV-DETAILS-MARKER-6f2c1a';
 
 function harnessWithTables() {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
   // Placeholder rows with high, distinct ids, so every row a test then
   // writes has an `id` that differs from its `media_item_id` and from the

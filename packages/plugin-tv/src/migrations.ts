@@ -2,7 +2,9 @@
  * Version 2, three tables: a series, its seasons, and one row per
  * downloadable thing. Version 3 is the placement table `placementTableMigration`
  * generates, recording which entries of a download this plugin has already
- * put in its library.
+ * put in its library. Version 4 is `videoResolutionBackfillMigration`
+ * (issue #98), marking every release this plugin already resolved and
+ * queuing one job to backfill the resolution it was identified without.
  *
  * Version 2, not 1: version 1 is the engine's own state table, prepended by
  * `createLookupPlugin`. Every name starts with `tv_` because `migratePlugin`
@@ -11,7 +13,7 @@
  * from `index.ts`, which imports this file.
  */
 import type { Migration } from '@pickarr/contract';
-import { placementTableMigration } from '@pickarr/openmetadata';
+import { placementTableMigration, videoResolutionBackfillMigration } from '@pickarr/openmetadata';
 
 export const TV_MIGRATIONS: readonly Migration[] = [{
   version: 2,
@@ -53,4 +55,4 @@ CREATE TABLE tv_release (
 );
 CREATE UNIQUE INDEX tv_release_media_item ON tv_release (media_item_id);
 `),
-}, placementTableMigration('tv', 3)];
+}, placementTableMigration('tv', 3), videoResolutionBackfillMigration('tv', 4)];

@@ -2,6 +2,9 @@
  * Version 2, two tables: the producing site, and the scene itself. Version 3
  * is the placement table `placementTableMigration` generates, recording
  * which entries of a download this plugin has already put in its library.
+ * Version 4 is `videoResolutionBackfillMigration` (issue #98), marking every
+ * release this plugin already resolved and queuing one job to backfill the
+ * resolution it was identified without.
  *
  * The site is its own table because scenes from one site share it -- a scene's
  * `details` names the site every time, and a row per scene would store the
@@ -13,7 +16,7 @@
  * imports this file.
  */
 import type { Migration } from '@pickarr/contract';
-import { placementTableMigration } from '@pickarr/openmetadata';
+import { placementTableMigration, videoResolutionBackfillMigration } from '@pickarr/openmetadata';
 
 export const XXX_MIGRATIONS: readonly Migration[] = [{
   version: 2,
@@ -40,4 +43,4 @@ CREATE TABLE xxx_scene (
 );
 CREATE UNIQUE INDEX xxx_scene_media_item ON xxx_scene (media_item_id);
 `),
-}, placementTableMigration('xxx', 3)];
+}, placementTableMigration('xxx', 3), videoResolutionBackfillMigration('xxx', 4)];

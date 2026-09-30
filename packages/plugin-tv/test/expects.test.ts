@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DownloadedFile, PluginContext } from '@pickarr/contract';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyTv } from '../src/apply.ts';
 import { expectsTv } from '../src/expects.ts';
@@ -31,6 +32,7 @@ function media(kind: 'episode' | 'season' | 'series', details: Record<string, nu
 /** A harness with this plugin's tables, one media item, and `media` applied to it. */
 async function seeded(applied: Media): Promise<{ ctx: PluginContext; mediaItemId: number }> {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
   const mediaItemId = await harness.ctx.media.createMediaItem({
     pluginId: 'tv', title: applied.title, releaseDate: applied.releaseDate, description: null,
@@ -65,6 +67,7 @@ test('a series pack expects episodes of any season', async () => {
 
 test('a media item with no tv_release row throws, so the row is retried rather than guessed at', async () => {
   const harness = createTestHarness();
+  lookupTableMigration('tv').up(harness.raw);
   for (const migration of TV_MIGRATIONS) migration.up(harness.raw);
   await assert.rejects(() => expectsTv(file(999), harness.ctx), /no tv_release/);
 });

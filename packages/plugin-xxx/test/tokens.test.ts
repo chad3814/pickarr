@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DownloadedFile, PluginContext } from '@pickarr/contract';
 import type { Media } from '@pickarr/openmetadata';
+import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
 import { applyXxx } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
@@ -53,6 +54,7 @@ async function resolveAll(ctx: PluginContext): Promise<Record<string, string | n
 
 async function seeded(media: Media): Promise<PluginContext> {
   const harness = createTestHarness();
+  lookupTableMigration('xxx').up(harness.raw);
   for (const migration of XXX_MIGRATIONS) migration.up(harness.raw);
   const id = await harness.ctx.media.createMediaItem({
     pluginId: 'xxx', title: media.title, releaseDate: media.releaseDate, description: null,
