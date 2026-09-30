@@ -1373,11 +1373,26 @@ function migration20(db: DatabaseSync): void {
  * discard its replica and bootstrap again (`web/src/store/sync.ts`), so no
  * client code has to read both names. That costs one full re-bootstrap per
  * client, once.
+ *
+ * **And `video_resolution` is added**, backfilled only for unmatched
+ * releases, because they are the only ones still holding a lookup answer
+ * (`relinkRssItem` clears it on a match). The `WHERE` restates
+ * `@pickarr/contract`'s `normalizeVideoResolution` in SQL -- `lower`, then
+ * three or four digits and `p` or `i`. It is restated rather than called
+ * because this migration is frozen once applied; the migration test runs it
+ * over the contract's own cases.
  */
 function migration24(db: DatabaseSync): void {
   db.exec(`
 ALTER TABLE rss_item RENAME COLUMN resolution TO lookup_state;
 ALTER TABLE rss_item RENAME COLUMN resolution_detail TO lookup_state_detail;
+ALTER TABLE rss_item ADD COLUMN video_resolution TEXT;
+UPDATE rss_item
+   SET video_resolution = lower(json_extract(lookup_json, '$.parsed.quality.resolution'))
+ WHERE json_valid(lookup_json)
+   AND json_type(lookup_json, '$.parsed.quality.resolution') = 'text'
+   AND (lower(json_extract(lookup_json, '$.parsed.quality.resolution')) GLOB '[0-9][0-9][0-9][pi]'
+     OR lower(json_extract(lookup_json, '$.parsed.quality.resolution')) GLOB '[0-9][0-9][0-9][0-9][pi]');
 `);
   forgetSyncGeneration(db);
 }

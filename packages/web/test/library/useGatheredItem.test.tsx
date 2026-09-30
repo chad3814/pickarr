@@ -46,6 +46,7 @@ function rssItem(id: number): RssItemSyncRead {
     rankingScore: null,
     lookupState: 'resolved',
     lookupStateDetail: null,
+    videoResolution: null,
     lookupJson: null,
     deliveredAt: null,
   };

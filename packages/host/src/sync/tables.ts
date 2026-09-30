@@ -378,6 +378,7 @@ function selectSql(table: string, placeholders: string): string | undefined {
                       updated_at AS updatedAt, download_type AS downloadType,
                       media_item_id AS mediaItemId, ranking_score AS rankingScore,
                       lookup_state AS lookupState, lookup_state_detail AS lookupStateDetail,
+                      video_resolution AS videoResolution,
                       delivered_at AS deliveredAt, lookup_json AS lookupJson
                  FROM rss_item WHERE id IN (${placeholders})`;
     case 'torrent_download':

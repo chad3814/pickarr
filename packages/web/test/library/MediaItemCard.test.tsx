@@ -78,6 +78,7 @@ function rssItem({ id, filename, lookupState }: { id: number; filename: string; 
     rankingScore: null,
     lookupState,
     lookupStateDetail: null,
+    videoResolution: null,
     lookupJson: null,
     deliveredAt: null,
   };

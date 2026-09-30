@@ -87,6 +87,11 @@ function readRssItem(raw: DatabaseSync, id: number) {
     | undefined;
 }
 
+function storedVideoResolution(raw: DatabaseSync, id: number): unknown {
+  const row = raw.prepare('SELECT video_resolution FROM rss_item WHERE id = ?').get(id);
+  return row === undefined ? undefined : row['video_resolution'];
+}
+
 /** A row read back from `person`. */
 function readPerson(raw: DatabaseSync, id: number) {
   const row = raw.prepare('SELECT name, provider_ref, updated_at FROM person WHERE id = ?').get(id);
@@ -442,6 +447,33 @@ test('setLookupState clears lookup_json a failed attempt left, when the retry re
   const resolved = readRssItem(raw, itemId);
   assert.equal(resolved?.lookup_state, 'resolved');
   assert.equal(resolved?.lookup_json, null, 'the resolved retry clears the earlier envelope');
+});
+
+test('setVideoResolution stores a normalized value or null, and moves updated_at', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+
+  await writer.setVideoResolution(itemId, '2160p');
+  assert.equal(storedVideoResolution(raw, itemId), '2160p');
+  assert.equal(readRssItem(raw, itemId)?.updated_at, 999, 'a write the sync log sees');
+
+  await writer.setVideoResolution(itemId, null);
+  assert.equal(storedVideoResolution(raw, itemId), null, 'null clears it');
+});
+
+test('setVideoResolution refuses a value the contract would not normalize to itself', async () => {
+  // The writer is shared by every plugin and closes over no plugin id, so it
+  // is the one place a caller that skipped `normalizeVideoResolution` is caught.
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  for (const bad of ['1080P', '4K', '1080p/', '']) {
+    await assert.rejects(writer.setVideoResolution(itemId, bad), /video resolution/, `refused ${bad}`);
+  }
+  assert.equal(storedVideoResolution(raw, itemId), null, 'and nothing was written');
 });
 
 test('upsertPerson returns the same id for a repeated providerRef', async () => {

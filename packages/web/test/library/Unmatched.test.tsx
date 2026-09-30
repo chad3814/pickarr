@@ -86,6 +86,7 @@ function rssOp({
     rankingScore: null,
     lookupState,
     lookupStateDetail,
+    videoResolution: null,
     lookupJson,
     deliveredAt: null,
   };

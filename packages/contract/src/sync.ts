@@ -244,6 +244,13 @@ export interface RssItemSyncRead {
   lookupState: string;
   lookupStateDetail: string | null;
   /**
+   * The lookup service's parse of this release's video resolution --
+   * `normalizeVideoResolution`'s output, so `1080p`, `2160p`, or `null` when
+   * the name stated none or no answer has arrived. Written by the lookup
+   * engine on every answer (issue #98).
+   */
+  videoResolution: string | null;
+  /**
    * The lookup service's own answer for this release, as JSON, or `null`.
    *
    * **Only present while a release is unmatched.** Written wherever the

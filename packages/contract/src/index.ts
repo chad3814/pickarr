@@ -32,6 +32,7 @@ export type {
   RssItemRead,
   Transport,
 } from './media.ts';
+export { normalizeVideoResolution } from './videoResolution.ts';
 export type { AddFeedRefusalCode } from './feeds.ts';
 export { ADD_FEED_REFUSALS } from './feeds.ts';
 export type { AddDownloadClientRefusalCode } from './download-clients.ts';

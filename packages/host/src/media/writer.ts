@@ -8,6 +8,7 @@ import type {
   ProviderClaim,
   RoleInit,
 } from '@pickarr/contract';
+import { normalizeVideoResolution } from '@pickarr/contract';
 import type { ArtworkStore } from '../artwork/store.ts';
 import type { HostDb } from '../db/open.ts';
 
@@ -411,6 +412,14 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       // which is what clears an answer left by an earlier failure.
       raw.prepare('UPDATE rss_item SET lookup_state = ?, lookup_state_detail = ?, lookup_json = ?, updated_at = ? WHERE id = ?')
         .run(state, detail, lookupJson, at, rssItemId);
+    },
+
+    async setVideoResolution(rssItemId: number, value: string | null): Promise<void> {
+      if (value !== null && normalizeVideoResolution(value) !== value) {
+        throw new TypeError('media writer: not a video resolution Pickarr stores');
+      }
+      raw.prepare('UPDATE rss_item SET video_resolution = ?, updated_at = ? WHERE id = ?')
+        .run(value, now(), rssItemId);
     },
   };
 }

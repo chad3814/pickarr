@@ -9,6 +9,7 @@ import { SYNC_QUERIES, deletionsSince } from '../../src/api/reads.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
 import { DOWNLOAD_STATUSES } from '../../src/clients/rows.ts';
+import { VIDEO_RESOLUTION_CASES } from '../../../contract/test/videoResolutionCases.ts';
 
 /** The tables a database currently holds, narrowed the way this file narrows every row. */
 function tableNames(raw: DatabaseSync): Set<string> {
@@ -1893,5 +1894,33 @@ test('migration 24 forgets the sync generation, so every client re-bootstraps in
   // credential column regardless of which key is asked for, and
   // `assert.equal` formats both operands into its failure message.
   assert.ok(readHostState(raw, SYNC_GENERATION_KEY) === null, 'the next ensureSyncGeneration mints a new one');
+  raw.close();
+});
+
+test("migration 24 backfills an unmatched release's video resolution from its stored answer, by the contract's rule", () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 23));
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1)");
+  const insert = raw.prepare(`
+    INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, resolution, lookup_json)
+    VALUES (1, ?, ?, 1, 1, 'torrent', 'unresolved', ?)
+  `);
+  const expected = new Map<number, string | null>();
+  for (const [index, [input, want]] of VIDEO_RESOLUTION_CASES.entries()) {
+    const quality = input === undefined ? {} : { resolution: input };
+    const id = Number(insert.run(`case-${index}.mkv`, `http://${index}`, JSON.stringify({ parsed: { quality } })).lastInsertRowid);
+    expected.set(id, want);
+  }
+  const noAnswer = Number(insert.run('no-answer.mkv', 'http://n', null).lastInsertRowid);
+  const tooLarge = Number(insert.run('too-large.mkv', 'http://t', '{"pickarr":"lookup-answer-too-large"}').lastInsertRowid);
+  const malformed = Number(insert.run('malformed.mkv', 'http://m', 'not json').lastInsertRowid);
+  migrateHost(raw);
+
+  const read = raw.prepare('SELECT video_resolution FROM rss_item WHERE id = ?');
+  const valueOf = (id: number): unknown => (read.get(id) as { video_resolution: unknown }).video_resolution;
+  for (const [id, want] of expected) assert.equal(valueOf(id), want, `row ${id}`);
+  assert.equal(valueOf(noAnswer), null, 'nothing stored, nothing backfilled');
+  assert.equal(valueOf(tooLarge), null, 'the too-large marker has no parse');
+  assert.equal(valueOf(malformed), null, 'malformed JSON is not an error, and is not a value');
   raw.close();
 });

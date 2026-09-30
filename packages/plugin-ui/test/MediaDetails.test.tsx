@@ -204,7 +204,7 @@ test('one icon per distinct transport, not one per release', () => {
     row: {
       id, feedId: 1, filename: `f${String(id)}.mkv`, createdAt: 0, updatedAt: 0,
       downloadType, mediaItemId: 1, rankingScore: null, lookupState: 'resolved',
-      lookupStateDetail: null, lookupJson: null, deliveredAt: null,
+      lookupStateDetail: null, videoResolution: null, lookupJson: null, deliveredAt: null,
     },
     downloads: [],
   });

@@ -36,6 +36,7 @@ function rssItem({
     rankingScore,
     lookupState,
     lookupStateDetail: null,
+    videoResolution: null,
     lookupJson: null,
     deliveredAt: null,
   };

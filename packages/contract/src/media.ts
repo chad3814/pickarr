@@ -206,6 +206,15 @@ export interface MediaWriter {
     detail: string | null,
     lookupJson: string | null,
   ): Promise<void>;
+  /**
+   * Records a release's video resolution, or clears it with `null`.
+   *
+   * Throws for any value `normalizeVideoResolution` would not return
+   * unchanged. This writer is shared by every plugin (see this interface's
+   * docblock), so it is the one place a caller that skipped the
+   * normalization is caught before the value can reach a library path.
+   */
+  setVideoResolution(rssItemId: number, value: string | null): Promise<void>;
 }
 
 /**
@@ -243,6 +252,8 @@ export interface RssItemRead {
   mediaItemId: number | null;
   lookupState: string;
   lookupStateDetail: string | null;
+  /** See `RssItemSyncRead.videoResolution`. */
+  videoResolution: string | null;
   downloadType: Transport;
   deliveredAt: number | null;
 }

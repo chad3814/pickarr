@@ -1107,6 +1107,7 @@ test('rss items, downloads and deletions each page their own stream', async () =
         mediaItemId: null,
         lookupState: 'resolved',
         lookupStateDetail: 'x264',
+        videoResolution: null,
         downloadType: 'torrent',
         deliveredAt: null,
       }],

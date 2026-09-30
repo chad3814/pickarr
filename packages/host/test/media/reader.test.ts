@@ -133,6 +133,7 @@ test('a reader reaches an item\'s rss items and their downloads', async () => {
     mediaItemId,
     lookupState: 'resolved',
     lookupStateDetail: 'x264',
+    videoResolution: null,
     downloadType: 'torrent',
     deliveredAt: null,
   }]);

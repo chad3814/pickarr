@@ -240,6 +240,7 @@ test('readHostRows never projects a path, a url or a credential-bearing column',
   assert.deepEqual(Object.keys(rssItem).toSorted(), [
     'createdAt', 'deliveredAt', 'downloadType', 'feedId', 'filename', 'id',
     'lookupJson', 'lookupState', 'lookupStateDetail', 'mediaItemId', 'rankingScore', 'updatedAt',
+    'videoResolution',
   ]);
   assert.ok(!('link' in rssItem), 'rss_item.link must never be projected');
   assert.ok(!('guid' in rssItem), 'rss_item.guid must never be projected');
@@ -798,7 +799,7 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
   rss_item: {
     id: true, feedId: true, filename: true, createdAt: true, updatedAt: true,
     downloadType: true, mediaItemId: true, rankingScore: true, lookupState: true,
-    lookupStateDetail: true, lookupJson: true, deliveredAt: true,
+    lookupStateDetail: true, videoResolution: true, lookupJson: true, deliveredAt: true,
   } satisfies Record<keyof RssItemSyncRead, true>,
   torrent_download: {
     id: true, rssItemId: true, downloadClientId: true, infohash: true, clientRef: true,

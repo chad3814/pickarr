@@ -293,7 +293,7 @@ const MEDIA_ITEM_BY_PROVIDER_REF = `
  * caller never sees it.
  */
 const RSS_ITEM_COLUMNS =
-  'id, feed_id, filename, link, media_item_id, lookup_state, lookup_state_detail, download_type, delivered_at, updated_at';
+  'id, feed_id, filename, link, media_item_id, lookup_state, lookup_state_detail, video_resolution, download_type, delivered_at, updated_at';
 
 const RSS_ITEMS_SINCE = `
   SELECT ${RSS_ITEM_COLUMNS}
@@ -633,6 +633,7 @@ function toRssItemRead(row: unknown): Keyed<RssItemRead, Cursor> {
       mediaItemId: asNumberOrNull((row as { media_item_id: unknown }).media_item_id),
       lookupState: asText((row as { lookup_state: unknown }).lookup_state),
       lookupStateDetail: asTextOrNull((row as { lookup_state_detail: unknown }).lookup_state_detail),
+      videoResolution: asTextOrNull((row as { video_resolution: unknown }).video_resolution),
       downloadType: downloadTypeOf(id, (row as { download_type: unknown }).download_type),
       deliveredAt: asNumberOrNull((row as { delivered_at: unknown }).delivered_at),
     },

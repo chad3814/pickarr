@@ -213,6 +213,7 @@ export interface RecordingMedia {
   readonly calls: readonly RecordedCall[];
   readonly items: ReadonlyMap<number, MediaItemRead>;
   readonly lookupStates: ReadonlyMap<number, { state: LookupState; detail: string | null; lookupJson: string | null }>;
+  readonly videoResolutions: ReadonlyMap<number, string | null>;
   readonly roles: readonly { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[];
   /** Makes the next `claimProviderRef` report `winner` as the keeper. */
   loseNextClaim(winner: number): void;
@@ -229,6 +230,7 @@ export function createRecordingMedia(): RecordingMedia {
   const items = new Map<number, MediaItemRead>();
   const people = new Map<string, number>();
   const lookupStates = new Map<number, { state: LookupState; detail: string | null; lookupJson: string | null }>();
+  const videoResolutions = new Map<number, string | null>();
   const roles: { mediaItemId: number; personId: number; role: string; name: string | null; billingOrder: number | null }[] = [];
   const links = new Map<number, number | null>();
   let nextItem = 0;
@@ -302,6 +304,10 @@ export function createRecordingMedia(): RecordingMedia {
       record('setLookupState', rssItemId, state, detail, lookupJson);
       lookupStates.set(rssItemId, { state, detail, lookupJson });
     },
+    async setVideoResolution(rssItemId, value): Promise<void> {
+      record('setVideoResolution', rssItemId, value);
+      videoResolutions.set(rssItemId, value);
+    },
   };
 
   const reader: MediaReader = {
@@ -326,6 +332,7 @@ export function createRecordingMedia(): RecordingMedia {
     calls,
     items,
     lookupStates,
+    videoResolutions,
     roles,
     loseNextClaim(winner: number): void { claimLoser = winner; },
   };

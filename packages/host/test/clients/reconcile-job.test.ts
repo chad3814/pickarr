@@ -613,6 +613,7 @@ function fakeContext(jobs: JobQueue): PluginContext {
       upsertPerson: unusedMediaCall('upsertPerson'),
       attachRole: unusedMediaCall('attachRole'),
       setLookupState: unusedMediaCall('setLookupState'),
+      setVideoResolution: unusedMediaCall('setVideoResolution'),
     },
     read: {
       mediaItem: unusedReadCall('mediaItem'),
