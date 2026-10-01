@@ -21,6 +21,17 @@ const unusedFetch: QueuedFetch = {
   text: async () => { throw new Error('fetch.text: not used by this test'); },
 };
 
+/**
+ * A `QueuedFetch` that always throws, as if the client cannot be reached at
+ * all. Module scope: several tests below need the same unreachable client,
+ * not just the one the old throwing-snapshot test used.
+ */
+const unreachableFetch: QueuedFetch = {
+  json: async () => { throw new Error('qbittorrent unreachable'); },
+  bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
+  text: async () => { throw new Error('fetch.text: not used by this test'); },
+};
+
 /** A `DownloadClients` that fails loudly if a test never meant to submit anywhere. */
 const unusedDownloads: DownloadClients = {
   submit: async () => { throw new Error('downloads.submit: not used by this test'); },
@@ -260,39 +271,165 @@ test('a tick advances a row and re-enqueues itself', async () => {
   );
 });
 
-test('a tick whose snapshot throws does not re-enqueue, and lets the dispatcher retry the same row', async () => {
-  // A qBittorrent client, not SABnzbd: `createSabnzbdClient`'s own
-  // `snapshot()` deliberately swallows a failed queue or history request
-  // into an incomplete snapshot rather than throwing (`sabnzbd.ts`'s
-  // `fetchHistoryPages`), precisely so a transient failure never crashes
-  // the walk. qBittorrent's `snapshot()` has no such catch -- `guardAuthFailure`
-  // rethrows anything that is not a 401/403 -- so a plain network failure
-  // here reaches this handler as a real rejection, which is what this test
-  // needs to exist at all.
-  const fetch: QueuedFetch = {
-    json: async () => { throw new Error('qbittorrent unreachable'); },
-    bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
-    text: async () => { throw new Error('fetch.text: not used by this test'); },
-  };
-  const { raw, host, setTimeoutCalls } = setup({ fetch });
+/** One `download_client` row's health columns, for assertions the module under test must not be trusted to report itself. */
+function clientHealth(raw: DatabaseSync, clientId: number): { failures: number; since: unknown } {
+  const row = raw.prepare('SELECT consecutive_failures, unreachable_since FROM download_client WHERE id = ?').get(clientId);
+  return { failures: Number(row?.['consecutive_failures']), since: row?.['unreachable_since'] };
+}
 
+test('a client that cannot be reached is rescheduled with a doubling delay, never dead-lettered', async () => {
+  // Replaces 'a tick whose snapshot throws does not re-enqueue, and lets the
+  // dispatcher retry the same row': that test pinned the defect this task
+  // fixes. Before this, five failed attempts (about 15s) dead-lettered the
+  // cycle and nothing re-enqueued it until a restart -- see Review Focus 5.
+  const clock = createClock(1000);
+  const { raw, host, setTimeoutCalls } = setup({ fetch: unreachableFetch, now: clock.now });
   const clientId = insertClient(raw, { type: 'torrent', implementation: 'qbittorrent' });
-  await host.scheduleReconcile(clientId);
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
 
+  const expected = [10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000];
+  for (const [index, delay] of expected.entries()) {
+    const due = reconcileJobRows(raw).find((r) => r.clientId === clientId && r.state === 'ready');
+    assert.ok(due, `a job is pending before failure ${index + 1}`);
+    clock.set(due.runAt);
+    // eslint-disable-next-line no-await-in-loop -- each tick depends on the previous one's reschedule
+    await runDue(host, setTimeoutCalls);
+    const ready = reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready');
+    assert.equal(ready.length, 1, `exactly one pending job after failure ${index + 1}`);
+    assert.equal(ready[0]?.runAt, due.runAt + delay, `failure ${index + 1} waits ${delay}ms`);
+    assert.equal(clientHealth(raw, clientId).failures, index + 1);
+  }
+  assert.ok(reconcileJobRows(raw).every((r) => r.state !== 'dead'), 'no reconcile job ever dead-letters');
+  assert.equal(clientHealth(raw, clientId).since, 1000, 'the streak began at the first failure');
+});
+
+test('the first good snapshot after failures resets health and returns to the 10s cadence', async () => {
+  // A qBittorrent client, not the brief's literal `insertClient(raw)`
+  // (sabnzbd): `createSabnzbdClient`'s own `snapshot()` swallows a failed
+  // queue or history request into an incomplete snapshot rather than
+  // throwing (`sabnzbd.ts`'s `fetchHistoryPages`), so `unreachableFetch`
+  // never reaches this handler as a rejection through that transport --
+  // the same reason the replaced defect-pinning test used qBittorrent, and
+  // the same reason `good` below answers qBittorrent's `/torrents/info`
+  // array shape rather than SABnzbd's `{ queue, history }` one.
+  const clock = createClock(1000);
+  let reachable = false;
+  const fetch = fakeQueuedFetch(async (): Promise<unknown> => {
+    if (!reachable) throw new Error('qbittorrent unreachable');
+    return [];
+  });
+  const { raw, host, setTimeoutCalls } = setup({ fetch, now: clock.now });
+  const clientId = insertClient(raw, { type: 'torrent', implementation: 'qbittorrent' });
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  assert.equal(clientHealth(raw, clientId).failures, 1);
+
+  reachable = true;
+  const due = reconcileJobRows(raw).find((r) => r.clientId === clientId && r.state === 'ready');
+  assert.ok(due);
+  clock.set(due.runAt);
+  await runDue(host, setTimeoutCalls);
+  assert.deepEqual(clientHealth(raw, clientId), { failures: 0, since: null });
+  const ready = reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready');
+  assert.equal(ready[0]?.runAt, due.runAt + RECONCILE_INTERVAL_S * 1000);
+  assert.equal(RECONCILE_INTERVAL_S, 10);
+});
+
+test('a client whose secret no longer resolves counts as unreachable, and its cycle survives', async () => {
+  // Review Focus 4: readClientConfig throws before any network call.
+  const { raw, host, setTimeoutCalls } = setup({ fetch: sabnzbdFetch({ queueSlots: [] }) });
+  const clientId = insertClient(raw);
+  raw.prepare("UPDATE download_client SET api_key_secret_name = 'no-such-secret' WHERE id = ?").run(clientId);
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  assert.equal(clientHealth(raw, clientId).failures, 1);
+  assert.equal(reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready').length, 1);
+});
+
+test('a client deleted while failing ends its cycle', async () => {
+  // Review Focus 2.
+  const clock = createClock(1000);
+  const { raw, host, setTimeoutCalls } = setup({ fetch: unreachableFetch, now: clock.now });
+  const clientId = insertClient(raw, { type: 'torrent', implementation: 'qbittorrent' });
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  raw.prepare('DELETE FROM download_client WHERE id = ?').run(clientId);
+  const due = reconcileJobRows(raw).find((r) => r.clientId === clientId && r.state === 'ready');
+  assert.ok(due);
+  clock.set(due.runAt);
+  await runDue(host, setTimeoutCalls);
+  assert.equal(reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready').length, 0);
+});
+
+test('a local fault after a good snapshot reschedules at 10s and leaves health alone', async () => {
+  // The fault is injected into `walkSnapshot`'s own write (`setProgress`,
+  // `reconcile.ts`), which runs with no try/catch of its own and is reached
+  // only after `adapter.snapshot()` has already returned successfully --
+  // never inside `deliverCompleted`, which catches everything it does
+  // internally (see `deliver.ts`'s `deliverOne`/`reclaimRows` catches) and
+  // so cannot be made to throw out of a tick at all, and never on
+  // `download_client` itself, which nothing in the post-snapshot phase
+  // writes to. A `BEFORE UPDATE` trigger on `nzb_download` raising `ABORT`
+  // is this file's version of the fault-injection technique `CLAUDE.md`
+  // documents for `inTransaction`: it fails one statement the same way a
+  // real constraint failure would, rather than mocking anything.
+  //
+  // `requestedUrls` proves the fault really happens after the snapshot: the
+  // queue request the adapter makes before `walkSnapshot` ever runs is
+  // recorded, so a test that failed before reaching the network would be
+  // caught here rather than silently asserting the same outcome for the
+  // wrong reason.
+  const requestedUrls: string[] = [];
+  const fetch = fakeQueuedFetch(async (url) => {
+    requestedUrls.push(url);
+    if (isQueueRequest(url)) {
+      return { queue: { noofslots: 1, slots: [{ nzo_id: 'ref-1', filename: 'x.mkv', percentage: '10', cat: 'movies' }] } };
+    }
+    return { history: { noofslots: 0, slots: [] } };
+  });
+  const clock = createClock(1000);
+  const { raw, host, setTimeoutCalls } = setup({ fetch, now: clock.now });
+
+  const clientId = insertClient(raw);
+  const rssItemId = seedRssItem(raw, 'x');
+  insertNzbRow(raw, { rssItemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'submitted' });
+
+  // Injected after the row exists: the row's own INSERT must not trip this.
+  raw.exec(`
+    CREATE TRIGGER fault_after_snapshot BEFORE UPDATE ON nzb_download
+    BEGIN SELECT RAISE(ABORT, 'injected local fault');
+    END;
+  `);
+
+  await host.scheduleReconcile(clientId, 1000);
   host.start();
   await runDue(host, setTimeoutCalls);
 
+  assert.ok(
+    requestedUrls.some((url) => isQueueRequest(url)),
+    'the snapshot request must have been made before the fault could fire',
+  );
+  assert.deepEqual(clientHealth(raw, clientId), { failures: 0, since: null }, 'a local fault says nothing about the client');
+
   const rows = reconcileJobRows(raw).filter((r) => r.clientId === clientId);
-  // Exactly the original job: a reschedule computed before the throw (rather
-  // than after a successful tick) would leave a second row behind here --
-  // the same double-cycle `host.ts`'s own `pollHandler` refuses to create.
-  assert.equal(rows.length, 1, 'a failed tick must not also have scheduled a next one');
-  assert.equal(rows[0]?.state, 'ready', 'a first failure must retry through the dispatcher\'s own backoff, not dead-letter');
-  assert.equal(rows[0]?.attempts, 1);
-  // 2000 is now (1000) plus 1000 -- `backoffMs(1)` from `../src/jobs/backoff.ts`
-  // -- hardcoded rather than computed by calling that function, the same
-  // reasoning `host.test.ts`'s own throwing-poll test gives.
-  assert.equal(rows[0]?.runAt, 2000, 'run_at must be the failure time plus the first backoff step');
+  const done = rows.find((r) => r.state === 'done');
+  // `attempts` is `run-job.ts`'s own claim counter -- incremented to 1 the
+  // moment any run starts, success or failure alike -- so 1 here is normal
+  // and is not what proves this tick never threw. What proves it is this
+  // row ending `done` at all, with no `last_error` and a `ready` continuation
+  // computed from the healthy interval rather than from `backoffMs`'s retry
+  // curve: a tick the dispatcher had to retry would instead leave this same
+  // row `ready` (or `dead`) with `attempts` climbing on each pass.
+  assert.ok(done, 'the tick must end done, not left ready for the dispatcher to retry, nor dead-lettered');
+  assert.equal(done?.attempts, 1, 'claimed and run exactly once');
+  const ready = rows.filter((r) => r.state === 'ready');
+  assert.equal(ready.length, 1, 'exactly one reschedule, the same as any other outcome');
+  assert.equal(ready[0]?.attempts, 0, 'the reschedule is a fresh job, never claimed');
+  assert.equal(ready[0]?.runAt, 1000 + RECONCILE_INTERVAL_S * 1000, 'a fault reschedules at the healthy 10s cadence, not through backoffMs');
 });
 
 test('scheduling is idempotent per client', async () => {

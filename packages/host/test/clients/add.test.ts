@@ -512,7 +512,7 @@ test('https is an address as much as http is', async () => {
 });
 
 test('an empty category is accepted and stored, because it means "no category"', async () => {
-  // Not a missing value and not a refusal: `reconcile-job.ts:287` folds
+  // Not a missing value and not a refusal: `reconcile-job.ts`'s `runTick` folds
   // `config.category` through `normalizeClientCategory`, which maps `''`
   // and the literal `'None'` to `null`, so a blank category reconciles
   // everything rather than asking for a category named "". qBittorrent's
