@@ -333,6 +333,17 @@ test('an update to a plugin row the page holds refetches, and the new value is s
   await waitFor(() => { assert.ok(resultText().includes('New'), 'the corrected title arrived without a remount'); });
 });
 
+test('a plugin row the page holds that is re-pointed to another item disappears from the page', async () => {
+  // Only the held id can wake this: the row's new value names an item this
+  // page does not show, so the mediaItemOf fallback would say "not ours".
+  const db = await freshDb();
+  await seed(db, [{ op: 'upsert', table: 'tv_release', id: 50, value: { mediaItemId: 1, title: 'Moved' } }]);
+  render(<Harness source={sourceFor(db)} mediaItemIds={[1]} tables={['tv_release']} />);
+  await waitFor(() => { assert.ok(resultText().includes('Moved')); });
+  await seed(db, [{ op: 'upsert', table: 'tv_release', id: 50, value: { mediaItemId: 2, title: 'Moved' } }]);
+  await waitFor(() => { assert.ok(!resultText().includes('Moved'), 'the row left this page'); });
+});
+
 test('a delete of a plugin row the page holds refetches, and the row is gone', async () => {
   const db = await freshDb();
   await seed(db, [{ op: 'upsert', table: 'tv_release', id: 50, value: { mediaItemId: 1, title: 'Gone soon' } }]);

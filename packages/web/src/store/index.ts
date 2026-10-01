@@ -74,12 +74,13 @@ export interface CreateStoreDeps {
 }
 
 /**
- * The seven reads (`store/rows.ts`), the four subscriptions
- * (`store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
+ * The seven reads (`store/rows.ts`), the five subscriptions (`subscribe`,
+ * `subscribeInserts`, `subscribeTable`, `subscribeTouched`, `subscribeReset`
+ * -- `store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
  * `stop()` -- everything a consumer of the replica needs, with `db` already
  * bound so none of it takes one.
  *
- * The four subscriptions are `store/notify.ts`'s own module-level
+ * The five subscriptions are `store/notify.ts`'s own module-level
  * registries, keyed by table and id rather than by store instance --
  * unchanged here, and deliberately: nothing in this slice's design keys a
  * subscription off which replica raised it (there is exactly one replica per
