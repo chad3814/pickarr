@@ -7,7 +7,7 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { getRows, listByTablePlugin, pluginRowsByMediaItems } from '../../src/store/rows.ts';
-import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTouched } from '../../src/store/notify.ts';
 import { gatherMediaItem } from '../../src/store/gather.ts';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
 import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
@@ -117,6 +117,7 @@ function sourceFor(db: IDBDatabase): CategorySource {
   return {
     listByTablePlugin: (table, pluginId, opts) => listByTablePlugin(db, table, pluginId, opts),
     subscribeInserts,
+    subscribeTouched,
     gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
     subscribe,
     getRows: (table, ids) => getRows(db, table, ids),
