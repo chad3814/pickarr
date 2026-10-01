@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, eighteen routes --
- * sixteen behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, nineteen routes --
+ * seventeen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -22,7 +22,8 @@
  * `PUT` this API has ever answered, to seventeen with `DELETE` and `PATCH
  * /api/feeds/:id`, a second route answering two methods, and to eighteen
  * with `POST /api/unmatched/:id/retry`, letting an operator ask for an
- * unmatched release to be identified again.)
+ * unmatched release to be identified again, and to nineteen with
+ * `GET /api/sync/events`, the live-push slice's stream of sync nudges.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -154,6 +155,7 @@ import type { DestinationRefusal, SaveDestinationInput } from '../media/destinat
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
+import type { SyncEvents } from '../sync/events.ts';
 import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
 import { json } from './answer.ts';
@@ -471,6 +473,11 @@ export interface ReadServerDeps {
    * known until the listener has bound; this is known before it.
    */
   generation: string;
+  /**
+   * The event hub `GET /api/sync/events` attaches to (`sync/events.ts`).
+   * Built by `main.ts` and the e2e harness; a test builds a quiet one.
+   */
+  events: SyncEvents;
   /**
    * The interface to bind, or `undefined` for `DEFAULT_HOST`.
    *
@@ -855,8 +862,8 @@ interface Route {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The eighteen routes -- sixteen guarded, two `open: true`, the same split
- * this module's own doc states. Eighteen *routes*, twenty
+ * The nineteen routes -- seventeen guarded, two `open: true`, the same split
+ * this module's own doc states. Nineteen *routes*, twenty-one
  * route-and-method pairs: `/api/mappings/:id` and `/api/feeds/:id` are the
  * two entries here that declare two methods each, so the two counts have
  * parted company and a reader counting "endpoints" will get a different
@@ -871,8 +878,9 @@ const STATIC_ROUTE_PATH = '/*';
  * (The picks slice made it thirteen and corrected both; the mappings slice
  * made it fifteen and the importer slice sixteen. The feed-removal slice
  * made it seventeen and the retry slice eighteen, both missing this line
- * too. Measured with the `grep` below on each occasion, not incremented on
- * sight -- `18` on this tree.) That is not an argument for deleting the number:
+ * too. The live-push slice's `GET /api/sync/events` made it nineteen.
+ * Measured with the `grep` below on each occasion, not incremented on
+ * sight -- `19` on this tree.) That is not an argument for deleting the number:
  * a reader wants to know whether the table below is the whole set. It is
  * an argument for checking it, because no test pins the total and none
  * can usefully. The one count assertion in `api/server.test.ts` is
@@ -983,6 +991,15 @@ export const ROUTES: readonly Route[] = [
       );
       return json(answer.status, answer.body);
     },
+  },
+  {
+    path: '/api/sync/events',
+    methods: ['GET'],
+    open: false,
+    // As guarded as `/api/sync` itself: a stream of "the library changed"
+    // is a side channel onto the same data, and the session guard runs
+    // before this answer is ever built (design spec 2026-10-01 §2).
+    answer: ({ deps }) => ({ kind: 'stream', attach: (response) => { deps.events.attach(response); } }),
   },
   {
     path: '/api/sync/bootstrap',
@@ -1524,6 +1541,11 @@ function write(response: ServerResponse, answer: Answer): void {
     // `end()` with no argument is what sends the status line alone.
     response.writeHead(answer.status);
     response.end();
+    return;
+  }
+  if (answer.kind === 'stream') {
+    // The hub writes the headers and keeps the response; nothing here ends it.
+    answer.attach(response);
     return;
   }
   if (answer.kind === 'artwork') {

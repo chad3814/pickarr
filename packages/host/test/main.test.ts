@@ -10,6 +10,8 @@ import type { Host } from '../src/host.ts';
 import { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
 import { migrateHost } from '../src/db/migrate.ts';
 import { openDatabase, openTestDatabase } from '../src/db/open.ts';
+import { createSyncEvents } from '../src/sync/events.ts';
+import type { SyncEvents } from '../src/sync/events.ts';
 import type { QueuedFetch } from '../src/fetch/queue.ts';
 import type { Timers } from '../src/jobs/dispatcher.ts';
 import type { ReadServer, ReadServerDeps } from '../src/api/server.ts';
@@ -73,6 +75,21 @@ function fakeServer(onClose: () => void): ReadServer {
       onClose();
     },
   };
+}
+
+/**
+ * A quiet event hub for `createShutdown`'s own tests: no real timer, and
+ * nothing here ever calls `notify()` or `attach()`, so what matters is only
+ * that `close()` is observable -- which is why these tests hand this `raw`
+ * with no session-sync wiring at all.
+ */
+function quietEvents(raw: DatabaseSync) {
+  return createSyncEvents({
+    raw,
+    generation: 'placeholder-generation',
+    timers: { setInterval: () => 0, clearInterval: () => {} },
+    defer: (fn) => { setImmediate(fn); },
+  });
 }
 
 /** A `Host` whose every method fails loudly if a test never meant to reach it. */
@@ -583,12 +600,16 @@ test('createShutdown stops the host, closes the database and exits exactly once,
   let closed = 0;
   const host = fakeHost({ stop: () => { stopped += 1; } });
   const exitCalls: number[] = [];
-  const shutdown = createShutdown(host, raw, fakeServer(() => { closed += 1; }), { exit: (code) => { exitCalls.push(code); } });
+  const inner = quietEvents(raw);
+  let eventsClosed = 0;
+  const events: SyncEvents = { ...inner, close: () => { eventsClosed += 1; inner.close(); } };
+  const shutdown = createShutdown(host, raw, fakeServer(() => { closed += 1; }), events, { exit: (code) => { exitCalls.push(code); } });
 
   shutdown('SIGINT received');
   shutdown('SIGTERM received');
 
   assert.equal(closed, 1, 'the listener is closed exactly once too, not once per signal');
+  assert.equal(eventsClosed, 1, 'and the event hub is closed exactly once, not once per signal either');
   assert.equal(stopped, 1, 'stop must run exactly once even though shutdown was asked for twice');
   assert.deepEqual(exitCalls, [0], 'exit must run exactly once, with the process\'s own success code');
   assert.throws(() => raw.prepare('SELECT 1').get(), 'the database must actually be closed, not merely stopped');
@@ -617,7 +638,7 @@ test('createShutdown exits without waiting for a hung idle(), which the pump it 
     family: 'IPv4',
     close: () => new Promise<void>(() => {}),
   };
-  const shutdown = createShutdown(host, raw, neverCloses, { exit: (code) => { exitCalls.push(code); } });
+  const shutdown = createShutdown(host, raw, neverCloses, quietEvents(raw), { exit: (code) => { exitCalls.push(code); } });
 
   shutdown('SIGINT received');
 
@@ -756,7 +777,9 @@ test('main starts the server after the host and closes it before stopping', asyn
   const { raw } = openTestDatabase();
   const teardown: string[] = [];
   const host = fakeHost({ stop: () => { teardown.push('host stopped'); } });
-  const shutdown = createShutdown(host, raw, fakeServer(() => { teardown.push('listener closed'); }), {
+  const inner = quietEvents(raw);
+  const events: SyncEvents = { ...inner, close: () => { teardown.push('events closed'); inner.close(); } };
+  const shutdown = createShutdown(host, raw, fakeServer(() => { teardown.push('listener closed'); }), events, {
     exit: () => { teardown.push('exited'); },
   });
 
@@ -764,8 +787,9 @@ test('main starts the server after the host and closes it before stopping', asyn
 
   assert.deepEqual(
     teardown,
-    ['listener closed', 'host stopped', 'exited'],
-    'the listener stops first, so no read is accepted against a host that has already been told to stop',
+    ['listener closed', 'events closed', 'host stopped', 'exited'],
+    'the listener stops first, so no read is accepted against a host that has already been told to stop -- '
+    + 'and the event hub right after it, so a held-open stream drains before the host does',
   );
 });
 

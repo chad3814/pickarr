@@ -27,6 +27,7 @@ import type { ReadServer } from '../../src/api/server.ts';
 import { createReadServer } from '../../src/api/server.ts';
 import { PAGE_SIZE } from '../../src/api/cursor.ts';
 import { BOOTSTRAP_ITEMS } from '../../src/sync/bootstrap.ts';
+import { createSyncEvents } from '../../src/sync/events.ts';
 
 /** Obviously synthetic, and not a real secret -- see `server.test.ts`'s own doc on these constants. */
 const AUTH_SECRET = 'placeholder-not-a-real-signing-secret-for-tests';
@@ -126,6 +127,15 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     },
     registry,
     generation,
+    // This file's own route is `/api/sync` and its siblings, never
+    // `/api/sync/events` -- a quiet hub answers the guard the same way a
+    // real one would, with no timer and no write path exercising it.
+    events: createSyncEvents({
+      raw,
+      generation,
+      timers: { setInterval: () => 0, clearInterval: () => {} },
+      defer: (fn) => { setImmediate(fn); },
+    }),
     host: undefined,
     port: 0,
     webRoot: MISSING_WEB_ROOT,

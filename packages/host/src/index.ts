@@ -17,7 +17,7 @@ export { createDownloadClients } from './clients/downloads.ts';
 export type { ChooseIndex } from './clients/select.ts';
 export { randomIndex } from './clients/select.ts';
 export type { HostDb } from './db/open.ts';
-export { openDatabase, openTestDatabase } from './db/open.ts';
+export { openDatabase, openTestDatabase, setSyncChangedListener } from './db/open.ts';
 export { migrateHost, migratePlugin } from './db/migrate.ts';
 // `ensureSyncGeneration`, for the same external caller as `createAuth` above:
 // `ReadServerDeps.generation` is minted from the database exactly this way in
@@ -41,3 +41,10 @@ export { main } from './main.ts';
 // plugin involved at all, so an empty plugin list is a legitimate registry to
 // build.
 export { createSyncRegistry } from './sync/registry.ts';
+// `createSyncEvents` and `setSyncChangedListener` (above), for the same
+// external caller once more: `ReadServerDeps.events` needs a hub, and
+// building one and wiring it to the host's own triggers is exactly what
+// `main.ts` does -- the e2e harness (task 8's) is the one caller outside
+// this package that assembles a `ReadServerDeps` by hand and needs both.
+export type { SyncEvents } from './sync/events.ts';
+export { createSyncEvents } from './sync/events.ts';

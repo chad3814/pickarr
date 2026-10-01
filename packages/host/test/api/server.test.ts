@@ -11,8 +11,9 @@ import { ensureClaimToken } from '../../src/auth/claim.ts';
 import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
-import { openTestDatabase } from '../../src/db/open.ts';
+import { openTestDatabase, setSyncChangedListener } from '../../src/db/open.ts';
 import type { MappingRefusal } from '../../src/clients/mappings.ts';
+import { createSyncEvents, type SyncEvents } from '../../src/sync/events.ts';
 import {
   ADD_DOWNLOAD_CLIENT_REFUSALS,
   type AddDownloadClientInput,
@@ -144,6 +145,23 @@ interface SignedIn extends Running {
  * carried in one place. `ReadServerDeps.host` one file over says so, and
  * this comment used to say the opposite.
  */
+/**
+ * A quiet event hub for a test database: no real timer, and `setImmediate`
+ * for coalescing so a write's nudge is observable without a test ever
+ * reaching for `t.mock.timers` (`CLAUDE.md`'s own hazard on that). Exported
+ * as a module-level helper, not inlined into `start` below, so a test that
+ * wants to drive `notify()` itself -- the stream test -- can build the same
+ * hub `start` would have and hand it back through `overrides.events`.
+ */
+function eventsFor(raw: DatabaseSync): SyncEvents {
+  return createSyncEvents({
+    raw,
+    generation: 'test-generation',
+    timers: { setInterval: () => 0, clearInterval: () => {} },
+    defer: (fn) => { setImmediate(fn); },
+  });
+}
+
 async function start(
   raw: DatabaseSync,
   db: HostDb,
@@ -239,6 +257,10 @@ async function start(
     // `sync-route.test.ts`'s, where it is minted from the database the way
     // `main` does. Obviously synthetic, like the other constants above.
     generation: 'placeholder-generation',
+    // A quiet hub by default, built fresh per call from this test's own
+    // `raw` -- `overrides.events` (the stream test passes one wired to
+    // `setSyncChangedListener`) wins through the spread below.
+    events: eventsFor(raw),
     host,
     port: 0,
     webRoot: MISSING_WEB_ROOT,
@@ -536,7 +558,14 @@ async function guardProbe(
     const init: RequestInit = method === 'GET'
       ? { method, headers: session }
       : { method, headers: { ...session, 'content-type': 'application/json' }, body: '{}' };
-    const response = await fetch(`${originOf(server)}${probeFor(route)}`, init);
+    const controller = new AbortController();
+    const response = await fetch(`${originOf(server)}${probeFor(route)}`, { ...init, signal: controller.signal });
+    // An event stream never ends; the status is the whole of what a guard
+    // probe asks, so read no body and let the request go.
+    if (response.headers.get('content-type')?.startsWith('text/event-stream')) {
+      controller.abort();
+      return { path: route.path, method, status: response.status, text: '' };
+    }
     return { path: route.path, method, status: response.status, text: await response.text() };
   }));
 }
@@ -3641,6 +3670,64 @@ test('a destination route throw is a 500 that names no path', async () => {
     for (const line of logs) {
       assert.ok(!JSON.stringify(line).includes('/library'), 'and neither does the log line');
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test('the event stream answers a session holder with headers and an immediate changed event, and a write pushes another', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const events = eventsFor(raw);
+  setSyncChangedListener(raw, () => { events.notify(); });
+  const { server, cookie } = await startSignedIn(raw, db, () => undefined, { events });
+  try {
+    const controller = new AbortController();
+    const response = await fetch(`${originOf(server)}/api/sync/events`, { headers: { cookie }, signal: controller.signal });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'text/event-stream');
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    // Accumulated across calls, deliberately: a stream is never re-read from
+    // the start, so `readUntil(2)` after `readUntil(1)` has to keep counting
+    // from what the first call already consumed rather than resetting to
+    // zero and waiting on two *more* events than the single write below
+    // ever sends.
+    let text = '';
+    async function readUntil(count: number): Promise<string> {
+      while (text.split('event: changed').length - 1 < count) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value);
+      }
+      return text;
+    }
+    const first = await readUntil(1);
+    assert.match(first, /^event: changed\ndata: \{"cursor":\d+,"generation":"test-generation"\}\n\n/);
+
+    raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'http://f', 1, 1)");
+    const second = await readUntil(2);
+    const cursors = [...second.matchAll(/"cursor":(\d+)/g)].map((m) => Number(m[1]));
+    assert.equal(cursors.length, 2);
+    assert.ok((cursors[1] ?? 0) > (cursors[0] ?? 0), 'the write advanced the cursor');
+    controller.abort();
+  } finally {
+    events.close();
+    await server.close();
+  }
+});
+
+test('the event stream is guarded session-first like every route', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const { server } = await startSignedIn(raw, db, () => undefined);
+  try {
+    const anonymous = await fetch(`${originOf(server)}/api/sync/events`);
+    assert.equal(anonymous.status, 401);
+    assert.deepEqual(await anonymous.json(), { error: 'unauthorized' });
+    const post = await fetch(`${originOf(server)}/api/sync/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(post.status, 401, 'anonymous first: a POST without a session learns nothing about methods');
   } finally {
     await server.close();
   }

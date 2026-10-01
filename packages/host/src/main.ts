@@ -37,7 +37,7 @@ import { openConfig } from './config/instance.ts';
 import { DEFAULT_CONFIG_PATH, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret, ensureSyncGeneration } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
-import { openDatabase } from './db/open.ts';
+import { openDatabase, setSyncChangedListener } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
@@ -47,6 +47,8 @@ import { envNameFor } from './secrets/names.ts';
 import { installSyncTriggers } from './sync/log.ts';
 import { createSyncRegistry } from './sync/registry.ts';
 import { HOST_SYNCED_TABLES } from './sync/tables.ts';
+import { createSyncEvents } from './sync/events.ts';
+import type { SyncEvents } from './sync/events.ts';
 
 /**
  * A log line's structured half, as `key=value` pairs.
@@ -681,6 +683,7 @@ export function createShutdown(
   host: Host,
   raw: DatabaseSync,
   server: ReadServer,
+  events: SyncEvents,
   deps: { exit?: (code: number) => void } = {},
 ): (reason: string) => void {
   const exit = deps.exit ?? process.exit;
@@ -693,6 +696,12 @@ export function createShutdown(
     // and drops open connections synchronously, before it returns the promise
     // this is discarding.
     void server.close();
+    // An open stream is a connection `server.close()` would otherwise wait
+    // on to drain; ending every stream and the heartbeat here, right after
+    // asking the listener to close, is what lets that drain actually finish
+    // rather than leaving a browser's `EventSource` holding the socket open
+    // forever.
+    events.close();
     host.stop();
     raw.close();
     // Load-bearing: this synchronous `exit(0)` is what stops an in-flight
@@ -825,6 +834,48 @@ export async function main(
   // treatment per boot, in `host.register` (`host.ts`), which is where a
   // plugin's declared names are known.
   installSyncTriggers(raw, HOST_SYNCED_TABLES);
+
+  // Resolved once, here, rather than per request: this value cannot change
+  // while the process holds `raw` open, so a route reading it would be a
+  // query per sync request for a constant. Minted on first boot against a
+  // given database file and persisted, so a *rebuilt* database answers a
+  // new one by construction, which is the whole signal -- see
+  // `db/host-state.ts`'s `ensureSyncGeneration`. Not logged, not because it
+  // is a credential (it is deliberately public, and it goes out on three
+  // response bodies) but because `host_state.value`'s readers take no
+  // logger at all, for its siblings' sake.
+  //
+  // Hoisted above `createReadServer`'s own deps (where this used to be
+  // inlined) because the event hub built below needs the same generation
+  // every `changed` event carries, and minting it twice would risk two
+  // different strings if this ever stopped being idempotent.
+  const generation = ensureSyncGeneration(raw, Date.now());
+
+  // The host's end of `GET /api/sync/events` (`sync/events.ts`). Built here,
+  // after the triggers are installed and before anything can write, and
+  // wired to `setSyncChangedListener` so every sync trigger's
+  // `pickarr_sync_changed()` call reaches `notify()`.
+  const events = createSyncEvents({
+    raw,
+    generation,
+    // `unref()`, because a heartbeat whose only job is to keep an idle
+    // stream's socket from looking dead must not be what keeps *this*
+    // process alive -- the read listener's own open socket already does
+    // that in production, same as the job dispatcher's timers. Measured
+    // without it: `main`'s own tests, which call `main` directly with no
+    // signal ever sent, left this interval running real wall-clock seconds
+    // past every assertion, and the test process never exited at all.
+    timers: {
+      setInterval: (fn, ms) => {
+        const timer = setInterval(fn, ms);
+        timer.unref();
+        return timer;
+      },
+      clearInterval,
+    },
+    defer: (fn) => { setImmediate(fn); },
+  });
+  setSyncChangedListener(raw, () => { events.notify(); });
 
   const secrets = createSecrets({ raw, baseDir: settings.secretsBaseDir });
 
@@ -984,16 +1035,12 @@ export async function main(
     // mappings above give.
     saveDestination: (pluginId, input) => host.saveDestination(pluginId, input),
     registry,
-    // Resolved once, here, rather than per request: this value cannot change
-    // while the process holds `raw` open, so a route reading it would be a
-    // query per sync request for a constant. Minted on first boot against a
-    // given database file and persisted, so a *rebuilt* database answers a
-    // new one by construction, which is the whole signal -- see
-    // `db/host-state.ts`'s `ensureSyncGeneration`. Not logged, not because it
-    // is a credential (it is deliberately public, and it goes out on three
-    // response bodies) but because `host_state.value`'s readers take no
-    // logger at all, for its siblings' sake.
-    generation: ensureSyncGeneration(raw, Date.now()),
+    // Minted above, before the event hub -- see that comment for why this
+    // is hoisted rather than inlined here the way it used to be.
+    generation,
+    // The hub `GET /api/sync/events` attaches to, built above and already
+    // wired to `setSyncChangedListener`.
+    events,
     host: settings.readHost,
     port: settings.port,
     webRoot: settings.webRoot,
@@ -1032,7 +1079,7 @@ export async function main(
     log,
   });
 
-  const shutdown = createShutdown(host, raw, server);
+  const shutdown = createShutdown(host, raw, server, events);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       shutdown(`${signal} received`);
