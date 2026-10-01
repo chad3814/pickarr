@@ -30,8 +30,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { redactText } from './redact.ts';
 import {
-  DOWNLOAD_STATUSES, advanceStatus, failRow, heldRefs, rowByRef, rowsForClientByStatus, setAbsent,
-  setProgress, setRef, setStoragePath,
+  DOWNLOAD_STATUSES, UNCONFIRMED_AFTER_MS, advanceStatus, failRow, failUnconfirmed, heldRefs, rowByRef,
+  rowsForClientByStatus, setAbsent, setProgress, setRef, setStoragePath,
 } from './rows.ts';
 import type { DownloadRow, DownloadStatus } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
@@ -84,6 +84,14 @@ export interface ReconcileResult {
    * were worth.
    */
   foreign: number;
+  /**
+   * `submitting` rows failed because the client never confirmed them within
+   * `UNCONFIRMED_AFTER_MS` of being written (#95). Set only by the settle
+   * step `walkSnapshot` runs last, on a successful snapshot -- never on an
+   * unreachable client, which has no list to say whether a row ever
+   * arrived at all.
+   */
+  unconfirmed: number;
 }
 
 /**
@@ -558,12 +566,14 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
  * this same walk on this same tick, rather than waiting a poll longer. The
  * absence sweep runs last, after every write the walk itself makes, so it
  * sees each row's final status for this tick rather than the one it read
- * it at.
+ * it at. The unconfirmed-settle step runs last of all, after the sweep, so
+ * a row recovery or the walk could still identify this tick is never failed
+ * out from under it (#95).
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   const result: ReconcileResult = {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   };
 
   recoverRefs(deps, result);
@@ -576,6 +586,14 @@ export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   }
 
   sweepAbsent(deps, result);
+
+  // Last, after recovery has attached every ref the client's own list can
+  // supply and the walk has advanced every row it can identify. A row still
+  // `submitting` this long after its pick was never going to be confirmed,
+  // and until it is settled migration 18's unique index refuses a re-pick
+  // (#95). Reached only with a good snapshot: `walkSnapshot` is never called
+  // for a client that could not be contacted.
+  result.unconfirmed = failUnconfirmed(deps.raw, deps.clientId, deps.now - UNCONFIRMED_AFTER_MS, deps.now);
 
   return result;
 }

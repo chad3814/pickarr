@@ -140,7 +140,7 @@ test('a queue entry moves a submitted row to downloading and records its progres
 
   assert.deepEqual(result, {
     advanced: 1, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'downloading');
   assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 37);
@@ -161,7 +161,7 @@ test('a completed history entry stores the client path and completes the row', (
 
   assert.deepEqual(result, {
     advanced: 0, completed: 1, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'completed');
   assert.equal(readColumn(raw, 'torrent_download', id, 'storage_path'), '/downloads/movie.mkv');
@@ -185,7 +185,7 @@ test('a failed history entry fails the row with the client\'s message, redacted'
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 1, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'failed');
   assert.equal(
@@ -247,7 +247,7 @@ test('an in-progress history entry leaves the row exactly where it was', () => {
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'downloading');
   assert.equal(readColumn(raw, 'torrent_download', id, 'last_error'), null);
@@ -271,7 +271,7 @@ test('a completed job whose row we already failed is advanced anyway', () => {
 
   assert.deepEqual(result, {
     advanced: 0, completed: 1, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'completed');
   assert.equal(readColumn(raw, 'torrent_download', id, 'storage_path'), '/downloads/movie.mkv');
@@ -297,7 +297,7 @@ test('an entry matching no row is counted untracked and never written', () => {
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 2, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(countRows(raw, 'torrent_download'), torrentCountBefore, 'no torrent row must be inserted');
   assert.equal(countRows(raw, 'nzb_download'), nzbCountBefore, 'no nzb row must be inserted');
@@ -325,7 +325,7 @@ test('an entry in another category with no row of ours is ignored silently', () 
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 2,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 2, unconfirmed: 0,
   });
   // Counted, not silent: one number on the tick summary still says "this
   // client holds things that are not ours", which is the only part of
@@ -451,7 +451,7 @@ test('a delivered row is left alone by every arm', () => {
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', queueId, 'status'), 'delivered');
   assert.equal(readColumn(raw, 'torrent_download', queueId, 'percentage'), null);
@@ -475,7 +475,7 @@ test('a null ref is recovered from the one entry matching our category and name'
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 1, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), 'ref-1');
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
@@ -495,7 +495,7 @@ test('a recovered row advances in the same tick', () => {
 
   assert.deepEqual(result, {
     advanced: 1, completed: 0, failed: 0, untracked: 0, recovered: 1, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), 'ref-1');
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'downloading');
@@ -519,7 +519,7 @@ test('two matching entries recover nothing and write nothing', () => {
   // untracked by the walk that follows -- recovery itself wrote nothing.
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 2, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), null);
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
@@ -571,7 +571,7 @@ test('a ref another row already holds is never attached, and the rest of the tic
 
   assert.deepEqual(result, {
     advanced: 1, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 1, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 1, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   // Nothing at all was written to the claiming row: not the ref, not the
   // status, not even `updated_at`, which every write in `rows.ts` moves.
@@ -611,7 +611,7 @@ test('a ref held by a row in the other download table is not a candidate either'
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 1, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 1, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', torrentClaimantId, 'client_ref'), null);
   assert.equal(readColumn(raw, 'torrent_download', torrentClaimantId, 'updated_at'), 1);
@@ -672,7 +672,7 @@ test('an incomplete snapshot recovers nothing, even on a single clean match', ()
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 1, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), null);
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
@@ -696,7 +696,7 @@ test('an entry with our name in another category is not ours', () => {
   // touching a single decision about a row.
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 1,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 1, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), null);
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
@@ -714,7 +714,7 @@ test('a row that already has a ref is not touched by recovery', () => {
 
   assert.deepEqual(result, {
     advanced: 0, completed: 0, failed: 0, untracked: 1, recovered: 0, absent: 1,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   });
   assert.equal(readColumn(raw, 'torrent_download', id, 'client_ref'), 'existing-ref');
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitting');
@@ -915,4 +915,26 @@ test('a failed row still advances when the client later reports it completed, gu
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'completed');
   assert.equal(readColumn(raw, 'torrent_download', id, 'storage_path'), '/downloads/movie.mkv');
   assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 900);
+});
+
+test('walkSnapshot settles a submitting row the client never confirmed, after recovery has had its chance', () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const now = 10_000_000;
+  const stale = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'never'), downloadClientId: clientId });
+  const recoverable = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'found'), downloadClientId: clientId });
+  const young = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'young'), downloadClientId: clientId });
+  for (const id of [stale, recoverable]) raw.prepare('UPDATE torrent_download SET created_at = ? WHERE id = ?').run(now - 660_000, id);
+  raw.prepare('UPDATE torrent_download SET created_at = ? WHERE id = ?').run(now - 540_000, young);
+
+  // `found.mkv` is in the client's queue under our category, so recovery attaches its ref first.
+  const result = walkSnapshot(deps(raw, clientId, {
+    now,
+    snapshot: { complete: true, queue: [queueEntry({ ref: 'ref-found', name: 'found.mkv' })], history: [], unreadable: [] },
+  }));
+
+  assert.equal(readColumn(raw, 'torrent_download', stale, 'status'), 'failed');
+  assert.notEqual(readColumn(raw, 'torrent_download', recoverable, 'status'), 'failed', 'recovered in the same tick, not failed');
+  assert.equal(readColumn(raw, 'torrent_download', young, 'status'), 'submitting', 'nine minutes old: left alone');
+  assert.equal(result.unconfirmed, 1);
 });

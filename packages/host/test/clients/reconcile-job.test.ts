@@ -921,3 +921,19 @@ test('the summary carries the delivery pass\'s own counters, not only the walk\'
     'a counter from the delivery pass must reach the same line as the walk\'s own',
   );
 });
+
+test('an unreachable client never has its submitting rows settled', async () => {
+  // Review Focus 3: without the client's own list, "never arrived" and
+  // "arrived, not yet seen" look the same.
+  const clock = createClock(10_000_000);
+  const { raw, host, setTimeoutCalls } = setup({ fetch: unreachableFetch, now: clock.now });
+  const clientId = insertClient(raw, { type: 'torrent', implementation: 'qbittorrent' });
+  const rssItemId = seedRssItem(raw, 'x');
+  raw.prepare(`INSERT INTO torrent_download (rss_item_id, download_client_id, status, created_at, updated_at)
+               VALUES (?, ?, 'submitting', 1, 1)`).run(rssItemId, clientId);
+  await host.scheduleReconcile(clientId, 10_000_000);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  const status = raw.prepare('SELECT status FROM torrent_download WHERE rss_item_id = ?').get(rssItemId);
+  assert.equal(status?.['status'], 'submitting');
+});

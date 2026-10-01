@@ -6,6 +6,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import {
   advanceStatus,
   failRow,
+  failUnconfirmed,
   markDelivered,
   markReclaimed,
   rowByRef,
@@ -17,6 +18,7 @@ import {
   setStoragePath,
   unreclaimedRowsForClient,
   unreclaimedRowsForClientSql,
+  UNCONFIRMED_MESSAGE,
 } from '../../src/clients/rows.ts';
 import type { DownloadRow } from '../../src/clients/rows.ts';
 
@@ -508,4 +510,28 @@ test('unreclaimedRowsForClient is served by the status index too, not by a table
     assert.match(plan, new RegExp(`USING INDEX ${table}_status`), `${table} must be searched through its status index`);
     assert.doesNotMatch(plan, new RegExp(`SCAN ${table}`), `${table} must not be scanned`);
   }
+});
+
+test('failUnconfirmed fails only this client\'s submitting rows older than the bound, in both tables', () => {
+  const raw = setup();
+  const mine = seedClient(raw, { name: 'mine' });
+  const other = seedClient(raw, { name: 'other' });
+  const at = (id: number, table: 'torrent_download' | 'nzb_download', createdAt: number): number => {
+    raw.prepare(`UPDATE ${table} SET created_at = ? WHERE id = ?`).run(createdAt, id);
+    return id;
+  };
+  const old = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: mine }), 'torrent_download', 100);
+  const fresh = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: mine }), 'torrent_download', 900);
+  const oldNzb = at(insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: mine }), 'nzb_download', 100);
+  const submitted = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'd'), downloadClientId: mine, status: 'submitted' }), 'torrent_download', 100);
+  const others = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'e'), downloadClientId: other }), 'torrent_download', 100);
+
+  assert.equal(failUnconfirmed(raw, mine, 500, 1000), 2);
+  assert.equal(readColumn(raw, 'torrent_download', old, 'status'), 'failed');
+  assert.equal(readColumn(raw, 'torrent_download', old, 'last_error'), UNCONFIRMED_MESSAGE);
+  assert.equal(readColumn(raw, 'torrent_download', old, 'updated_at'), 1000);
+  assert.equal(readColumn(raw, 'nzb_download', oldNzb, 'status'), 'failed');
+  assert.equal(readColumn(raw, 'torrent_download', fresh, 'status'), 'submitting', 'younger than the bound');
+  assert.equal(readColumn(raw, 'torrent_download', submitted, 'status'), 'submitted', 'only submitting rows');
+  assert.equal(readColumn(raw, 'torrent_download', others, 'status'), 'submitting', 'another client\'s row');
 });

@@ -459,3 +459,34 @@ export function failRow(raw: DatabaseSync, row: DownloadRow, message: string, at
     ).run(message, at, row.id, row.status);
   return result.changes > 0;
 }
+
+/** How long a pick may stay `submitting` before a successful snapshot settles it (#95). Long past the 30-second fetch timeout any submission is bounded by. */
+export const UNCONFIRMED_AFTER_MS = 600_000;
+export const UNCONFIRMED_MESSAGE = 'the client never confirmed this submission';
+
+/**
+ * Fails every `submitting` row on `clientId` created before `createdBefore`,
+ * in both download tables, and answers how many. One statement per table,
+ * guarded on `status = 'submitting'` in the statement itself, so a row that
+ * something else settled first is left alone. Keyed on `created_at`, the
+ * moment the pick was written; `updated_at` moves when `setRef` attaches a
+ * ref to a row that is still `submitting`.
+ *
+ * Two literal statements, not one templated on `table`, matching every
+ * other function in this module: see the module doc for why a table name is
+ * never interpolated, even from the two-member union.
+ *
+ * Called only by `reconcile.ts`'s `walkSnapshot`, after its ref recovery
+ * and only on a successful snapshot. See there.
+ */
+export function failUnconfirmed(raw: DatabaseSync, clientId: number, createdBefore: number, at: number): number {
+  const torrentChanges = raw.prepare(
+    "UPDATE torrent_download SET status = 'failed', last_error = ?, updated_at = ? "
+    + 'WHERE download_client_id = ? AND status = \'submitting\' AND created_at < ?',
+  ).run(UNCONFIRMED_MESSAGE, at, clientId, createdBefore).changes;
+  const nzbChanges = raw.prepare(
+    "UPDATE nzb_download SET status = 'failed', last_error = ?, updated_at = ? "
+    + 'WHERE download_client_id = ? AND status = \'submitting\' AND created_at < ?',
+  ).run(UNCONFIRMED_MESSAGE, at, clientId, createdBefore).changes;
+  return Number(torrentChanges) + Number(nzbChanges);
+}
