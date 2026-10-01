@@ -108,6 +108,7 @@ test('attaching writes the stream headers and one changed event carrying the cur
   assert.equal(r.head()?.headers['content-type'], 'text/event-stream');
   assert.equal(r.head()?.headers['cache-control'], 'no-cache');
   assert.equal(r.head()?.headers['connection'], 'keep-alive');
+  assert.equal(r.head()?.headers['x-accel-buffering'], 'no', 'nginx must not buffer this stream');
   assert.equal(r.body(), `event: changed\ndata: {"cursor":${String(top)},"generation":"gen-1"}\n\n`);
   assert.equal(events.openStreams, 1);
 });
@@ -130,6 +131,28 @@ test('a burst of notify calls publishes once, after the deferral, with the curso
   assert.ok(after.includes('"cursor":5'), after);
   runDeferred();
   assert.equal(r.body().slice(before.length), after, 'a second turn with nothing new publishes nothing');
+});
+
+test('a publish deferred into an open transaction re-defers instead of reading uncommitted rows, and runs once it commits', () => {
+  // Review item 2: this host's `/api/sync` reads on the same connection as
+  // the writer, and SQLite shows a connection its own uncommitted writes --
+  // so publishing while `raw.isTransaction` is true would be read before
+  // `COMMIT`, not merely early. `publish` must re-defer itself instead.
+  const { events, raw, runDeferred } = harness();
+  const r = fakeResponse();
+  events.attach(r.response);
+  const before = r.body();
+
+  raw.exec('BEGIN');
+  events.notify();
+  runDeferred();
+  assert.equal(r.body(), before, 'nothing published while still inside the transaction');
+  assert.equal(events.openStreams, 1, 'the stream is still open, not dropped');
+
+  raw.exec('COMMIT');
+  runDeferred();
+  const after = r.body().slice(before.length);
+  assert.equal(after.split('event: changed').length - 1, 1, 'the deferred publish lands once the transaction commits');
 });
 
 test('the heartbeat is a comment line to every open stream', () => {
@@ -183,6 +206,17 @@ test('the cap refuses the next stream with 503 and admits one again once a strea
   const d = fakeResponse();
   events.attach(d.response);
   assert.equal(d.head()?.status, 200);
+});
+
+test('attaching after close is refused with a distinct reason from the cap', () => {
+  // Review item 7: a 503 after `close()` is not the cap -- the hub itself
+  // is gone -- and must not claim the stream count did it.
+  const { events } = harness();
+  events.close();
+  const r = fakeResponse();
+  events.attach(r.response);
+  assert.equal(r.head()?.status, 503);
+  assert.deepEqual(JSON.parse(r.body()), { error: 'event streams closed' });
 });
 
 test('close ends every stream and stops the heartbeat', () => {

@@ -12,10 +12,19 @@
  * the writing statement. It sets a flag and defers one `publish` with
  * `deps.defer` (`setImmediate` in production). `node:sqlite` is synchronous,
  * so a statement or an await-free transaction has committed before that
- * turn runs, and the cursor read then is the committed one. A transaction
- * that spans an `await` would publish early; the browser then reads what
- * is committed and gets the rest on its fallback poll. No write path does
- * that today.
+ * turn runs, and the cursor read then is the committed one.
+ *
+ * **`publish` checks rather than assumes that.** `GET /api/sync` reads on
+ * the same connection as the writer, and SQLite shows a connection its own
+ * uncommitted writes -- so a transaction spanning an `await` would not just
+ * be "early" if a nudge went out mid-transaction, it would let a request on
+ * this connection read uncommitted rows. `publish` tests
+ * `deps.raw.isTransaction` and, if still inside one, re-defers itself
+ * instead of publishing, leaving `pending` true so nothing else schedules a
+ * second retry in the meantime. No write path in the host spans an `await`
+ * today, so the check is never actually exercised in production -- but that
+ * is a fact about today's write paths, not a property this module can lean
+ * on without checking.
  *
  * **Bounded.** `maxStreams` open responses; the next is answered 503 so the
  * browser falls back to polling and `EventSource` retries later.
@@ -96,8 +105,20 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
   }
 
   function publish(): void {
+    if (closed) {
+      pending = false;
+      return;
+    }
+    if (deps.raw.isTransaction) {
+      // Still inside the writing transaction when this deferred turn ran --
+      // re-defer rather than read `sync_log` on a connection that would see
+      // its own uncommitted write. `pending` stays `true`, so this is the
+      // only retry queued; the module docblock above says why this branch
+      // is unreached by any write path today.
+      deps.defer(publish);
+      return;
+    }
     pending = false;
-    if (closed) return;
     prune();
     const event = changedEvent();
     for (const response of streams) send(response, event);
@@ -116,7 +137,16 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
     },
     attach(response) {
       prune();
-      if (closed || streams.size >= maxStreams) {
+      if (closed) {
+        // Distinct from the cap's refusal below: the hub itself is gone,
+        // not merely full, and a reconnecting `EventSource` is told so
+        // rather than being given a reason ("too many") that would suggest
+        // retrying sooner would help.
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'event streams closed' }));
+        return;
+      }
+      if (streams.size >= maxStreams) {
         response.writeHead(503, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ error: 'too many event streams' }));
         return;
@@ -125,6 +155,10 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
         connection: 'keep-alive',
+        // nginx buffers a proxied response by default, which would hold
+        // every event behind its own buffer instead of flushing it to the
+        // client as written; this tells it not to.
+        'x-accel-buffering': 'no',
       });
       streams.add(response);
       // The removal path: on a real `http.ServerResponse`, `'close'` is how

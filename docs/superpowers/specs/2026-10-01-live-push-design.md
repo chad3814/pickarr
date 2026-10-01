@@ -60,12 +60,20 @@ runs it reads `max(id)` from `sync_log` and `ensureSyncGeneration`'s value, and 
 both to the stream registry (§2). So a burst of writes in one event-loop turn costs one
 read and one nudge.
 
-**Why a nudge after the turn is enough.** `node:sqlite` is synchronous: a single
-statement, or a transaction written without an `await` inside it, has committed before
-the turn ends, so the browser's fetch (which arrives on a later turn) reads committed
-rows. A transaction that spans an `await` would nudge early; the browser then sees only
-what is committed and reads the rest on its next fallback poll (§3). No write path in
-the host does that today, and the listener's docblock says so.
+**Why a nudge after the turn is enough -- and why `publish` checks rather than
+assumes it.** `node:sqlite` is synchronous: a single statement, or a transaction written
+without an `await` inside it, has committed before the turn ends, so the browser's fetch
+(which arrives on a later turn) reads committed rows. A transaction that spans an
+`await` would be a different story: `GET /api/sync` reads on the same connection as the
+writer, and SQLite shows a connection its own uncommitted writes, so a nudge published
+mid-transaction would be read by a request on *this* connection before `COMMIT`, not
+merely early relative to some other reader. `publish` (`sync/events.ts`) does not take
+this on faith -- it checks `DatabaseSync.isTransaction` and, if still inside one,
+re-defers itself via `deps.defer` instead of publishing, leaving `pending` true so the
+already-queued retry is the only one. No write path in the host spans an `await` today,
+so the check never actually fires in production; it exists because that is true of the
+code today, not forever, and the next transaction site that *does* span an `await` gets
+a safe nudge instead of a silently false claim.
 
 ## 2. Host: the stream
 
