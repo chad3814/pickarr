@@ -682,3 +682,47 @@ test('every code in DESTINATION_REFUSALS is one this module can actually answer'
     'the contract`s codes and the ones this writer produces must be the same set',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Clearing an import wait on save (#101)
+// ---------------------------------------------------------------------------
+
+/** A completed torrent download on a `tv` feed, waiting out an import backoff. Returns its id. */
+function seedWaitingImport(raw: DatabaseSync): number {
+  raw.exec(`INSERT INTO download_client (name, type, implementation, url, category, import_mode, created_at, updated_at)
+            VALUES ('c', 'torrent', 'qbittorrent', 'https://c.example', 'tv', 'copy', 1, 1)`);
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('tv', 'f', 'https://example.test/f', 1, 1)");
+  const itemId = Number(raw.prepare(`INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
+    VALUES (1, 'x.mkv', 'https://example.test/x.mkv', 1, 1, 'torrent', 'resolved')`).run().lastInsertRowid);
+  return Number(raw.prepare(`INSERT INTO torrent_download
+      (rss_item_id, download_client_id, status, import_failures, import_retry_at, created_at, updated_at)
+    VALUES (?, 1, 'completed', 4, 999999, 1, 1)`).run(itemId).lastInsertRowid);
+}
+
+function waitOf(raw: DatabaseSync, id: number): Record<string, unknown> {
+  return { ...raw.prepare('SELECT import_failures, import_retry_at FROM torrent_download WHERE id = ?').get(id) };
+}
+
+test('saving a destination clears that plugin\'s waiting imports, so a fixed shape is tried on the next tick', () => {
+  const harness = setup();
+  const rowId = seedWaitingImport(harness.raw);
+  const result = harness.save('tv', {});
+  assert.ok('id' in result, 'the save itself succeeds');
+  assert.deepEqual(waitOf(harness.raw, rowId), { import_failures: 4, import_retry_at: null });
+});
+
+test('a refused save leaves the waiting imports alone', () => {
+  const harness = setup();
+  const rowId = seedWaitingImport(harness.raw);
+  const result = harness.save('tv', { shape: '{nope}.{ext}' });
+  assert.ok('refusal' in result);
+  assert.deepEqual(waitOf(harness.raw, rowId), { import_failures: 4, import_retry_at: 999999 });
+});
+
+test('saving one plugin\'s destination leaves another plugin\'s waiting imports alone', () => {
+  const harness = setup();
+  const rowId = seedWaitingImport(harness.raw);
+  const result = harness.save('movie', {});
+  assert.ok('id' in result);
+  assert.deepEqual(waitOf(harness.raw, rowId), { import_failures: 4, import_retry_at: 999999 });
+});

@@ -41,6 +41,7 @@
  * transition, and would defeat every guard above.
  */
 import type { DatabaseSync } from 'node:sqlite';
+import { doublingDelayMs } from '../jobs/backoff.ts';
 
 export type DownloadStatus =
   'submitting' | 'submitted' | 'downloading' | 'completed' | 'delivered' | 'failed';
@@ -81,6 +82,10 @@ export interface DownloadRow {
    * needs the current value, so it is part of the row.
    */
   lastError: string | null;
+  /** How many imports this row has had refused in a row (#101). Kept across a cleared wait, so a row refused again resumes its ladder rather than starting over. */
+  importFailures: number;
+  /** When this row's next import attempt is due, or `null` when it is not waiting on one (#101). See `importRetryDelayMs`. */
+  importRetryAt: number | null;
 }
 
 /**
@@ -98,7 +103,7 @@ export interface DownloadRow {
  */
 const SELECT_COLUMNS =
   'id, rss_item_id, download_client_id, client_ref, status, storage_path, absent_since, delivered_at, '
-  + 'reclaimed_at, last_error';
+  + 'reclaimed_at, last_error, import_failures, import_retry_at';
 
 /**
  * Narrows one raw row into a `DownloadRow`, the same idiom `clients/config.ts`'s
@@ -116,6 +121,7 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
   const deliveredAt = (raw as { delivered_at: unknown }).delivered_at;
   const reclaimedAt = (raw as { reclaimed_at: unknown }).reclaimed_at;
   const lastError = (raw as { last_error: unknown }).last_error;
+  const importRetryAt = (raw as { import_retry_at: unknown }).import_retry_at;
   const statusValue = String((raw as { status: unknown }).status);
   if (!isDownloadStatus(statusValue)) {
     throw new Error(`${table} row ${id} has unknown status ${JSON.stringify(statusValue)}`);
@@ -132,6 +138,8 @@ function toRow(raw: unknown, table: DownloadRow['table']): DownloadRow {
     deliveredAt: deliveredAt === null || deliveredAt === undefined ? null : Number(deliveredAt),
     reclaimedAt: reclaimedAt === null || reclaimedAt === undefined ? null : Number(reclaimedAt),
     lastError: lastError === null || lastError === undefined ? null : String(lastError),
+    importFailures: Number((raw as { import_failures: unknown }).import_failures ?? 0),
+    importRetryAt: importRetryAt === null || importRetryAt === undefined ? null : Number(importRetryAt),
   };
 }
 
@@ -491,4 +499,64 @@ export function failUnconfirmed(raw: DatabaseSync, clientId: number, createdBefo
     + 'WHERE download_client_id = ? AND status = \'submitting\' AND created_at < ?',
   ).run(UNCONFIRMED_MESSAGE, at, clientId, createdBefore).changes;
   return Number(torrentChanges) + Number(nzbChanges);
+}
+
+/** The first wait after a refused import, doubled per further refusal. */
+const IMPORT_RETRY_BASE_MS = 10_000;
+/** The longest a refused import waits: an operator's fix is still picked up within the hour. */
+const IMPORT_RETRY_CAP_MS = 3_600_000;
+
+export function importRetryDelayMs(failures: number): number {
+  return doublingDelayMs(failures, IMPORT_RETRY_BASE_MS, IMPORT_RETRY_CAP_MS);
+}
+
+/**
+ * Records one refused import on `row`: one more failure, and no retry until
+ * the backoff has passed (#101). Guarded on `status = 'completed'` like every
+ * other writer here. `updated_at` is not moved: this is the host's own
+ * bookkeeping, not a change to the download, and a client reading the row
+ * would see nothing different.
+ *
+ * Two literal statements, not one templated on `row.table`, matching every
+ * other function in this module -- see the module doc for why a table name
+ * is never interpolated, even from the two-member union.
+ */
+export function recordImportRefusal(raw: DatabaseSync, row: DownloadRow, at: number): void {
+  const failures = row.importFailures + 1;
+  const retryAt = at + importRetryDelayMs(failures);
+  if (row.table === 'torrent_download') {
+    raw.prepare(
+      "UPDATE torrent_download SET import_failures = ?, import_retry_at = ? WHERE id = ? AND status = 'completed'",
+    ).run(failures, retryAt, row.id);
+  } else {
+    raw.prepare(
+      "UPDATE nzb_download SET import_failures = ?, import_retry_at = ? WHERE id = ? AND status = 'completed'",
+    ).run(failures, retryAt, row.id);
+  }
+}
+
+/**
+ * Lets every `completed` row owned by `pluginId` be tried on the next tick,
+ * by clearing its wait. Called when that plugin's destination is saved,
+ * because a new destination or shape is the operator's likely fix for a
+ * refused import. `import_failures` is kept, so a row refused again resumes
+ * its ladder where it was.
+ *
+ * Two literal statements, not one templated on `table`, for the same reason
+ * `failUnconfirmed` above is: a table name is never interpolated here, even
+ * from a caller-chosen literal array.
+ */
+export function clearImportWait(raw: DatabaseSync, pluginId: string): void {
+  raw.prepare(`
+    UPDATE torrent_download SET import_retry_at = NULL
+     WHERE status = 'completed' AND import_retry_at IS NOT NULL
+       AND rss_item_id IN (SELECT rss_item.id FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
+                            WHERE rss_feed.plugin_id = ?)
+  `).run(pluginId);
+  raw.prepare(`
+    UPDATE nzb_download SET import_retry_at = NULL
+     WHERE status = 'completed' AND import_retry_at IS NOT NULL
+       AND rss_item_id IN (SELECT rss_item.id FROM rss_item JOIN rss_feed ON rss_feed.id = rss_item.feed_id
+                            WHERE rss_feed.plugin_id = ?)
+  `).run(pluginId);
 }

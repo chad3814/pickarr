@@ -32,10 +32,13 @@
  *    "advance" call, because `rows.ts`'s `markDelivered` already performs it
  *    in the same guarded write.
  *
- * **A throw at any of 1-4 leaves the row `completed`, and logs.** The next
- * tick tries again -- forever, deliberately: a plugin that cannot accept a
- * file is a bug to fix, not a row to abandon, and nothing here dead-letters
- * a completed download the way a job's own retry budget eventually would.
+ * **A throw at any of 1-4 leaves the row `completed`, and logs.** It is
+ * never abandoned -- a plugin that cannot accept a file is a bug to fix, not
+ * a row to give up on, and nothing here dead-letters a completed download
+ * the way a job's own retry budget eventually would -- but since #101 it is
+ * not retried on every tick either: `recordImportRefusal` counts the
+ * refusal and backs the row off on a doubling ladder (`importRetryDelayMs`),
+ * and `deliverCompleted`'s own filter skips it until that wait is over.
  *
  * **A missing file is a delivery failure, not a completion failure, for the
  * same reason.** `stat` throwing does not call `failRow` -- imported by
@@ -103,7 +106,7 @@ import { PluginNotRegisteredError } from '../errors.ts';
 import { mapClientPath } from './paths.ts';
 import { redactText } from './redact.ts';
 import {
-  markDelivered, markReclaimed, rowsForClientByStatus, unreclaimedRowsForClient,
+  markDelivered, markReclaimed, recordImportRefusal, rowsForClientByStatus, unreclaimedRowsForClient,
 } from './rows.ts';
 import type { DownloadRow, DownloadStatus } from './rows.ts';
 
@@ -157,6 +160,13 @@ export interface DeliverResult {
    * than an event.
    */
   undeliverable: number;
+  /**
+   * Imports refused (or thrown) this pass. Each such row stays `completed`
+   * and waits `importRetryDelayMs` before it is tried again (#101). Counted
+   * so a pass that lands nothing while imports are stuck does not look
+   * identical to a quiet one.
+   */
+  refused: number;
 }
 
 /**
@@ -252,7 +262,12 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     }
     // Every other throw from steps 1-4, including `stat` finding nothing
     // there: logged, and the row stays `completed` for the next tick. See
-    // the module doc for why this never calls `failRow`.
+    // the module doc for why this never calls `failRow`. It is also, now,
+    // counted and backed off through `recordImportRefusal` (#101) -- the row
+    // is not retried again until its wait has passed, which is what keeps a
+    // stuck import from being retried every tick forever; the `stat`-missing
+    // path above runs inside this same `try`, so it backs off exactly the
+    // same way.
     //
     // `redactText`, matching `reclaimRows` below. Defence in depth rather
     // than a live leak: nothing that reaches this catch holds a credential
@@ -262,6 +277,8 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
     // in one file no longer differ in a way a reader has to check, and a
     // later step that does build a url (a plugin handed the client's base
     // url, say) cannot leak through the one that was left raw.
+    result.refused += 1;
+    recordImportRefusal(deps.raw, row, deps.now);
     deps.log('failed to deliver a completed download, leaving it completed for the next tick', {
       rowId: row.id,
       error: error instanceof Error ? redactText(error.message) : String(error),
@@ -318,7 +335,7 @@ async function reclaimRows(
  */
 export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult> {
   const result: DeliverResult = {
-    delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0,
+    delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0,
   };
 
   // `status` is narrowed in SQL -- see `rows.ts`'s `rowsForClientByStatus`
@@ -328,9 +345,12 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
   // here, even though `markDelivered` never sets one without the other --
   // stating both is what the module doc's own wording promises, and a future
   // writer of `delivered_at` that broke that pairing would be caught here
-  // rather than silently redelivering, or silently skipping, a row.
+  // rather than silently redelivering, or silently skipping, a row. A row
+  // still inside its import backoff (#101) is not attempted at all -- that
+  // is the whole point of recording one in `recordImportRefusal`.
   const completedRows = rowsForClientByStatus(deps.raw, deps.clientId, DELIVERABLE_STATUSES)
-    .filter((row) => row.status === 'completed' && row.deliveredAt === null);
+    .filter((row) => row.status === 'completed' && row.deliveredAt === null
+      && (row.importRetryAt === null || row.importRetryAt <= deps.now));
   // `storagePath === null` is reported before anything is delivered, rather
   // than dropped by the filter above: a completed row the client cannot
   // place is a standing condition someone has to be able to see. See the

@@ -175,7 +175,7 @@ test('a completed row is delivered to the plugin owning its feed', async () => {
     deliver: async (pluginId, file) => { deliverCalls.push({ pluginId, file }); },
   }));
 
-  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(result, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
   // The path passed to `stat` and to `deliver` is the *mapped* one, never
   // the client's own stored path.
   assert.deepEqual(statCalls, ['/media/movie.mkv']);
@@ -296,17 +296,25 @@ test('a plugin that throws leaves the row completed for the next tick', async ()
 
   let calls = 0;
   const deps = baseDeps(raw, clientId, {
+    now: 1_000,
     stat: async () => ({ sizeBytes: 10 }),
     deliver: async () => { calls += 1; throw new Error('plugin exploded'); },
   });
 
   const first = await deliverCompleted(deps);
-  const second = await deliverCompleted(deps);
+  // A pass before the backoff `first` just recorded is due: not retried, and
+  // not counted as a fresh refusal either (#101).
+  const stillWaiting = await deliverCompleted(deps);
+  // Retried once the backoff `first` recorded has passed -- never abandoned,
+  // just not offered on every tick in between.
+  const second = await deliverCompleted({ ...deps, now: 11_000 });
 
-  // Retried: the same row is offered to the plugin again on the next pass.
-  assert.equal(calls, 2, 'a plugin that keeps throwing must be retried every pass');
+  assert.equal(calls, 2, 'a plugin that keeps throwing is retried once its backoff has passed, not every pass');
   assert.equal(first.delivered, 0);
+  assert.equal(first.refused, 1);
+  assert.equal(stillWaiting.refused, 0, 'not yet due: not attempted');
   assert.equal(second.delivered, 0);
+  assert.equal(second.refused, 1);
   assert.equal(readColumn(raw, id, 'status'), 'completed');
   assert.equal(readColumn(raw, id, 'delivered_at'), null);
 });
@@ -352,8 +360,8 @@ test('a row whose plugin is not registered is reported unowned and retried', asy
   const second = await deliverCompleted(deps);
 
   assert.equal(calls, 2, 'an unowned row must be retried every pass');
-  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
-  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0, refused: 0 });
+  assert.deepEqual(second, { delivered: 0, reclaimed: 0, unowned: 1, reclaimFailures: 0, undeliverable: 0, refused: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'completed');
 });
 
@@ -382,7 +390,7 @@ test('a completed row the client gave no path for is counted and logged on every
   const passes = [await deliverCompleted(deps), await deliverCompleted(deps), await deliverCompleted(deps)];
 
   for (const pass of passes) {
-    assert.deepEqual(pass, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 1 });
+    assert.deepEqual(pass, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 1, refused: 0 });
   }
   assert.deepEqual(logs, [
     { message: 'download client reported this download completed with no storage path, nothing to deliver', detail: { rowId: id } },
@@ -423,7 +431,7 @@ test('a path the client supplies later is delivered, with no un-failing needed',
   raw.prepare('UPDATE torrent_download SET storage_path = ? WHERE id = ?').run('/downloads/movie.mkv', id);
 
   const second = await deliverCompleted(deps);
-  assert.deepEqual(second, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(second, { delivered: 1, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
   assert.deepEqual(deliverCalls, [{
     path: '/media/movie.mkv', sizeBytes: 8, downloadClientId: clientId, rssItemId: itemId, mediaItemId: null,
   }]);
@@ -445,7 +453,7 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
     remove: async (ref) => { removedRefs.push(ref); },
   }));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
   assert.deepEqual(removedRefs, ['ref-1']);
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), 900, 'the mark is what makes the next pass skip this row');
@@ -463,7 +471,7 @@ test('a client with no remove reclaims nothing', async () => {
 
   const result = await deliverCompleted(baseDeps(raw, clientId));
 
-  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0 });
+  assert.deepEqual(result, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
   assert.equal(readColumn(raw, id, 'status'), 'delivered');
   assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
 });
@@ -652,4 +660,27 @@ test('a delivery failure\'s message is redacted, the same way a reclaim failure\
     'the logged message must carry the redacted url, not the raw one',
   );
   assert.equal(readColumn(raw, id, 'status'), 'completed', 'the row is still retried next tick');
+});
+
+test('a refused import is counted, and waits on a doubling ladder before it is tried again', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'x', 'alpha');
+  const rowId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, storagePath: '/downloads/x.mkv' });
+  let calls = 0;
+  const refuse: DeliverDeps['deliver'] = async () => { calls += 1; throw new Error('alpha: this download was not imported (destination-exists)'); };
+
+  const first = await deliverCompleted(baseDeps(raw, clientId, { now: 1_000, deliver: refuse, stat: async () => ({ sizeBytes: 10 }) }));
+  assert.equal(first.refused, 1);
+  assert.equal(readColumn(raw, rowId, 'import_failures'), 1);
+  assert.equal(readColumn(raw, rowId, 'import_retry_at'), 11_000);
+  assert.equal(readColumn(raw, rowId, 'status'), 'completed', 'never terminal');
+
+  const early = await deliverCompleted(baseDeps(raw, clientId, { now: 10_999, deliver: refuse, stat: async () => ({ sizeBytes: 10 }) }));
+  assert.equal(early.refused, 0, 'not yet due: not attempted');
+  assert.equal(calls, 1);
+
+  const second = await deliverCompleted(baseDeps(raw, clientId, { now: 11_000, deliver: refuse, stat: async () => ({ sizeBytes: 10 }) }));
+  assert.equal(second.refused, 1);
+  assert.equal(readColumn(raw, rowId, 'import_retry_at'), 11_000 + 20_000);
 });
