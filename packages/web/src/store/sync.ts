@@ -514,6 +514,7 @@ export function startSync(deps: SyncDeps): SyncHandle {
     for (const cancel of pending.values()) cancel();
     pending.clear();
     closeStream();
+    nudged = false; // a nudge belongs to the lease that heard it
   }
 
   /**

@@ -1194,6 +1194,50 @@ test('a nudge that lands mid-fetch folds into the running tick instead of starti
   assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'no nudge landed this time, so the cadence is unaffected');
 });
 
+test('a pending nudge is forgotten when the tab stops leading', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const tailPage = deferred<SyncResponse>();
+  let fetchCount = 0;
+  const fetch = stubFetch((url: string) => {
+    if (url !== '/api/sync?since=10') throw new Error(`unrouted: ${url}`);
+    fetchCount += 1;
+    return fetchCount === 1 ? tailPage.promise : ok({ ops: [], cursor: 10, generation: 'gen-1' });
+  });
+  const { lease, grant, release } = manualLease();
+  const { sched } = start(db, fetch.fetch, lease, { events });
+
+  grant();
+  await settle();
+  await sched.drive('tail'); // fetch #1 is now in flight, parked on tailPage
+
+  // A nudge lands while that fetch is still running, setting `nudged` --
+  // then the tab is demoted before the fetch ever answers.
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  release();
+  await settle();
+
+  // The orphaned tick finishes after the demotion; `mayFetch()` is false by
+  // then, so it is a no-op (`runOnce`'s own `'handled'` branch), not a
+  // second chance for the stale nudge to take hold.
+  tailPage.resolve(ok({ ops: [], cursor: 10, generation: 'gen-1' }));
+  await settle();
+
+  // Promoted again. A fresh tail tick runs and completes normally -- no new
+  // nudge this time.
+  grant();
+  await settle();
+  await sched.drive('tail'); // fetch #2, answered immediately
+
+  assert.equal(
+    sched.pendingFor('tail')?.delayMs,
+    TAIL_INTERVAL_POLLING_MS,
+    'the nudge the previous lease heard must not force an immediate re-poll under this one',
+  );
+});
+
 test('a changed event with a different generation runs the tail now, and the tail resets', async () => {
   // The nudge only schedules; `runOnce`'s own generation check does the reset.
   const db = await freshDb();
