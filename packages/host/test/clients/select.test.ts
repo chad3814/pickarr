@@ -80,6 +80,66 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+/** Sets a `download_client` row's `consecutive_failures` directly, bypassing `health.ts`'s writers. */
+function markFailures(raw: DatabaseSync, clientId: number, failures: number): void {
+  raw.prepare('UPDATE download_client SET consecutive_failures = ? WHERE id = ?').run(failures, clientId);
+}
+
+test('an unreachable candidate is passed over when another is reachable', () => {
+  const raw = setup();
+  const dead = seedClient(raw, { name: 'dead' });
+  const alive = seedClient(raw, { name: 'alive' });
+  markFailures(raw, dead, 3);
+  const feedId = seedFeed(raw);
+  assert.equal(selectClientForFeed(raw, feedId, refuseToChoose), alive, 'one reachable candidate: no draw at all');
+});
+
+test('the draw is among the reachable candidates only', () => {
+  const raw = setup();
+  const a = seedClient(raw, { name: 'a' });
+  const dead = seedClient(raw, { name: 'dead' });
+  const b = seedClient(raw, { name: 'b' });
+  markFailures(raw, dead, 7);
+  const feedId = seedFeed(raw);
+  const offered: number[] = [];
+  const chosen = selectClientForFeed(raw, feedId, (count) => { offered.push(count); return 1; });
+  assert.deepEqual(offered, [2], 'two reachable candidates offered');
+  assert.equal(chosen, b);
+  assert.notEqual(chosen, a);
+});
+
+test('with every candidate unreachable the draw is from all of them, so picks still go somewhere', () => {
+  const raw = setup();
+  const a = seedClient(raw, { name: 'a' });
+  const b = seedClient(raw, { name: 'b' });
+  markFailures(raw, a, 3);
+  markFailures(raw, b, 3);
+  const feedId = seedFeed(raw);
+  const offered: number[] = [];
+  selectClientForFeed(raw, feedId, (count) => { offered.push(count); return 0; });
+  assert.deepEqual(offered, [2]);
+});
+
+test('two failures is still reachable', () => {
+  const raw = setup();
+  const flaky = seedClient(raw, { name: 'flaky' });
+  seedClient(raw, { name: 'other' });
+  markFailures(raw, flaky, 2);
+  const feedId = seedFeed(raw);
+  const offered: number[] = [];
+  selectClientForFeed(raw, feedId, (count) => { offered.push(count); return 0; });
+  assert.deepEqual(offered, [2]);
+});
+
+test('a feed that names an unreachable client still uses it', () => {
+  const raw = setup();
+  const named = seedClient(raw, { name: 'named' });
+  seedClient(raw, { name: 'other' });
+  markFailures(raw, named, 9);
+  const feedId = seedFeed(raw, { downloadClientId: named });
+  assert.equal(selectClientForFeed(raw, feedId, refuseToChoose), named);
+});
+
 test('a feed that names a client gets that client', () => {
   const raw = setup();
   const first = seedClient(raw, { name: 'First', type: 'torrent' });
