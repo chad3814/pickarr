@@ -503,6 +503,17 @@ export interface DownloadClientSyncRead {
   username: string | null;
   /** `''` means "no category", which is a configuration rather than a missing value (`clients/sabnzbd.ts`). */
   category: string;
+  /**
+   * How many reconcile checks in a row have failed to reach this client, 0
+   * when the last one succeeded. At `CLIENT_UNREACHABLE_AFTER_FAILURES` or
+   * more the client is unreachable: selection passes it over when another
+   * candidate is reachable, and settings says so. Written only when it
+   * changes (`host/src/clients/health.ts`), so a healthy client causes no
+   * sync traffic however often it is polled.
+   */
+  consecutiveFailures: number;
+  /** When the current run of failures began, or `null` when the last check succeeded. */
+  unreachableSince: number | null;
   createdAt: number;
   updatedAt: number;
 }

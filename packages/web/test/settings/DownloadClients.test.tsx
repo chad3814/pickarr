@@ -39,6 +39,8 @@ function clientOp({
   url = 'http://qbit.example:8080',
   username = null,
   category = '',
+  consecutiveFailures,
+  unreachableSince,
 }: {
   id: number;
   name: string;
@@ -47,12 +49,19 @@ function clientOp({
   url?: string;
   username?: string | null;
   category?: string;
+  consecutiveFailures?: number;
+  unreachableSince?: number | null;
 }): SyncOp {
+  const value: Record<string, unknown> = { id, name, type, implementation, url, username, category, createdAt: id, updatedAt: id };
+  // Omit rather than write `undefined`, so a test can build the pre-migration-25 shape a
+  // replicated row may still hold: `ADD COLUMN` touches no existing row (docs/database-migrations.md).
+  if (consecutiveFailures !== undefined) value.consecutiveFailures = consecutiveFailures;
+  if (unreachableSince !== undefined) value.unreachableSince = unreachableSince;
   return {
     op: 'upsert',
     table: 'download_client',
     id,
-    value: { id, name, type, implementation, url, username, category, createdAt: id, updatedAt: id },
+    value,
   };
 }
 
@@ -167,6 +176,17 @@ test('a category is named where there is one', async () => {
 
   await waitFor(() => {
     assert.ok(screen.getByText('Category: movies'));
+  });
+});
+
+test('a client row replicated before migration 25, with no health fields, is still listed', async () => {
+  // Review Focus 1: ADD COLUMN touches no existing row, so a replica can hold
+  // a download_client row with neither key until that row next changes.
+  const db = await freshDb();
+  await seed(db, [clientOp({ id: 1, name: 'Old row' })]); // no health keys
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
+  await waitFor(() => {
+    assert.ok(screen.queryByRole('heading', { name: 'Old row' }), 'the row is not dropped');
   });
 });
 

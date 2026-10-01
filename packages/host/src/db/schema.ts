@@ -36,6 +36,10 @@ export const downloadClient = sqliteTable('download_client', {
   // those rows do inherit 'qbittorrent' -- which is what the default is
   // for.
   implementation: text('implementation').notNull().default('qbittorrent'),
+  // How many reconcile checks in a row have failed to reach this client. Migration 25.
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  // When the current run of failures began, null once the client answers again. Migration 25.
+  unreachableSince: integer('unreachable_since'),
 }, (t) => [
   // A feed names a client by this, so two clients answering to the same name
   // would make that reference ambiguous.
@@ -288,6 +292,10 @@ export const torrentDownload = sqliteTable('torrent_download', {
   // history the column has no way to know. See `clients/deliver.ts`'s module
   // doc for what happens without it.
   reclaimedAt: integer('reclaimed_at'),
+  // How many import attempts this download has had refused, host-only bookkeeping for `clients/deliver.ts`. Migration 25.
+  importFailures: integer('import_failures').notNull().default(0),
+  // When this row's import may next be retried, host-only. Migration 25.
+  importRetryAt: integer('import_retry_at'),
 }, (t) => [
   // Partial, not total: many unconfirmed rows (client_ref IS NULL) must be
   // free to coexist so a crashed submission can be retried rather than
@@ -343,6 +351,10 @@ export const nzbDownload = sqliteTable('nzb_download', {
   deliveredAt: integer('delivered_at'),
   // See `torrentDownload.reclaimedAt`.
   reclaimedAt: integer('reclaimed_at'),
+  // See `torrentDownload.importFailures`.
+  importFailures: integer('import_failures').notNull().default(0),
+  // See `torrentDownload.importRetryAt`.
+  importRetryAt: integer('import_retry_at'),
 }, (t) => [
   uniqueIndex('nzb_download_client_ref')
     .on(t.downloadClientId, t.clientRef)
