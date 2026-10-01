@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
@@ -969,3 +972,100 @@ test('an unreachable client never has its submitting rows settled', async () => 
   const status = raw.prepare('SELECT status FROM torrent_download WHERE rss_item_id = ?').get(rssItemId);
   assert.equal(status?.['status'], 'submitting');
 });
+
+// --- The dispatcher's timeout, not a second reschedule -----------------
+//
+// `run-job.ts`'s `runJob` readies this job's own row on timeout while the
+// handler keeps running. A handler that reschedules unconditionally after
+// that enqueues a sibling job for the same client regardless -- two cycles
+// running at once, and `deliver()` able to run twice for one completed row.
+// These drive the handler directly with an `AbortController`, the same
+// signal shape the dispatcher's own timeout produces.
+
+test('a tick abandoned because its own job was already reclaimed does not reschedule or deliver', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  const rssItemId = seedRssItem(raw, 'z');
+  const rowId = insertNzbRow(raw, { rssItemId, downloadClientId: clientId, clientRef: 'ref-1', status: 'completed' });
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-reconcile-abandon-'));
+  const filePath = join(dir, 'z.mkv');
+  await writeFile(filePath, 'content');
+  raw.prepare('UPDATE nzb_download SET storage_path = ? WHERE id = ?').run(filePath, rowId);
+
+  const controller = new AbortController();
+  const fetch = fakeQueuedFetch(async (url) => {
+    // Simulates the dispatcher's timeout firing while the snapshot request
+    // is still in flight: the signal aborts, and the request still answers
+    // normally afterwards -- nothing here cancels an in-flight request.
+    controller.abort();
+    if (isQueueRequest(url)) {
+      return { queue: { noofslots: 0, slots: [] } };
+    }
+    return { history: { noofslots: 0, slots: [] } };
+  });
+
+  const enqueued: unknown[] = [];
+  const jobs: JobQueue = { enqueue: async (input) => { enqueued.push(input); return 99; } };
+  let delivered = false;
+
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    secrets: makeSecrets(raw),
+    now: () => 900,
+    log: () => {},
+    deliver: async () => { delivered = true; },
+  });
+
+  await handler(
+    { id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 },
+    fakeContext(jobs),
+    controller.signal,
+  );
+
+  assert.equal(enqueued.length, 0, 'an abandoned tick must not enqueue a sibling reconcile job');
+  assert.equal(delivered, false, 'an abandoned tick must not run delivery');
+  assert.equal(readNzbColumn(raw, rowId, 'status'), 'completed', 'the row is untouched -- the walk never ran either');
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('a tick whose signal is not aborted reschedules and delivers normally', async () => {
+  // The control for the test above: the same row, the same fetch shape,
+  // but no abort -- proving the previous test's silence is the abort check
+  // and not some other reason nothing happened.
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  const rssItemId = seedRssItem(raw, 'z2');
+  const rowId = insertNzbRow(raw, { rssItemId, downloadClientId: clientId, clientRef: 'ref-2', status: 'completed' });
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-reconcile-deliver-'));
+  const filePath = join(dir, 'z2.mkv');
+  await writeFile(filePath, 'content');
+  raw.prepare('UPDATE nzb_download SET storage_path = ? WHERE id = ?').run(filePath, rowId);
+
+  const fetch = sabnzbdFetch({});
+  const enqueued: unknown[] = [];
+  const jobs: JobQueue = { enqueue: async (input) => { enqueued.push(input); return 99; } };
+  let delivered = false;
+
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    secrets: makeSecrets(raw),
+    now: () => 900,
+    log: () => {},
+    deliver: async () => { delivered = true; },
+  });
+
+  await handler(
+    { id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 },
+    fakeContext(jobs),
+    new AbortController().signal,
+  );
+
+  assert.equal(enqueued.length, 1, 'a non-abandoned tick must reschedule itself exactly once');
+  assert.equal(delivered, true, 'a non-abandoned tick must deliver the completed row');
+  await rm(dir, { recursive: true, force: true });
+});
+
