@@ -54,7 +54,7 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
 import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts';
-import { realFetch, idleScheduler } from '../store/adapters.ts';
+import { realFetch, idleScheduler, realEventStream } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { subscribeSessionExpired } from '../auth/sessionExpired.ts';
@@ -85,7 +85,7 @@ const DB_NAME = 'pickarr';
  */
 const HOME_CATEGORY: string | undefined = BROWSER_PLUGINS[0]?.id;
 
-/** The real browser adapters (task 4, task 6's brief): `webLocksLease()`'s own default lease name, `Date.now`, `realFetch` and `idleScheduler`. */
+/** The real browser adapters (task 4, task 6's brief): `webLocksLease()`'s own default lease name, `Date.now`, `realFetch`, `idleScheduler` and `realEventStream` (task 3's brief). */
 function defaultDeps(): CreateStoreDeps {
   return {
     dbName: DB_NAME,
@@ -93,6 +93,7 @@ function defaultDeps(): CreateStoreDeps {
     schedule: idleScheduler,
     now: (): number => Date.now(),
     locks: webLocksLease(),
+    events: realEventStream,
   };
 }
 

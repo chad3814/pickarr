@@ -40,7 +40,7 @@ import {
 } from './rows.ts';
 import { subscribe, subscribeInserts, subscribeReset, subscribeTable, subscribeTouched } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
-import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
+import { startSync, type Lease, type OpenEventStream, type Schedule, type SyncFetch } from './sync.ts';
 
 /**
  * What `createStore` needs, and nothing it does not: the replica's name, and
@@ -71,6 +71,8 @@ export interface CreateStoreDeps {
    * leaves this unset, which is the existing 60-second default unchanged.
    */
   fetchDeadlineMs?: number;
+  /** Opens the leader's event stream. Absent means "poll at `sync.ts`'s `TAIL_INTERVAL_POLLING_MS` forever" -- see `SyncDeps.events`'s own doc. */
+  events?: OpenEventStream;
 }
 
 /**
@@ -161,8 +163,10 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     // Omitted entirely rather than set to `undefined` when absent:
     // `exactOptionalPropertyTypes` treats an explicit `undefined` differently
     // from an absent key, and `SyncDeps.fetchDeadlineMs` is typed `number`,
-    // not `number | undefined`.
+    // not `number | undefined`. `SyncDeps.events` is the same shape of
+    // optional field, for the same reason.
     ...(deps.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: deps.fetchDeadlineMs }),
+    ...(deps.events === undefined ? {} : { events: deps.events }),
   });
 
   return {

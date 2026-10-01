@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { realFetch, idleScheduler } from '../../src/store/adapters.ts';
+import { realFetch, idleScheduler, realEventStream } from '../../src/store/adapters.ts';
 
 /**
  * Everything a test stubs on a global here is undone in `afterEach`, which
@@ -307,4 +307,26 @@ test('idleScheduler honours delayMs as a floor even when the browser is immediat
     elapsedMs >= delayMs,
     `run fired after ${elapsedMs}ms, before its ${delayMs}ms floor had elapsed -- an immediately-idle browser must not be able to skip the floor`,
   );
+});
+
+test('realEventStream opens nothing where EventSource does not exist, and an EventSource where it does', () => {
+  // Review Focus 4: jsdom has no EventSource, and neither does node:test.
+  assert.equal(typeof EventSource, 'undefined', 'this environment is the one without it');
+  assert.equal(realEventStream('/api/sync/events'), undefined);
+  class FakeSource {
+    url: string;
+    constructor(url: string) {
+      this.url = url;
+    }
+    addEventListener(): void {}
+    close(): void {}
+  }
+  const g = globalThis as { EventSource?: unknown };
+  g.EventSource = FakeSource;
+  cleanups.push(() => {
+    delete g.EventSource;
+  });
+  const stream = realEventStream('/api/sync/events');
+  assert.ok(stream instanceof FakeSource);
+  assert.equal(stream.url, '/api/sync/events');
 });

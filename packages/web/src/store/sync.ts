@@ -59,8 +59,24 @@ export const LEASE_NAME = 'pickarr-sync';
  * How long after a tail poll *started* the next one starts. Fixed rate
  * rather than fixed delay, which is what {@link SyncDeps.now} is for -- see
  * `nextTailDelay`.
+ *
+ * Two cadences now, not one (design spec §3). While the event stream is
+ * open, a `changed` event runs the tail at once through the same code this
+ * interval schedules -- so the poll is no longer the primary mechanism,
+ * only a safety net for a nudge lost in a proxy, an early nudge raised from
+ * inside a still-open transaction, or a host that has not grown the stream
+ * yet. {@link TAIL_INTERVAL_STREAMING_MS} is that slower, net-only cadence.
+ * While the stream is not open -- no `events` adapter was supplied, this
+ * environment has no `EventSource` (`store/adapters.ts`'s `realEventStream`
+ * answers `undefined` there), or the connection is currently down -- the
+ * poll is the whole mechanism again, and {@link TAIL_INTERVAL_POLLING_MS} is
+ * the faster cadence `TAIL_INTERVAL_MS` used to be unconditionally.
  */
-const TAIL_INTERVAL_MS = 3000;
+export const TAIL_INTERVAL_STREAMING_MS = 30_000;
+export const TAIL_INTERVAL_POLLING_MS = 3_000;
+
+/** Where the leader opens its event stream (design spec §3, Global Constraints). */
+export const EVENTS_URL = '/api/sync/events';
 
 /**
  * The backfill asks for `0`, meaning "as soon as the scheduler will have
@@ -170,6 +186,33 @@ export interface Lease {
   hold(onGranted: (release: Promise<void>) => void): () => void;
 }
 
+/**
+ * The subset of `EventSource` the leader's stream uses, so a test can hand
+ * in a fake rather than a real browser connection (design spec §3).
+ *
+ * Two kinds of event: `open`/`error`, which only say whether the connection
+ * is currently up and drive {@link TAIL_INTERVAL_STREAMING_MS} /
+ * {@link TAIL_INTERVAL_POLLING_MS}; and `changed`, whose `data` is the
+ * host's wire shape (Global Constraints): `{"cursor":<number>,"generation":"<string>"}`.
+ * Nothing else is ever read off a real `EventSource` here, so nothing else
+ * is declared.
+ */
+export interface SyncEventStream {
+  addEventListener(type: 'open' | 'error', listener: () => void): void;
+  addEventListener(type: 'changed', listener: (event: { readonly data: string }) => void): void;
+  close(): void;
+}
+
+/**
+ * Opens a stream at `url`, or answers `undefined` where this environment
+ * has none -- `store/adapters.ts`'s `realEventStream` answers `undefined`
+ * wherever `EventSource` does not exist (this test runner, an old browser).
+ * `undefined` means exactly what a stream that opens and never delivers
+ * would mean: the tail polls at {@link TAIL_INTERVAL_POLLING_MS} for the
+ * life of the tab.
+ */
+export type OpenEventStream = (url: string) => SyncEventStream | undefined;
+
 export interface SyncDeps {
   db: IDBDatabase;
   fetch: SyncFetch;
@@ -183,6 +226,12 @@ export interface SyncDeps {
    */
   fetchDeadlineMs?: number;
   locks: Lease;
+  /**
+   * Opens the leader's event stream (design spec §3). Absent means "poll at
+   * {@link TAIL_INTERVAL_POLLING_MS} forever" -- a test that does not care
+   * about the stream omits it, exactly like every other optional field here.
+   */
+  events?: OpenEventStream;
 }
 
 export interface SyncHandle {
@@ -319,6 +368,40 @@ function parsePage(url: string, loop: SyncLoop, body: unknown): Page {
   return { ops, cursor, generation };
 }
 
+/**
+ * `{"cursor":<number>,"generation":"<string>"}` off a `changed` event's
+ * `data` (Global Constraints), or `undefined` for anything else.
+ *
+ * Unlike `parseBootstrap`/`parsePage`, this never throws: the event's data
+ * is attacker-shaped data off the network same as a response body, but
+ * there is no request here to retry and no caller that wants to -- the
+ * fallback poll already covers whatever a malformed nudge would have said
+ * (design spec §3, Review Focus 3).
+ */
+function parseNudge(data: string): { cursor: number; generation: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  const cursor = asInteger(parsed.cursor);
+  const generation = asGeneration(parsed.generation);
+  if (cursor === undefined || generation === undefined) return undefined;
+  return { cursor, generation };
+}
+
+/**
+ * Logs a `changed` listener's own failure, in the same shape `startSync`'s
+ * own `reportFailure` uses for a tick's. Never handed the event's `data` --
+ * only the error, which is `onChanged`'s own words about its own failure,
+ * never a row (Global Constraints).
+ */
+function reportStreamFailure(err: unknown): void {
+  console.error('pickarr: the sync event stream\'s changed handler failed', err);
+}
+
 /** Refuses the whole batch if any op is of a kind this cursor cannot emit. See {@link WrongOpKindError}. */
 function refuseWrongKinds(loop: SyncLoop, ops: readonly SyncOp[]): void {
   for (const op of ops) {
@@ -352,6 +435,15 @@ export function startSync(deps: SyncDeps): SyncHandle {
   let leading = false;
   const pending = new Map<SyncLoop, Cancel>();
   const failures = new Map<SyncLoop, number>();
+  /** Which loops have a `tick` currently running -- as opposed to `pending`'s *scheduled, not yet run* tasks. A nudge that lands while the tail's own tick is in flight has nothing in `pending` for `schedule` to cancel, so `onChanged` checks this instead of calling `schedule` straight away. */
+  const inFlight = new Set<SyncLoop>();
+  /** A nudge landed while the tail's tick was already running, and its page may postdate what that tick read -- so the tick that is finishing schedules another at `0` once it completes, instead of the nudge being dropped. Cleared once that happens. */
+  let nudged = false;
+
+  /** The leader's own event stream, or `undefined` before one is opened, after it closes, or where `deps.events` is absent. */
+  let stream: SyncEventStream | undefined;
+  /** Whether the stream is currently open -- `nextTailDelay`'s own cadence switch. `false` until an `open` event fires, and again once an `error` fires or the stream closes. */
+  let streaming = false;
 
   const deadlineMs = deps.fetchDeadlineMs ?? FETCH_DEADLINE_MS;
 
@@ -417,15 +509,81 @@ export function startSync(deps: SyncDeps): SyncHandle {
     emit(deserializeChanged(msg.changed));
   });
 
+  /** Cancels both loops' pending tasks and closes the event stream, if one is open. Called from the demotion path and from `stop()`, both below. */
   function stopLoops(): void {
     for (const cancel of pending.values()) cancel();
     pending.clear();
+    closeStream();
+    nudged = false; // a nudge belongs to the lease that heard it
   }
 
   /**
-   * At most one pending task per loop: an existing one is cancelled rather
-   * than left to fire alongside the new one, which is what makes a reset able
-   * to restart both loops without either running twice.
+   * Opens the event stream and wires its three events (design spec §3).
+   * Called once this instance becomes the leader, below -- only the leader
+   * opens a stream; a follower hears about changes over the
+   * `BroadcastChannel` instead, via `onMessage` above. `deps.events` answers
+   * `undefined` where this environment has none (`store/adapters.ts`'s
+   * `realEventStream`), which leaves `stream` unset and `streaming` always
+   * `false` -- exactly a stream that never opens, so the tail polls at
+   * {@link TAIL_INTERVAL_POLLING_MS} for the life of the tab.
+   */
+  function openStream(): void {
+    stream = deps.events?.(EVENTS_URL);
+    stream?.addEventListener('open', () => {
+      streaming = true;
+    });
+    stream?.addEventListener('error', () => {
+      streaming = false;
+    });
+    stream?.addEventListener('changed', (event) => {
+      void onChanged(event.data).catch(reportStreamFailure);
+    });
+  }
+
+  /** Closes the stream, if one is open, and resets the cadence to polling. Called from `stopLoops` above. */
+  function closeStream(): void {
+    stream?.close();
+    stream = undefined;
+    streaming = false;
+  }
+
+  /**
+   * A `changed` event names the host's cursor and generation. A cursor
+   * ahead of ours, or a generation that is not ours, runs the tail now;
+   * `runOnce` then does what it always does, including the generation
+   * reset -- this only schedules, it never resets anything itself. Nothing
+   * else is trusted from the event: a malformed one is ignored (Review
+   * Focus 3), and the fallback poll covers whatever it would have said.
+   *
+   * **A tail tick already in flight has nothing in `pending` for
+   * `schedule` to cancel** -- `tick` clears its own entry before its first
+   * `await` -- so calling `schedule('tail', 0)` here while one is running
+   * would start a second, overlapping fetch rather than replace the first.
+   * The running tick may have read the cursor *before* this nudge's page
+   * existed on the server, so the nudge cannot simply be dropped either:
+   * `nudged` tells the tick that is finishing to schedule another run at
+   * `0` once it is done, which `tick` below honours.
+   */
+  async function onChanged(data: string): Promise<void> {
+    const nudge = parseNudge(data);
+    if (nudge === undefined || !mayFetch()) return;
+    const meta = await readMeta();
+    if (meta === undefined) return; // not bootstrapped yet; `begin` schedules the tail itself (Review Focus 2)
+    if (nudge.generation !== meta.generation || nudge.cursor > meta.cursors.since) {
+      if (inFlight.has('tail')) {
+        nudged = true;
+      } else {
+        schedule('tail', 0);
+      }
+    }
+  }
+
+  /**
+   * At most one *scheduled* task per loop: an existing one is cancelled
+   * rather than left to fire alongside the new one, which is what makes a
+   * reset able to restart both loops without either running twice. A task
+   * already *running* is a different state this map does not hold --
+   * `inFlight` and `nudged` (`onChanged`, `tick`) cover that one instead.
    */
   function schedule(loop: SyncLoop, delayMs: number): void {
     if (!mayFetch()) return;
@@ -514,9 +672,15 @@ export function startSync(deps: SyncDeps): SyncHandle {
     schedule(loop, backoffFor(count));
   }
 
-  /** Fixed rate, not fixed delay: a tick that took 800ms of a 3s interval is followed 2.2s later. */
+  /**
+   * Fixed rate, not fixed delay: a tick that took 800ms of its interval is
+   * followed (interval - 800ms) later. The interval itself switches with
+   * `streaming` -- {@link TAIL_INTERVAL_STREAMING_MS} while the event
+   * stream is open, {@link TAIL_INTERVAL_POLLING_MS} while it is not.
+   */
   function nextTailDelay(startedAt: number): number {
-    return Math.max(0, TAIL_INTERVAL_MS - (now() - startedAt));
+    const interval = streaming ? TAIL_INTERVAL_STREAMING_MS : TAIL_INTERVAL_POLLING_MS;
+    return Math.max(0, interval - (now() - startedAt));
   }
 
   /**
@@ -682,14 +846,25 @@ export function startSync(deps: SyncDeps): SyncHandle {
   async function tick(loop: SyncLoop): Promise<void> {
     pending.delete(loop);
     if (!mayFetch()) return;
+    inFlight.add(loop);
     const startedAt = now();
     try {
       const outcome = await runOnce(loop);
       failures.delete(loop);
       if (outcome !== 'continue') return;
-      schedule(loop, loop === 'tail' ? nextTailDelay(startedAt) : BACKFILL_IDLE_MS);
+      if (loop === 'tail' && nudged) {
+        // A nudge landed while this tick was already running (`onChanged`
+        // above): its page may postdate what this tick just read, so it
+        // runs again at once rather than waiting out the cadence.
+        nudged = false;
+        schedule('tail', 0);
+      } else {
+        schedule(loop, loop === 'tail' ? nextTailDelay(startedAt) : BACKFILL_IDLE_MS);
+      }
     } catch (err) {
       reportFailure(loop, err);
+    } finally {
+      inFlight.delete(loop);
     }
   }
 
@@ -712,14 +887,18 @@ export function startSync(deps: SyncDeps): SyncHandle {
 
   const releaseLease = deps.locks.hold((release) => {
     leading = true;
+    // Only the leader opens a stream (design spec §3): a follower hears
+    // about changes over the `BroadcastChannel` via `onMessage` above, not
+    // from the host directly.
+    openStream();
     // `release` settles once something calls the function `deps.locks.hold`
     // returned -- `stop()` below is the only caller in this module, but
     // `leader.ts`'s own `holdLease` can also settle it on a browser tearing
     // the tab down, which is why this is still driven by the promise rather
     // than by `stop()` alone. Either way, this tab is no longer the one that
-    // fetches, so the loops stop -- but the channel relay above does not,
-    // because a demoted tab still displays rows and still needs to hear
-    // about them.
+    // fetches, so the loops stop and the stream closes too -- but the
+    // channel relay above does not, because a demoted tab still displays
+    // rows and still needs to hear about them.
     void release.then(
       () => {
         leading = false;
