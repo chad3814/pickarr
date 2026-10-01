@@ -109,9 +109,15 @@ counter.
 - **Why 10 minutes.** A submission is bounded by the 30-second fetch timeout, so
   anything still `submitting` long after that was not going to finish.
 
-Only a successful snapshot reaches this step. A client that is down never settles its
-rows: without its list there is no way to tell "never arrived" from "arrived, not yet
-seen".
+Only a snapshot that is both successful and complete reaches this step. A client that is
+down never settles its rows: without its list there is no way to tell "never arrived"
+from "arrived, not yet seen". A client that answered but whose list is only partial
+(a failed page, an unparseable total, the page cap, a malformed body -- none of which
+throw) is the same problem in a milder form: the row this step would fail could be
+sitting on the page the client did not return this tick, and settling it anyway frees
+its unique-index slot for a duplicate re-pick while the original submission is still
+live. `recoverRefs` and the absence sweep already guard on `snapshot.complete` for
+exactly this reason, and the settle step guards on it too.
 
 ## 3. Delivery backoff (#101)
 

@@ -476,8 +476,10 @@ export const UNCONFIRMED_MESSAGE = 'the client never confirmed this submission';
  * other function in this module: see the module doc for why a table name is
  * never interpolated, even from the two-member union.
  *
- * Called only by `reconcile.ts`'s `walkSnapshot`, after its ref recovery
- * and only on a successful snapshot. See there.
+ * Called only by `reconcile.ts`'s `walkSnapshot`, after its ref recovery,
+ * and only when the snapshot is both successful and complete -- a partial
+ * list cannot show a row never arrived, the same reason `recoverRefs` and
+ * `sweepAbsent` guard on `deps.snapshot.complete`. See there.
  */
 export function failUnconfirmed(raw: DatabaseSync, clientId: number, createdBefore: number, at: number): number {
   const torrentChanges = raw.prepare(

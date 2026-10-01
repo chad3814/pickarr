@@ -938,3 +938,24 @@ test('walkSnapshot settles a submitting row the client never confirmed, after re
   assert.equal(readColumn(raw, 'torrent_download', young, 'status'), 'submitting', 'nine minutes old: left alone');
   assert.equal(result.unconfirmed, 1);
 });
+
+test('an incomplete snapshot never settles an unconfirmed row, even one long past the bound', () => {
+  // The same reasoning `recoverRefs` and `sweepAbsent` already apply: a
+  // partial list cannot show a row never arrived, because the row could be
+  // sitting on the page the client failed to return this tick. Failing it
+  // anyway would free its unique-index slot for a duplicate re-pick while
+  // the original submission is still live on the client.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const now = 10_000_000;
+  const stale = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'never'), downloadClientId: clientId });
+  raw.prepare('UPDATE torrent_download SET created_at = ? WHERE id = ?').run(now - 660_000, stale);
+
+  const result = walkSnapshot(deps(raw, clientId, {
+    now,
+    snapshot: { complete: false, queue: [], history: [], unreadable: [] },
+  }));
+
+  assert.equal(result.unconfirmed, 0);
+  assert.equal(readColumn(raw, 'torrent_download', stale, 'status'), 'submitting');
+});

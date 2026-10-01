@@ -87,9 +87,10 @@ export interface ReconcileResult {
   /**
    * `submitting` rows failed because the client never confirmed them within
    * `UNCONFIRMED_AFTER_MS` of being written (#95). Set only by the settle
-   * step `walkSnapshot` runs last, on a successful snapshot -- never on an
-   * unreachable client, which has no list to say whether a row ever
-   * arrived at all.
+   * step `walkSnapshot` runs last, and only when the snapshot is both
+   * successful and complete -- never on an unreachable client, which has no
+   * list to say whether a row ever arrived at all, and never on a partial
+   * one, which cannot show a row never arrived either.
    */
   unconfirmed: number;
 }
@@ -568,7 +569,9 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
  * sees each row's final status for this tick rather than the one it read
  * it at. The unconfirmed-settle step runs last of all, after the sweep, so
  * a row recovery or the walk could still identify this tick is never failed
- * out from under it (#95).
+ * out from under it (#95) -- and, like the sweep immediately above it, only
+ * when the snapshot is complete, since a partial list cannot show a row
+ * never arrived.
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   const result: ReconcileResult = {
@@ -591,9 +594,20 @@ export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   // supply and the walk has advanced every row it can identify. A row still
   // `submitting` this long after its pick was never going to be confirmed,
   // and until it is settled migration 18's unique index refuses a re-pick
-  // (#95). Reached only with a good snapshot: `walkSnapshot` is never called
-  // for a client that could not be contacted.
-  result.unconfirmed = failUnconfirmed(deps.raw, deps.clientId, deps.now - UNCONFIRMED_AFTER_MS, deps.now);
+  // (#95).
+  //
+  // Guarded on `deps.snapshot.complete`, the same reason `recoverRefs` and
+  // `sweepAbsent` both guard on it: a partial list cannot show a row never
+  // arrived. qBittorrent and SABnzbd can both resolve a snapshot with
+  // `complete: false` without throwing -- a failed page, an unparseable
+  // total, hitting the page cap, a response body that is not an array --
+  // and `runTick` treats that as a reachable client, reaching this function
+  // regardless. Failing an old `submitting` row off a page the client
+  // simply did not return this tick would free its unique-index slot for a
+  // duplicate re-pick while the original download is still running.
+  if (deps.snapshot.complete) {
+    result.unconfirmed = failUnconfirmed(deps.raw, deps.clientId, deps.now - UNCONFIRMED_AFTER_MS, deps.now);
+  }
 
   return result;
 }
