@@ -384,41 +384,30 @@ test('a reload finds the replica already populated', async ({ page, harness }) =
   await expect(page.getByTestId('count-tv')).toHaveText('1');
 });
 
-test('a healthy tab does not poll the tail far faster than its 3-second rate', async ({ page, harness }) => {
-  // The whole-branch review's Finding 1, pinned in a real browser rather
-  // than only against `manualScheduler`'s stubbed clock (`adapters.test.ts`'s
-  // own unit test covers that half). `sync.ts`'s `TAIL_INTERVAL_MS = 3000` is
-  // documented as a fixed *rate*, not a fixed delay -- about two `/api/sync`
-  // polls in six seconds -- and that only holds if `idleScheduler` treats its
-  // `delayMs` as a floor. Measured before this fix: an idle Chromium tab
-  // polled the tail **1015 times in 6 seconds**, because `delayMs` was handed
-  // to `requestIdleCallback` as its own `timeout` (a "run by" cap, not a "run
-  // no sooner than" floor), so an idle browser ran it almost immediately
-  // every time.
-  //
-  // The window and the bound are both deliberately loose, and the window is
-  // deliberately *short*. A re-review measured both versions over one second:
-  // the floor honoured gives **1** poll, the floor removed gives **481**. So
-  // two seconds is already twenty times the separation this needs, and the six
-  // seconds this first used cost the whole e2e suite about five of them to
-  // learn nothing more. A bound that loose also cannot flake on a slow CI
-  // runner, while still failing hard the moment the floor stops holding.
-  const tailRequestPathnames: string[] = [];
-  page.on('request', (request) => {
-    const { pathname } = new URL(request.url());
-    // The tail's own url (`/api/sync?since=...`), not the one-shot
-    // `/api/sync/bootstrap` or `/api/sync/backfill` -- both different
-    // pathnames, so neither is counted here.
-    if (pathname === '/api/sync') tailRequestPathnames.push(pathname);
-  });
-
+test('a row seeded on the host reaches the screen within a second, pushed rather than polled', async ({ page, harness }) => {
   await page.goto(harness.origin);
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+  await page.waitForTimeout(1_000);                 // let the stream open and the first poll pass
+  harness.seedMediaItem('tv', 'Pushed Show');
+  await expect(page.getByRole('article')).toBeVisible({ timeout: 1_000 });
+});
 
-  await page.waitForTimeout(2_000);
-
-  expect(tailRequestPathnames.length).toBeLessThan(10);
+test('a quiet tab with the stream open makes at most one tail request in ten seconds', async ({ page, harness }) => {
+  // The poll is a safety net at 30 s while the stream is open (sync.ts's
+  // TAIL_INTERVAL_STREAMING_MS); before this phase it was every 3 s.
+  const tailRequests: string[] = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname === '/api/sync') tailRequests.push(pathname);
+  });
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+  await page.waitForTimeout(1_000);                 // the bootstrap's own first fetch lands here
+  const settled = tailRequests.length;
+  await page.waitForTimeout(10_000);
+  expect(tailRequests.length - settled).toBeLessThanOrEqual(1);
 });
 
 /*
