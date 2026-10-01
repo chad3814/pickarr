@@ -304,15 +304,47 @@ test('a client that cannot be reached is rescheduled with a doubling delay, neve
   assert.equal(clientHealth(raw, clientId).since, 1000, 'the streak began at the first failure');
 });
 
+test('a sabnzbd client that cannot be reached at all is rescheduled with a doubling delay, never dead-lettered', async () => {
+  // The critical fix: `createSabnzbdClient`'s own `snapshot()` used to
+  // swallow a failed queue call AND a failed first history page alike into
+  // a resolved, incomplete snapshot rather than throwing, so a down SAB
+  // never reached this handler as a rejection and `consecutive_failures`
+  // never moved. `unreachableFetch` fails every call, so both the queue
+  // call and the first history page fail here -- the one case `sabnzbd.ts`
+  // now rejects on. This is the SABnzbd-kind counterpart to the
+  // qBittorrent test above.
+  const clock = createClock(1000);
+  const { raw, host, setTimeoutCalls } = setup({ fetch: unreachableFetch, now: clock.now });
+  const clientId = insertClient(raw);
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
+
+  const due1 = reconcileJobRows(raw).find((r) => r.clientId === clientId && r.state === 'ready');
+  assert.ok(due1);
+  clock.set(due1.runAt);
+  await runDue(host, setTimeoutCalls);
+  assert.equal(clientHealth(raw, clientId).failures, 1);
+  const ready1 = reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready');
+  assert.equal(ready1.length, 1);
+  assert.equal(ready1[0]?.runAt, due1.runAt + 10_000);
+
+  const due2 = ready1[0];
+  assert.ok(due2);
+  clock.set(due2.runAt);
+  await runDue(host, setTimeoutCalls);
+  assert.equal(clientHealth(raw, clientId).failures, 2);
+  const ready2 = reconcileJobRows(raw).filter((r) => r.clientId === clientId && r.state === 'ready');
+  assert.equal(ready2.length, 1);
+  assert.equal(ready2[0]?.runAt, due2.runAt + 20_000);
+});
+
 test('the first good snapshot after failures resets health and returns to the 10s cadence', async () => {
-  // A qBittorrent client, not the brief's literal `insertClient(raw)`
-  // (sabnzbd): `createSabnzbdClient`'s own `snapshot()` swallows a failed
-  // queue or history request into an incomplete snapshot rather than
-  // throwing (`sabnzbd.ts`'s `fetchHistoryPages`), so `unreachableFetch`
-  // never reaches this handler as a rejection through that transport --
-  // the same reason the replaced defect-pinning test used qBittorrent, and
-  // the same reason `good` below answers qBittorrent's `/torrents/info`
-  // array shape rather than SABnzbd's `{ queue, history }` one.
+  // A qBittorrent client, not sabnzbd. Either kind now rejects `snapshot()`
+  // on a full outage (both of SAB's calls failing is exactly what
+  // `unreachableFetch` does, so SAB would work here too), but `good` below
+  // answers qBittorrent's `/torrents/info` array shape, which is simpler to
+  // fake for the "reachable again" half of this test than SABnzbd's
+  // `{ queue, history }` shape would be.
   const clock = createClock(1000);
   let reachable = false;
   const fetch = fakeQueuedFetch(async (): Promise<unknown> => {
