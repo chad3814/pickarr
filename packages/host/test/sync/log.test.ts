@@ -338,3 +338,11 @@ test('seedSyncLogOnce still seeds a table whose log entries were written by a tr
   assert.deepEqual(ops(raw), ['upsert:2', 'upsert:1'],
     'row 1 must be indexed too, without moving the entry row 2 already had');
 });
+
+test('each sync trigger body calls pickarr_sync_changed', () => {
+  const raw = open();
+  const bodies = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'probe'").all()
+    .map((row) => String((row as { sql: unknown }).sql));
+  assert.equal(bodies.length, 3);
+  for (const body of bodies) assert.ok(body.includes('pickarr_sync_changed()'), body);
+});
