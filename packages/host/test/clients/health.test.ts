@@ -47,3 +47,12 @@ test('the retry ladder and the reachability threshold', () => {
   assert.equal(isReachable(2), true);
   assert.equal(isReachable(3), false);
 });
+
+test('a failure count of 0 -- the client row vanished mid-tick -- is clamped onto the ladder\'s first rung', () => {
+  // `recordContactFailure` answers 0 when the row it was updating no
+  // longer exists. Unclamped, `doublingDelayMs(0, ...)` reads as one
+  // attempt before the first rung and answers half of it (5s), a delay
+  // off the ladder every real failure count uses.
+  assert.equal(reconcileRetryDelayMs(0), reconcileRetryDelayMs(1));
+  assert.equal(reconcileRetryDelayMs(0), 10_000);
+});

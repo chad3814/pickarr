@@ -182,8 +182,9 @@ export function rowsForClientByStatusSql(table: DownloadRow['table'], statusCoun
  * eight full scans, all materialised through `toRow`. Measured on that
  * shape: 20,000 finished rows with nothing at all to do, one tick took
  * 153 ms. `node:sqlite` is synchronous, so that is 153 ms in which nothing
- * else in the process runs, once per client per minute, growing with
- * lifetime history and never shrinking. This is also the query
+ * else in the process runs, once per client every `RECONCILE_INTERVAL_S`
+ * (10s), growing with lifetime history and never shrinking. This is also
+ * the query
  * `torrent_download_status`/`nzb_download_status` were added for in
  * migration 7 -- until it existed those indexes served nothing.
  *
@@ -369,12 +370,27 @@ export function setRef(raw: DatabaseSync, row: DownloadRow, ref: string, at: num
   return result.changes > 0;
 }
 
-/** Records `row`'s current completion percentage. An observation: never touches `status`. */
+/**
+ * Records `row`'s current completion percentage. An observation: never
+ * touches `status`.
+ *
+ * **Skips the write when the stored percentage already equals `percentage`.**
+ * Stated in the `WHERE` clause (`IS NOT`, not `!=`, so a row that has never
+ * been observed and still holds `NULL` compares correctly) rather than read
+ * and compared in this function: that needs no `percentage` field on
+ * `DownloadRow` at all. Without this, a stalled or paused download -- whose
+ * reported percentage never changes -- wrote, fired this table's own sync
+ * trigger and grew `sync_log`, on every tick forever: at a 10-second
+ * `RECONCILE_INTERVAL_S` that is six churns a minute for a download doing
+ * nothing differently than it was a tick ago.
+ */
 export function setProgress(raw: DatabaseSync, row: DownloadRow, percentage: number, at: number): void {
   if (row.table === 'torrent_download') {
-    raw.prepare('UPDATE torrent_download SET percentage = ?, updated_at = ? WHERE id = ?').run(percentage, at, row.id);
+    raw.prepare('UPDATE torrent_download SET percentage = ?, updated_at = ? WHERE id = ? AND percentage IS NOT ?')
+      .run(percentage, at, row.id, percentage);
   } else {
-    raw.prepare('UPDATE nzb_download SET percentage = ?, updated_at = ? WHERE id = ?').run(percentage, at, row.id);
+    raw.prepare('UPDATE nzb_download SET percentage = ?, updated_at = ? WHERE id = ? AND percentage IS NOT ?')
+      .run(percentage, at, row.id, percentage);
   }
 }
 

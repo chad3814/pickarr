@@ -42,9 +42,17 @@ export function recordContactFailure(raw: DatabaseSync, clientId: number, at: nu
   return typeof failures === 'number' ? failures : 0;
 }
 
-/** How long to wait before contacting a client again after its `failures`th consecutive failure. */
+/**
+ * How long to wait before contacting a client again after its `failures`th
+ * consecutive failure. `failures` below 1 is treated as 1: `recordContactFailure`
+ * answers 0 when the client row it was updating had already vanished, and
+ * that is not a failure count one rung gentler than the first -- it is the
+ * same failure, on a row this host can no longer re-read. Passing 0 straight
+ * through to `doublingDelayMs` would answer 5s, half of the ladder's actual
+ * first rung (10s) and a value nothing else on it ever produces.
+ */
 export function reconcileRetryDelayMs(failures: number): number {
-  return doublingDelayMs(failures, CONTACT_RETRY_BASE_MS, CONTACT_RETRY_CAP_MS);
+  return doublingDelayMs(Math.max(failures, 1), CONTACT_RETRY_BASE_MS, CONTACT_RETRY_CAP_MS);
 }
 
 export function isReachable(consecutiveFailures: number): boolean {

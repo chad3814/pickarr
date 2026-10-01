@@ -213,7 +213,8 @@ export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch):
  * and nobody outside a test had `reclaimed: 0` either.
  *
  * Filtering to the non-zero ones is the choice worth arguing. A settled
- * client ticks once a minute forever with nothing to report, so logging all
+ * client ticks every `RECONCILE_INTERVAL_S` (10s) forever with nothing to
+ * report, so logging all
  * thirteen every time -- twelve of them zero -- is a line an operator
  * learns to skip, and a line nobody reads is worth no more than the silence
  * it replaced. Omitting the zeros means the line's *length* carries
@@ -335,7 +336,12 @@ type TickOutcome =
  * readied this same job, and why the check sits here rather than being
  * threaded into the adapter's own fetches.
  */
-async function runTick(deps: ReconcileHandlerDeps, clientId: number, signal?: AbortSignal): Promise<TickOutcome> {
+async function runTick(
+  deps: ReconcileHandlerDeps,
+  clientId: number,
+  lastUnreadable: Map<number, string>,
+  signal?: AbortSignal,
+): Promise<TickOutcome> {
   let config: Awaited<ReturnType<typeof readClientConfig>>;
   let category: string | null;
   let adapter: ReturnType<typeof buildReconcileAdapter>;
@@ -383,11 +389,26 @@ async function runTick(deps: ReconcileHandlerDeps, clientId: number, signal?: Ab
       // unrecognised status or state shows up as a named value to add to a
       // list, rather than as an unexplained failure with no trace of why.
       //
-      deps.log('client reported status or state values this adapter could not interpret', {
-        clientId,
-        kind: config.kind,
-        values: snapshot.unreadable,
-      });
+      // Logged only when the set of values differs from the last one logged
+      // for this client -- both adapters already answer `unreadable` sorted
+      // (see `snapshot.ts`'s own doc comment), so joining it is a stable key
+      // without this module re-sorting it. Without this, a client stuck
+      // reporting the same unrecognised status would log the identical line
+      // every `RECONCILE_INTERVAL_S` forever.
+      const key = snapshot.unreadable.join(',');
+      if (lastUnreadable.get(clientId) !== key) {
+        deps.log('client reported status or state values this adapter could not interpret', {
+          clientId,
+          kind: config.kind,
+          values: snapshot.unreadable,
+        });
+        lastUnreadable.set(clientId, key);
+      }
+    } else {
+      // Nothing unreadable this tick: forget what was last logged, so a
+      // value that goes away and later comes back is reported again rather
+      // than staying silent because of a match against a stale memory.
+      lastUnreadable.delete(clientId);
     }
 
     const walked = walkSnapshot({
@@ -436,6 +457,13 @@ async function runTick(deps: ReconcileHandlerDeps, clientId: number, signal?: Ab
  * ordering and why each step is where it is.
  */
 export function createReconcileHandler(deps: ReconcileHandlerDeps): JobHandler {
+  // One handler per client-independent dispatcher registration, so one map
+  // closed over here is shared by every tick of every client this handler
+  // ever runs -- which is exactly what lets "the same values as last time"
+  // mean anything. Keyed by `clientId`, holding each client's last-logged
+  // `snapshot.unreadable`, joined (see `runTick`'s own comment on the key).
+  const lastUnreadable = new Map<number, string>();
+
   return async (job: JobRecord, ctx, signal) => {
     const { clientId } = readReconcilePayload(job.payload);
 
@@ -444,7 +472,7 @@ export function createReconcileHandler(deps: ReconcileHandlerDeps): JobHandler {
     // before any other work, including `readClientConfig`.
     if (!clientRowExists(deps.raw, clientId)) return;
 
-    const outcome = await runTick(deps, clientId, signal);
+    const outcome = await runTick(deps, clientId, lastUnreadable, signal);
     // `abandoned` is the one outcome that does not reach `scheduleReconcile`
     // at all -- not even through its `exceptJobId` guard, which would find
     // nothing to except now that the dispatcher's timeout has already moved

@@ -136,8 +136,8 @@ const ADVANCES_TO_COMPLETED: ReadonlySet<DownloadRow['status']> =
  * always asked "is this row somewhere an advance to `completed` is a real
  * transition from?" and skipped the write when it was not. The `failed` arm
  * asked nothing: a failed history entry issued one `UPDATE` per tick against
- * a row it had already failed, forever, at once per minute per client. That
- * cost three things. `updated_at` was rewritten on every tick, so the column
+ * a row it had already failed, forever, at every `RECONCILE_INTERVAL_S`
+ * (10s) per client. That cost three things. `updated_at` was rewritten on every tick, so the column
  * stopped answering "when did this row last change" for exactly the rows an
  * operator is most likely to be looking at. `result.failed` reported a fresh
  * failure every tick, so the count meant "failed rows the client still

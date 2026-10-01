@@ -1069,3 +1069,67 @@ test('a tick whose signal is not aborted reschedules and delivers normally', asy
   await rm(dir, { recursive: true, force: true });
 });
 
+// --- `snapshot.unreadable`, logged only when it changes -----------------
+
+test('the same unreadable values on two consecutive ticks produce one log line', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+
+  const historySlots: Record<string, unknown>[] = [{ nzo_id: 'ref-1', name: 'x.mkv', status: 'weird-status' }];
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return { history: { noofslots: historySlots.length, slots: historySlots } };
+  });
+
+  const { log, lines } = captureLog();
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    secrets: makeSecrets(raw),
+    now: () => 900,
+    log,
+    deliver: async () => { throw new Error('deliver: not used by this test'); },
+  });
+  const jobs: JobQueue = { enqueue: async () => 1 };
+
+  await handler({ id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 }, fakeContext(jobs));
+  await handler({ id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 }, fakeContext(jobs));
+
+  const unreadableLines = lines.filter(
+    (l) => l.message === 'client reported status or state values this adapter could not interpret',
+  );
+  assert.equal(unreadableLines.length, 1, 'the same values on two consecutive ticks must log only once');
+});
+
+test('a new unreadable value logs again', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+
+  let historySlots: Record<string, unknown>[] = [{ nzo_id: 'ref-1', name: 'x.mkv', status: 'weird-status' }];
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: 0, slots: [] } };
+    return { history: { noofslots: historySlots.length, slots: historySlots } };
+  });
+
+  const { log, lines } = captureLog();
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    secrets: makeSecrets(raw),
+    now: () => 900,
+    log,
+    deliver: async () => { throw new Error('deliver: not used by this test'); },
+  });
+  const jobs: JobQueue = { enqueue: async () => 1 };
+
+  await handler({ id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 }, fakeContext(jobs));
+  historySlots = [{ nzo_id: 'ref-1', name: 'x.mkv', status: 'another-weird-status' }];
+  await handler({ id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 }, fakeContext(jobs));
+
+  const unreadableLines = lines.filter(
+    (l) => l.message === 'client reported status or state values this adapter could not interpret',
+  );
+  assert.equal(unreadableLines.length, 2, 'a changed set of values must log again');
+});

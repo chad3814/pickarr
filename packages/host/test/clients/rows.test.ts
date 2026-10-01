@@ -192,6 +192,39 @@ test('recording progress does not move the status', () => {
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitted', 'status must not have moved');
 });
 
+test('recording the same percentage again is a no-op, so the sync log does not grow', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
+  const row: DownloadRow = {
+    id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
+  };
+  const maxSyncLogId = (): number =>
+    Number((raw.prepare('SELECT max(id) AS m FROM sync_log').get() as { m: unknown }).m ?? 0);
+
+  setProgress(raw, row, 10, 100);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 10);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 100);
+  const afterFirstWrite = maxSyncLogId();
+
+  // Same percentage, a later clock: the write must not apply at all --
+  // neither the (unchanged) percentage nor `updated_at` should move, and
+  // nothing should reach `sync_log`, which `torrent_download`'s own update
+  // trigger would otherwise grow on every tick of a stalled or paused
+  // download forever.
+  setProgress(raw, row, 10, 200);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 100, 'an unchanged percentage must not move updated_at');
+  assert.equal(maxSyncLogId(), afterFirstWrite, 'an unchanged percentage must not grow the sync log');
+
+  // A changed percentage still writes, moving both columns and the log.
+  setProgress(raw, row, 20, 300);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 20);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 300);
+  assert.ok(maxSyncLogId() > afterFirstWrite, 'a changed percentage must write and grow the sync log');
+});
+
 test('clearing absence writes null rather than leaving the stamp', () => {
   const raw = setup();
   const itemId = seedRssItem(raw, 'a');
