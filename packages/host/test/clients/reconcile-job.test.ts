@@ -432,6 +432,64 @@ test('a local fault after a good snapshot reschedules at 10s and leaves health a
   assert.equal(ready[0]?.runAt, 1000 + RECONCILE_INTERVAL_S * 1000, 'a fault reschedules at the healthy 10s cadence, not through backoffMs');
 });
 
+test('a fault in the health reset itself is a local fault too, not an escape to the dispatcher', async () => {
+  // Task review Finding 1: `recordContactSuccess` used to run between
+  // `runTick`'s two `try` blocks, so a throw from its own `UPDATE` escaped
+  // `runTick` -- and the handler -- uncaught, reaching `run-job.ts`'s
+  // `failRow` the same way any other unhandled tick used to, which could
+  // dead-letter the reconcile job after enough failures: exactly the
+  // defect this task exists to remove, now reachable through the one write
+  // this task itself added. Moving the call inside the post-snapshot `try`
+  // (`reconcile-job.ts`, the first statement of that block) is the fix;
+  // this is its test.
+  //
+  // The fault is a `BEFORE UPDATE ON download_client` trigger raising
+  // `ABORT`, installed only after a first failing tick has already written
+  // this client's `consecutive_failures` -- so it cannot interfere with
+  // recording that first failure, only with the reset a later good
+  // snapshot's `recordContactSuccess` tries to perform.
+  const clock = createClock(1000);
+  let reachable = false;
+  const fetch = fakeQueuedFetch(async (): Promise<unknown> => {
+    if (!reachable) throw new Error('qbittorrent unreachable');
+    return [];
+  });
+  const { raw, host, setTimeoutCalls } = setup({ fetch, now: clock.now });
+  const clientId = insertClient(raw, { type: 'torrent', implementation: 'qbittorrent' });
+  await host.scheduleReconcile(clientId, 1000);
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  assert.deepEqual(clientHealth(raw, clientId), { failures: 1, since: 1000 }, 'the first tick must have recorded one failure');
+
+  raw.exec(`
+    CREATE TRIGGER fault_on_health_reset BEFORE UPDATE ON download_client
+    BEGIN SELECT RAISE(ABORT, 'injected reset fault');
+    END;
+  `);
+
+  reachable = true;
+  const due = reconcileJobRows(raw).find((r) => r.clientId === clientId && r.state === 'ready');
+  assert.ok(due, 'a retry must be pending after the first failure');
+  clock.set(due.runAt);
+  await runDue(host, setTimeoutCalls);
+
+  const rows = reconcileJobRows(raw).filter((r) => r.clientId === clientId);
+  const ranRow = rows.find((r) => r.id === due.id);
+  assert.equal(ranRow?.state, 'done', 'the tick must end done, not left ready for the dispatcher to retry, nor dead-lettered');
+  const ready = rows.filter((r) => r.state === 'ready');
+  assert.equal(ready.length, 1, 'exactly one reschedule');
+  assert.equal(
+    ready[0]?.runAt,
+    due.runAt + RECONCILE_INTERVAL_S * 1000,
+    'a fault reschedules at the healthy 10s cadence, not through reconcileRetryDelayMs',
+  );
+  assert.deepEqual(
+    clientHealth(raw, clientId),
+    { failures: 1, since: 1000 },
+    'the aborted reset must leave health exactly as the first failure left it',
+  );
+});
+
 test('scheduling is idempotent per client', async () => {
   const { raw, host } = setup();
   const clientId = insertClient(raw);

@@ -315,9 +315,18 @@ async function runTick(deps: ReconcileHandlerDeps, clientId: number): Promise<Ti
     });
     return { kind: 'unreachable', failures };
   }
-  recordContactSuccess(deps.raw, clientId, deps.now());
 
   try {
+    // Inside this `try`, not between the two: a snapshot succeeding says
+    // the client is reachable, but writing that down is still this host's
+    // own work, on a row the tick's post-snapshot phase already owns (see
+    // the module doc). A throw here -- the same injected-`ABORT` fault
+    // `reconcile-job.test.ts` proves against `download_client` -- is a
+    // local fault like any other below, not a reason to leave the client's
+    // last-known `consecutive_failures`/`unreachable_since` only partly
+    // reset, or to let the throw escape to the dispatcher.
+    recordContactSuccess(deps.raw, clientId, deps.now());
+
     if (snapshot.unreadable.length > 0) {
       // See `ClientSnapshot.unreadable`'s own doc comment: this is the one
       // consumer that exists to log these, so an adapter's guess about an
