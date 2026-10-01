@@ -435,6 +435,10 @@ export function startSync(deps: SyncDeps): SyncHandle {
   let leading = false;
   const pending = new Map<SyncLoop, Cancel>();
   const failures = new Map<SyncLoop, number>();
+  /** Which loops have a `tick` currently running -- as opposed to `pending`'s *scheduled, not yet run* tasks. A nudge that lands while the tail's own tick is in flight has nothing in `pending` for `schedule` to cancel, so `onChanged` checks this instead of calling `schedule` straight away. */
+  const inFlight = new Set<SyncLoop>();
+  /** A nudge landed while the tail's tick was already running, and its page may postdate what that tick read -- so the tick that is finishing schedules another at `0` once it completes, instead of the nudge being dropped. Cleared once that happens. */
+  let nudged = false;
 
   /** The leader's own event stream, or `undefined` before one is opened, after it closes, or where `deps.events` is absent. */
   let stream: SyncEventStream | undefined;
@@ -549,19 +553,36 @@ export function startSync(deps: SyncDeps): SyncHandle {
    * reset -- this only schedules, it never resets anything itself. Nothing
    * else is trusted from the event: a malformed one is ignored (Review
    * Focus 3), and the fallback poll covers whatever it would have said.
+   *
+   * **A tail tick already in flight has nothing in `pending` for
+   * `schedule` to cancel** -- `tick` clears its own entry before its first
+   * `await` -- so calling `schedule('tail', 0)` here while one is running
+   * would start a second, overlapping fetch rather than replace the first.
+   * The running tick may have read the cursor *before* this nudge's page
+   * existed on the server, so the nudge cannot simply be dropped either:
+   * `nudged` tells the tick that is finishing to schedule another run at
+   * `0` once it is done, which `tick` below honours.
    */
   async function onChanged(data: string): Promise<void> {
     const nudge = parseNudge(data);
     if (nudge === undefined || !mayFetch()) return;
     const meta = await readMeta();
     if (meta === undefined) return; // not bootstrapped yet; `begin` schedules the tail itself (Review Focus 2)
-    if (nudge.generation !== meta.generation || nudge.cursor > meta.cursors.since) schedule('tail', 0);
+    if (nudge.generation !== meta.generation || nudge.cursor > meta.cursors.since) {
+      if (inFlight.has('tail')) {
+        nudged = true;
+      } else {
+        schedule('tail', 0);
+      }
+    }
   }
 
   /**
-   * At most one pending task per loop: an existing one is cancelled rather
-   * than left to fire alongside the new one, which is what makes a reset able
-   * to restart both loops without either running twice.
+   * At most one *scheduled* task per loop: an existing one is cancelled
+   * rather than left to fire alongside the new one, which is what makes a
+   * reset able to restart both loops without either running twice. A task
+   * already *running* is a different state this map does not hold --
+   * `inFlight` and `nudged` (`onChanged`, `tick`) cover that one instead.
    */
   function schedule(loop: SyncLoop, delayMs: number): void {
     if (!mayFetch()) return;
@@ -824,14 +845,25 @@ export function startSync(deps: SyncDeps): SyncHandle {
   async function tick(loop: SyncLoop): Promise<void> {
     pending.delete(loop);
     if (!mayFetch()) return;
+    inFlight.add(loop);
     const startedAt = now();
     try {
       const outcome = await runOnce(loop);
       failures.delete(loop);
       if (outcome !== 'continue') return;
-      schedule(loop, loop === 'tail' ? nextTailDelay(startedAt) : BACKFILL_IDLE_MS);
+      if (loop === 'tail' && nudged) {
+        // A nudge landed while this tick was already running (`onChanged`
+        // above): its page may postdate what this tick just read, so it
+        // runs again at once rather than waiting out the cadence.
+        nudged = false;
+        schedule('tail', 0);
+      } else {
+        schedule(loop, loop === 'tail' ? nextTailDelay(startedAt) : BACKFILL_IDLE_MS);
+      }
     } catch (err) {
       reportFailure(loop, err);
+    } finally {
+      inFlight.delete(loop);
     }
   }
 

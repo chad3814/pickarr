@@ -1169,6 +1169,31 @@ test('a changed event whose cursor is ahead fetches the tail at once; one that i
   assert.equal(fetch.urls.length, before + 1);
 });
 
+test('a nudge that lands mid-fetch folds into the running tick instead of starting a second one', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const tailPage = deferred<SyncResponse>();
+  const fetch = stubFetch((url: string) => (url === '/api/sync?since=10' ? tailPage.promise : ok({ ops: [], cursor: 10, generation: 'gen-1' })));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+
+  await sched.drive('tail'); // the fetch is now in flight, parked on tailPage
+  const before = fetch.urls.length;
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  assert.equal(fetch.urls.length, before, 'a nudge mid-fetch starts no second, overlapping request');
+  assert.equal(sched.pendingFor('tail'), undefined, 'and schedules nothing new while the tick is still running -- there would be nothing for schedule to cancel anyway');
+
+  tailPage.resolve(ok({ ops: [], cursor: 10, generation: 'gen-1' }));
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'the nudge is honoured once the in-flight tick completes, instead of being dropped');
+
+  // Control: with no nudge landing this time, the next tick returns to the ordinary cadence.
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'no nudge landed this time, so the cadence is unaffected');
+});
+
 test('a changed event with a different generation runs the tail now, and the tail resets', async () => {
   // The nudge only schedules; `runOnce`'s own generation check does the reset.
   const db = await freshDb();
