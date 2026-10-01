@@ -65,19 +65,27 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
     try {
       response.write(chunk);
     } catch {
+      // A backstop, not a known path: `write()` on a destroyed Node stream
+      // returns `false` rather than throwing (confirmed on `node:stream`),
+      // so nothing observed here has actually hit this `catch`. `'close'`
+      // (below) and `prune`'s `destroyed` check are what remove a gone
+      // response; this stays in case some future response shape disagrees.
       streams.delete(response);
     }
   }
 
   /**
-   * Drops a response already gone. `destroyed` flips to `true` the moment
-   * something destroys the underlying socket -- synchronously, in the same
-   * tick -- while the `close` event the handler below also listens for only
-   * fires on a later tick (measured on `node:stream`, Node 24). Without this,
-   * a stream that closed moments ago still counts toward `openStreams` and
-   * the cap until that later tick runs, which is wrong for both: a close
-   * immediately followed by a publish or by the next `attach` must see the
-   * slot as free *now*.
+   * A belt, not the removal path. `'close'` (registered in `attach`, below)
+   * is what normally drops a response that went away. This additionally
+   * drops one whose `destroyed` flag is already `true` by the time a
+   * `publish`, a heartbeat tick, or the next `attach` reaches it -- which
+   * matters when something destroyed the response without ever firing
+   * `'close'` on this hub's listener (the registry was never told), and is
+   * also what `test/sync/events.test.ts`'s fake response relies on, since
+   * its `destroy()` is synchronous while its `'close'` only fires on a
+   * later tick. Nothing here claims that gap exists on a real
+   * `http.ServerResponse`; measured on one, `destroyed` and `'close'`
+   * arrive in the same tick, so `'close'` alone removes it just as fast.
    */
   function prune(): void {
     for (const response of streams) if (response.destroyed) streams.delete(response);
@@ -119,9 +127,10 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
         connection: 'keep-alive',
       });
       streams.add(response);
-      // Defensive: the normal path a real disconnect is noticed on, for a
-      // response `prune` never gets called against again (an idle stream
-      // nobody attaches, notifies or hits the heartbeat on).
+      // The removal path: on a real `http.ServerResponse`, `'close'` is how
+      // a client disconnect is noticed at all, and it fires without this
+      // hub ever calling `prune`, `publish` or the heartbeat again -- an
+      // idle stream nobody touches otherwise still has to be let go.
       response.on('close', () => { streams.delete(response); });
       send(response, changedEvent());
     },

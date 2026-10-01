@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { openTestDatabase, setSyncChangedListener } from '../../src/db/open.ts';
@@ -40,6 +41,38 @@ function fakeResponse(): { response: ServerResponse; head: () => { status: numbe
     body: () => body,
     disconnect: () => { stream.destroy(); },
   };
+}
+
+/**
+ * A response whose `'close'` listeners fire before its `destroyed` flag
+ * flips, and whose flip itself lands on a later tick (`process.nextTick`)
+ * rather than inside the same synchronous call. That gap is what lets a
+ * test tell the hub's `'close'` handler apart from `prune`'s `destroyed`
+ * shortcut: a synchronous assertion right after `emitClose()` sees only
+ * whatever the `'close'` listener did, because the shortcut's own signal
+ * has not arrived yet. Real `http.ServerResponse` carries no such gap --
+ * `destroyed` and `'close'` land in the same tick there -- so this fake
+ * exists to make the listener's own removal path observable in isolation,
+ * not to model production timing.
+ */
+class SlowCloseResponse extends EventEmitter {
+  head: { status: number; headers: Record<string, string> } | undefined;
+  headersSent = false;
+  destroyed = false;
+
+  writeHead(status: number, headers: Record<string, string>): this {
+    this.head = { status, headers };
+    this.headersSent = true;
+    return this;
+  }
+
+  write(): boolean { return true; }
+  end(): this { return this; }
+
+  emitClose(): void {
+    this.emit('close');
+    process.nextTick(() => { this.destroyed = true; });
+  }
 }
 
 function harness(opts: { maxStreams?: number } = {}): {
@@ -119,6 +152,24 @@ test('a stream the client closed is forgotten, and a later publish does not thro
   events.notify();
   assert.doesNotThrow(runDeferred);
   assert.ok(b.body().split('event: changed').length - 1 >= 2, 'the survivor still hears');
+});
+
+test("the 'close' listener removes a stream whose destroyed flag has not caught up yet", () => {
+  // Finding 2: `prune`'s `destroyed` check runs ahead of every read of
+  // `streams`, so a response that is already `destroyed` by the time this
+  // test could inspect it would be dropped by `prune` alone, leaving the
+  // `'close'` listener `attach` registers untested. `SlowCloseResponse`
+  // flips `destroyed` only on a later tick, so this assertion -- run
+  // synchronously, right after `emitClose()` returns, with no `attach`,
+  // `notify` or heartbeat call in between to give `prune` another chance --
+  // can only see a shrink from one place: the `'close'` listener itself.
+  const { events } = harness();
+  const a = new SlowCloseResponse();
+  const b = new SlowCloseResponse();
+  events.attach(a as unknown as ServerResponse);
+  events.attach(b as unknown as ServerResponse);
+  a.emitClose();
+  assert.equal(events.openStreams, 1, "the 'close' listener must have removed it; destroyed has not flipped yet");
 });
 
 test('the cap refuses the next stream with 503 and admits one again once a stream closes', () => {
