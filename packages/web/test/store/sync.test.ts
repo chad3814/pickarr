@@ -1108,6 +1108,29 @@ test('a transient failure still backs off and retries', async () => {
   assert.ok(sched.pendingFor('tail'), 'a 503 is retried');
 });
 
+test('a nudge while the tail is backing off does not cancel the backoff or restart a stopped loop', async () => {
+  // Review item 1: `onChanged` must not undo `reportFailure`'s backoff by
+  // scheduling an immediate retry, and must not re-arm a loop that has
+  // stopped asking on purpose after REFUSAL_LIMIT.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch((): SyncResponse => ({ ok: false, status: 503, json: () => Promise.resolve({}) }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+
+  await sched.drive('tail'); // 503: reportFailure arms a backoff tick
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 1000, 'first failure backs off at the base delay');
+
+  const before = fetch.urls.length;
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+
+  assert.equal(sched.pendingFor('tail')?.delayMs, 1000, 'the nudge must not cancel the pending backoff tick');
+  assert.equal(fetch.urls.length, before, 'and must not start a new request either');
+});
+
 test('a request that outlives the deadline is aborted rather than stalling both loops', async () => {
   // Ruling 21's gap, closed. The two bootstrap fetches run inside the mutex,
   // so before this an unanswered request stalled *both* loops indefinitely --

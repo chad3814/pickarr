@@ -567,6 +567,16 @@ export function startSync(deps: SyncDeps): SyncHandle {
   async function onChanged(data: string): Promise<void> {
     const nudge = parseNudge(data);
     if (nudge === undefined || !mayFetch()) return;
+    // A tail that is currently failing already has its own tick scheduled --
+    // `reportFailure`'s backoff, or nothing at all once `REFUSAL_LIMIT` has
+    // been reached. Scheduling here would cancel that backoff and retry
+    // immediately (`schedule` cancels whatever is pending), or re-arm a loop
+    // that stopped asking on purpose, defeating the log line that just
+    // promised it would stay stopped. A backoff tick fetches on its own once
+    // its delay elapses, and a refusal-stopped loop is meant to stay
+    // stopped, so a failing tail is left alone here; `nudged` is set only
+    // when the tail is not failing, for the same reason.
+    if (failures.has('tail')) return;
     const meta = await readMeta();
     if (meta === undefined) return; // not bootstrapped yet; `begin` schedules the tail itself (Review Focus 2)
     if (nudge.generation !== meta.generation || nudge.cursor > meta.cursors.since) {
