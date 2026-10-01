@@ -5,7 +5,10 @@ import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import {
   advanceStatus,
+  clearImportWait,
   failRow,
+  failUnconfirmed,
+  importRetryDelayMs,
   markDelivered,
   markReclaimed,
   rowByRef,
@@ -17,6 +20,7 @@ import {
   setStoragePath,
   unreclaimedRowsForClient,
   unreclaimedRowsForClientSql,
+  UNCONFIRMED_MESSAGE,
 } from '../../src/clients/rows.ts';
 import type { DownloadRow } from '../../src/clients/rows.ts';
 
@@ -141,7 +145,7 @@ test('an advance from the wrong state changes nothing and says so', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const applied = advanceStatus(raw, row, 'downloading', 'completed', 500);
@@ -158,7 +162,7 @@ test('an advance from the expected state applies and says so', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const applied = advanceStatus(raw, row, 'downloading', 'completed', 500);
@@ -179,13 +183,46 @@ test('recording progress does not move the status', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   setProgress(raw, row, 42, 500);
 
   assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 42);
   assert.equal(readColumn(raw, 'torrent_download', id, 'status'), 'submitted', 'status must not have moved');
+});
+
+test('recording the same percentage again is a no-op, so the sync log does not grow', () => {
+  const raw = setup();
+  const itemId = seedRssItem(raw, 'a');
+  const clientId = seedClient(raw);
+  const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
+  const row: DownloadRow = {
+    id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
+  };
+  const maxSyncLogId = (): number =>
+    Number((raw.prepare('SELECT max(id) AS m FROM sync_log').get() as { m: unknown }).m ?? 0);
+
+  setProgress(raw, row, 10, 100);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 10);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 100);
+  const afterFirstWrite = maxSyncLogId();
+
+  // Same percentage, a later clock: the write must not apply at all --
+  // neither the (unchanged) percentage nor `updated_at` should move, and
+  // nothing should reach `sync_log`, which `torrent_download`'s own update
+  // trigger would otherwise grow on every tick of a stalled or paused
+  // download forever.
+  setProgress(raw, row, 10, 200);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 100, 'an unchanged percentage must not move updated_at');
+  assert.equal(maxSyncLogId(), afterFirstWrite, 'an unchanged percentage must not grow the sync log');
+
+  // A changed percentage still writes, moving both columns and the log.
+  setProgress(raw, row, 20, 300);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'percentage'), 20);
+  assert.equal(readColumn(raw, 'torrent_download', id, 'updated_at'), 300);
+  assert.ok(maxSyncLogId() > afterFirstWrite, 'a changed percentage must write and grow the sync log');
 });
 
 test('clearing absence writes null rather than leaving the stamp', () => {
@@ -195,7 +232,7 @@ test('clearing absence writes null rather than leaving the stamp', () => {
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   setAbsent(raw, row, 900, 900);
@@ -224,7 +261,7 @@ test('a row from each table is advanced in its own table', () => {
 
   const torrentRow: DownloadRow = {
     id: torrentId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const applied = advanceStatus(raw, torrentRow, 'downloading', 'completed', 500);
@@ -241,7 +278,7 @@ test('setStoragePath records the client\'s path without moving the status', () =
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   setStoragePath(raw, row, '/downloads/movie.mkv', 700);
@@ -258,7 +295,7 @@ test('markDelivered applies only from the status the row was read with, and repo
   const staleId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'downloading' });
   const staleRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const staleApplied = markDelivered(raw, staleRow, 900);
@@ -270,7 +307,7 @@ test('markDelivered applies only from the status the row was read with, and repo
   const freshId = insertTorrentRow(raw, { rssItemId: freshItemId, downloadClientId: clientId, status: 'completed' });
   const freshRow: DownloadRow = {
     id: freshId, table: 'torrent_download', rssItemId: freshItemId, downloadClientId: clientId,
-    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const freshApplied = markDelivered(raw, freshRow, 900);
@@ -289,7 +326,7 @@ test('markReclaimed applies once and refuses a row already marked', () => {
   });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: 'ref-1', status: 'delivered', storagePath: null, absentSince: null, deliveredAt: 500, reclaimedAt: null, lastError: null,
+    clientRef: 'ref-1', status: 'delivered', storagePath: null, absentSince: null, deliveredAt: 500, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const firstApplied = markReclaimed(raw, row, 900);
@@ -317,7 +354,7 @@ test('markReclaimed refuses a row that is not delivered', () => {
   });
   const row: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: 'ref-1', status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: 'ref-1', status: 'completed', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const applied = markReclaimed(raw, row, 900);
@@ -334,7 +371,7 @@ test('failRow applies only from the status the row was read with, and reports wh
   const staleId = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const staleRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'downloading', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const staleApplied = failRow(raw, staleRow, 'client unreachable', 900);
@@ -345,7 +382,7 @@ test('failRow applies only from the status the row was read with, and reports wh
 
   const freshRow: DownloadRow = {
     id: staleId, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'submitted', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const freshApplied = failRow(raw, freshRow, 'client unreachable', 900);
@@ -362,7 +399,7 @@ test('setRef applies only from the status the row was read with, and reports whi
   const id = insertTorrentRow(raw, { rssItemId: itemId, downloadClientId: clientId, status: 'submitted' });
   const staleRow: DownloadRow = {
     id, table: 'torrent_download', rssItemId: itemId, downloadClientId: clientId,
-    clientRef: null, status: 'submitting', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null,
+    clientRef: null, status: 'submitting', storagePath: null, absentSince: null, deliveredAt: null, reclaimedAt: null, lastError: null, importFailures: 0, importRetryAt: null,
   };
 
   const staleApplied = setRef(raw, staleRow, 'ref-1', 900);
@@ -508,4 +545,52 @@ test('unreclaimedRowsForClient is served by the status index too, not by a table
     assert.match(plan, new RegExp(`USING INDEX ${table}_status`), `${table} must be searched through its status index`);
     assert.doesNotMatch(plan, new RegExp(`SCAN ${table}`), `${table} must not be scanned`);
   }
+});
+
+test('failUnconfirmed fails only this client\'s submitting rows older than the bound, in both tables', () => {
+  const raw = setup();
+  const mine = seedClient(raw, { name: 'mine' });
+  const other = seedClient(raw, { name: 'other' });
+  const at = (id: number, table: 'torrent_download' | 'nzb_download', createdAt: number): number => {
+    raw.prepare(`UPDATE ${table} SET created_at = ? WHERE id = ?`).run(createdAt, id);
+    return id;
+  };
+  const old = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: mine }), 'torrent_download', 100);
+  const fresh = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: mine }), 'torrent_download', 900);
+  const oldNzb = at(insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: mine }), 'nzb_download', 100);
+  const submitted = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'd'), downloadClientId: mine, status: 'submitted' }), 'torrent_download', 100);
+  const others = at(insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'e'), downloadClientId: other }), 'torrent_download', 100);
+
+  assert.equal(failUnconfirmed(raw, mine, 500, 1000), 2);
+  assert.equal(readColumn(raw, 'torrent_download', old, 'status'), 'failed');
+  assert.equal(readColumn(raw, 'torrent_download', old, 'last_error'), UNCONFIRMED_MESSAGE);
+  assert.equal(readColumn(raw, 'torrent_download', old, 'updated_at'), 1000);
+  assert.equal(readColumn(raw, 'nzb_download', oldNzb, 'status'), 'failed');
+  assert.equal(readColumn(raw, 'torrent_download', fresh, 'status'), 'submitting', 'younger than the bound');
+  assert.equal(readColumn(raw, 'torrent_download', submitted, 'status'), 'submitted', 'only submitting rows');
+  assert.equal(readColumn(raw, 'torrent_download', others, 'status'), 'submitting', 'another client\'s row');
+});
+
+test('importRetryDelayMs doubles from 10s to a one-hour cap', () => {
+  assert.deepEqual([1, 2, 3].map(importRetryDelayMs), [10_000, 20_000, 40_000]);
+  assert.equal(importRetryDelayMs(20), 3_600_000);
+});
+
+test('clearImportWait clears one plugin\'s waiting completed rows and keeps their failure count', () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const alpha = insertTorrentRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: clientId, status: 'completed' });
+  raw.prepare('UPDATE torrent_download SET import_failures = 3, import_retry_at = 999 WHERE id = ?').run(alpha);
+  // A second plugin's feed, seeded directly: this file's seedRssItem always uses plugin 'alpha'.
+  raw.exec("INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES ('beta', 'b-feed', 'https://example.test/b', 1, 1)");
+  const betaFeed = Number((raw.prepare("SELECT id FROM rss_feed WHERE name = 'b-feed'").get() as { id: unknown }).id);
+  const betaItem = Number(raw.prepare(`INSERT INTO rss_item (feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
+    VALUES (?, 'b.mkv', 'https://example.test/b.mkv', 1, 1, 'torrent', 'resolved')`).run(betaFeed).lastInsertRowid);
+  const beta = insertTorrentRow(raw, { rssItemId: betaItem, downloadClientId: clientId, status: 'completed' });
+  raw.prepare('UPDATE torrent_download SET import_failures = 2, import_retry_at = 999 WHERE id = ?').run(beta);
+
+  clearImportWait(raw, 'alpha');
+  assert.equal(readColumn(raw, 'torrent_download', alpha, 'import_retry_at'), null);
+  assert.equal(readColumn(raw, 'torrent_download', alpha, 'import_failures'), 3, 'the count is kept');
+  assert.equal(readColumn(raw, 'torrent_download', beta, 'import_retry_at'), 999, 'another plugin\'s row waits on');
 });

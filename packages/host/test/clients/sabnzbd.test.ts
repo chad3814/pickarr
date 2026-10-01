@@ -481,6 +481,58 @@ test('a queue call that fails reports an incomplete snapshot, not an empty clien
   assert.equal(snapshot.history.length, 1, 'a page that did load must still be usable, not discarded');
 });
 
+test('a history call that fails reports an incomplete snapshot, not an empty client', async () => {
+  // The mirror of the queue-fails case above: the one direction that case
+  // did not cover. A failed first history page must be exactly as partial
+  // as a failed queue call -- resolved, not rejected -- since the queue call
+  // here still answers.
+  const config = makeConfig({ id: 27 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) {
+      return {
+        queue: {
+          noofslots: 1,
+          slots: [{ nzo_id: 'SABnzbd_nzo_q1', filename: 'Queued.Show', percentage: '10', cat: 'tv' }],
+        },
+      };
+    }
+    throw new Error('history unreachable');
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  const snapshot = await client.snapshot();
+
+  assert.equal(snapshot.complete, false);
+  assert.equal(snapshot.queue.length, 1, 'a queue call that did load must still be usable, not discarded');
+  assert.deepEqual(snapshot.history, []);
+});
+
+test('both calls failing is a contact failure, not a resolved empty snapshot', async () => {
+  // The critical fix: before this, a SABnzbd outage never counted against
+  // `consecutive_failures` because `snapshot()` swallowed every rejection
+  // into a resolved, incomplete snapshot. Reject only when the client gave
+  // no answer at all -- the queue call AND the first history page both
+  // failed -- carrying the redacted underlying messages the way
+  // `reconcile-job.ts`'s `runTick` logs a contact failure.
+  const config = makeConfig({ id: 28 });
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) throw new Error('queue unreachable: https://sab.example.com/api?apikey=test-key');
+    throw new Error('history unreachable');
+  });
+  const client = createSabnzbdClient(config, fetch);
+
+  await assert.rejects(
+    client.snapshot(),
+    (err: unknown) => {
+      if (!(err instanceof Error)) return false;
+      return err.message.includes('28')
+        && err.message.includes('queue unreachable')
+        && err.message.includes('history unreachable')
+        && !err.message.includes('test-key');
+    },
+  );
+});
+
 test('a delete refused with HTTP 200 is still a failure', async () => {
   // The trap this module documents at length for `submit`, on the call that
   // was reading nothing at all. Unchecked, `deliver.ts` stamped

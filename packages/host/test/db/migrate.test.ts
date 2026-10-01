@@ -1960,3 +1960,35 @@ test("migration 24 moves a backfilled row's updated_at, so an /api cursor reader
   assert.equal(updatedAt(untouched), 1, 'a row the backfill did not change keeps its updated_at');
   raw.close();
 });
+
+test('migration 25 adds client health and import backoff columns in place, with their defaults', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 24));
+  raw.exec(`
+    INSERT INTO download_client (name, type, implementation, url, category, import_mode, created_at, updated_at)
+      VALUES ('c', 'torrent', 'qbittorrent', 'https://c.example', 'movies', 'copy', 1, 1);
+  `);
+  migrateHost(raw);
+
+  const columns = (table: string): Set<string> => new Set(
+    raw.prepare(`SELECT name FROM pragma_table_info('${table}')`).all()
+      .map((row) => String((row as { name: unknown }).name)),
+  );
+  for (const column of ['consecutive_failures', 'unreachable_since']) {
+    assert.ok(columns('download_client').has(column), `download_client.${column}`);
+  }
+  for (const table of ['torrent_download', 'nzb_download']) {
+    for (const column of ['import_failures', 'import_retry_at']) {
+      assert.ok(columns(table).has(column), `${table}.${column}`);
+    }
+  }
+  const client = raw.prepare('SELECT consecutive_failures, unreachable_since FROM download_client WHERE name = ?').get('c');
+  assert.deepEqual({ ...client }, { consecutive_failures: 0, unreachable_since: null }, 'an existing client starts healthy');
+
+  // ADD COLUMN keeps the triggers (docs/database-migrations.md); prove it by writing through them.
+  const maxLog = (): number => Number((raw.prepare('SELECT max(id) AS m FROM sync_log').get() as { m: unknown }).m ?? 0);
+  const before = maxLog();
+  raw.exec("UPDATE download_client SET consecutive_failures = 1 WHERE name = 'c'");
+  assert.ok(maxLog() > before, 'an update to download_client after migration 25 still logs');
+  raw.close();
+});

@@ -67,23 +67,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * `username` is `string | null` on the wire and both are accepted here --
  * `null` is the answer for a client that authenticates with an api key, not
  * a missing value.
+ *
+ * `consecutiveFailures` and `unreachableSince` may be missing from a row
+ * replicated before host migration 25, because `ADD COLUMN` rewrites no row.
+ * Such a row reads as having no failures, which is what the host holds for
+ * it too (the column's default).
  */
-function isDownloadClient(value: unknown): value is DownloadClientSyncRead {
-  return (
-    isRecord(value) &&
+function toDownloadClient(value: unknown): DownloadClientSyncRead | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!(
     typeof value.id === 'number' &&
     typeof value.name === 'string' &&
     typeof value.implementation === 'string' &&
     typeof value.url === 'string' &&
     typeof value.category === 'string' &&
     (typeof value.username === 'string' || value.username === null)
-  );
+  )) return undefined;
+  const failures = value.consecutiveFailures;
+  const since = value.unreachableSince;
+  if (failures !== undefined && typeof failures !== 'number') return undefined;
+  if (since !== undefined && since !== null && typeof since !== 'number') return undefined;
+  // `type`, `createdAt` and `updatedAt` are narrowed with a fallback rather
+  // than checked, for the reason this function's docblock gives: nothing on
+  // this screen reads them, so a row with one missing or malformed is still
+  // one the old guard would have accepted.
+  return {
+    id: value.id,
+    name: value.name,
+    type: typeof value.type === 'string' ? value.type : '',
+    implementation: value.implementation,
+    url: value.url,
+    username: value.username,
+    category: value.category,
+    consecutiveFailures: failures ?? 0,
+    unreachableSince: since ?? null,
+    createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
+    updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : 0,
+  };
 }
 
 function toClients(rows: readonly StoredRow[]): readonly DownloadClientSyncRead[] {
   const result: DownloadClientSyncRead[] = [];
   for (const row of rows) {
-    if (isDownloadClient(row.value)) result.push(row.value);
+    const client = toDownloadClient(row.value);
+    if (client !== undefined) result.push(client);
   }
   return result;
 }

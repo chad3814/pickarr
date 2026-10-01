@@ -125,7 +125,7 @@
  * has seen it, so after every gather this hook subscribes to each one with
  * `subscribe` and drops the previous gather's set. The cost is one gather
  * per progress write per open card showing that download, and the host
- * writes progress once per `RECONCILE_INTERVAL_S` (60s) per client
+ * writes progress once per `RECONCILE_INTERVAL_S` (10s) per client
  * (`host/src/clients/reconcile-job.ts`), so it is small.
  *
  * **What it still does not subscribe to.** A new `rss_item`: a release

@@ -44,7 +44,7 @@
  * honestly available.
  */
 import type { ReactElement } from 'react';
-import type { AddDownloadClientInput } from '@pickarr/contract';
+import { CLIENT_UNREACHABLE_AFTER_FAILURES, type AddDownloadClientInput, type DownloadClientSyncRead } from '@pickarr/contract';
 import { useDownloadClients, type DownloadClientsSource } from './useDownloadClients.ts';
 import { ClientMappings } from './ClientMappings.tsx';
 import type { ClientMappingsSource } from './useClientMappings.ts';
@@ -70,6 +70,20 @@ export type DownloadClientsListSource = DownloadClientsSource & ClientMappingsSo
 /** The id on one client's name heading, spelled once so the heading and everything named from it cannot disagree. */
 function clientNameId(id: number): string {
   return `download-client-${String(id)}-name`;
+}
+
+/**
+ * One client's health as the settings list states it (#93). The threshold is
+ * `CLIENT_UNREACHABLE_AFTER_FAILURES`, the same constant the host's
+ * selection uses, so this line never calls a client reachable while picks
+ * avoid it. The start of the streak is shown in local time, because it
+ * answers "since when", which is what an operator looking at a dead client
+ * asks first.
+ */
+export function healthLine(client: Pick<DownloadClientSyncRead, 'consecutiveFailures' | 'unreachableSince'>): string {
+  if (client.consecutiveFailures < CLIENT_UNREACHABLE_AFTER_FAILURES) return 'Reachable';
+  const since = client.unreachableSince === null ? 'an unknown time' : new Date(client.unreachableSince).toLocaleString();
+  return `Unreachable since ${since} (${String(client.consecutiveFailures)} failed checks)`;
 }
 
 export interface DownloadClientsProps {
@@ -104,6 +118,7 @@ export function DownloadClients({ source, submit, submitMapping }: DownloadClien
                 */}
                 <h3 id={clientNameId(client.id)}>{client.name}</h3>
                 <p>{implementationLabel(client.implementation)}</p>
+                <p>{healthLine(client)}</p>
                 <p>{client.url === '' ? 'No address recorded.' : client.url}</p>
                 <p>{client.category === '' ? 'No category' : `Category: ${client.category}`}</p>
                 {client.username !== null && <p>{`Signs in as ${client.username}`}</p>}

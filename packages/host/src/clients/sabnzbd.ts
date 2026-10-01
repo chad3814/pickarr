@@ -339,32 +339,36 @@ async function fetchHistoryPages(
   fetch: QueuedFetch,
   collected: HistorySlot[],
   page: number,
-): Promise<{ slots: HistorySlot[]; complete: boolean }> {
+): Promise<{ slots: HistorySlot[]; complete: boolean; firstPageError: unknown }> {
   if (page >= MAX_HISTORY_PAGES) {
     // The cap means "cannot verify the rest," never "this is everything" --
     // see `ClientSnapshot.complete`'s own doc comment.
-    return { slots: collected, complete: false };
+    return { slots: collected, complete: false, firstPageError: undefined };
   }
 
   let body: HistoryResponse;
   try {
     body = await fetch.json<HistoryResponse>(buildHistoryUrl(config, collected.length));
-  } catch {
+  } catch (error) {
     // A page that fails to load is exactly as uninformative as hitting the
     // cap: the pages after it are unknown, so the snapshot is incomplete.
-    return { slots: collected, complete: false };
+    // The error itself is only carried back when this was the *first* page
+    // (`page === 0`): that is the one case `snapshot` below needs to tell
+    // "no answer at all" from "a later page went missing", and only the
+    // first page's failure is ever load-bearing for that decision.
+    return { slots: collected, complete: false, firstPageError: page === 0 ? error : undefined };
   }
 
   const pageSlots = body.history?.slots ?? [];
   const next = [...collected, ...pageSlots];
   const noofslots = body.history?.noofslots;
 
-  if (typeof noofslots !== 'number') return { slots: next, complete: false };
-  if (next.length >= noofslots) return { slots: next, complete: true };
+  if (typeof noofslots !== 'number') return { slots: next, complete: false, firstPageError: undefined };
+  if (next.length >= noofslots) return { slots: next, complete: true, firstPageError: undefined };
   // An empty page before reaching the reported total means the total was
   // wrong -- another request will not fix that, so stop rather than page
   // on to the cap for nothing.
-  if (pageSlots.length === 0) return { slots: next, complete: false };
+  if (pageSlots.length === 0) return { slots: next, complete: false, firstPageError: undefined };
 
   return fetchHistoryPages(config, fetch, next, page + 1);
 }
@@ -431,7 +435,7 @@ export function createSabnzbdClient(
       // error and is what actually routes it into `queueBody = null`.
       queuePromise.catch(() => {});
 
-      const { slots: historySlots, complete: historyComplete } = await fetchHistoryPages(
+      const { slots: historySlots, complete: historyComplete, firstPageError: historyError } = await fetchHistoryPages(
         config,
         fetch,
         [],
@@ -439,15 +443,33 @@ export function createSabnzbdClient(
       );
 
       let queueBody: QueueResponse | null;
+      let queueError: unknown;
       try {
         queueBody = await queuePromise;
-      } catch {
+      } catch (error) {
         // A queue call that fails must not read as an empty client -- see
         // `ClientSnapshot.complete`'s own doc comment. `queue` stays empty
         // below and `complete` is forced false: that combination is what
         // tells a caller "do not conclude absence from this," not "this
         // client holds nothing."
         queueBody = null;
+        queueError = error;
+      }
+
+      // Rejects only when the client gave no answer at all: the queue call
+      // AND the first history page both failed. Either one alone is a
+      // partial answer -- handled below as an incomplete snapshot, same as
+      // today -- but both together mean this tick learned nothing from this
+      // client, and that is a contact failure `runTick` (`reconcile-job.ts`)
+      // must count against its health, not a resolved snapshot it reads as
+      // "reachable, but empty." The message carries both underlying
+      // messages, redacted the same way `runTick` redacts a contact
+      // failure it logs.
+      if (queueError !== undefined && historyError !== undefined) {
+        const detail = [queueError, historyError]
+          .map((error) => (error instanceof Error ? redactText(error.message) : String(error)))
+          .join('; ');
+        throw new Error(`sabnzbd client ${config.id} could not be reached: ${detail}`);
       }
 
       const queueSlots = queueBody?.queue?.slots ?? [];

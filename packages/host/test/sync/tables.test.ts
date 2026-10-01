@@ -412,8 +412,8 @@ test('a download client reaches a client with its address and neither of its sec
   }
   assert.deepEqual(
     Object.keys(row).toSorted(),
-    ['category', 'createdAt', 'id', 'implementation', 'name', 'type', 'updatedAt', 'url', 'username'],
-    'design spec §5 names exactly these nine',
+    ['category', 'consecutiveFailures', 'createdAt', 'id', 'implementation', 'name', 'type', 'unreachableSince', 'updatedAt', 'url', 'username'],
+    'design spec §5 names exactly these eleven',
   );
 
   // Both spellings, and then the contents. The key-set assertion above
@@ -447,6 +447,8 @@ test('a download client reaches a client with its address and neither of its sec
     url: 'http://qbit.local:8080/',
     username: 'admin',
     category: 'tv',
+    consecutiveFailures: 0,
+    unreachableSince: null,
     createdAt: 10,
     updatedAt: 20,
   });
@@ -527,6 +529,8 @@ test('a url that does not parse projects as the empty string, and the row still 
     url: '',
     username: 'admin',
     category: 'tv',
+    consecutiveFailures: 0,
+    unreachableSince: null,
     createdAt: 10,
     updatedAt: 20,
   });
@@ -824,7 +828,8 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
   } satisfies Record<keyof RssFeedSyncRead, true>,
   download_client: {
     id: true, name: true, type: true, implementation: true, url: true,
-    username: true, category: true, createdAt: true, updatedAt: true,
+    username: true, category: true, consecutiveFailures: true, unreachableSince: true,
+    createdAt: true, updatedAt: true,
   } satisfies Record<keyof DownloadClientSyncRead, true>,
   filepath_mapping: {
     id: true, downloadClientId: true, fromPath: true, toPath: true,

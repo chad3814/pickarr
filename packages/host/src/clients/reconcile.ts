@@ -30,8 +30,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { redactText } from './redact.ts';
 import {
-  DOWNLOAD_STATUSES, advanceStatus, failRow, heldRefs, rowByRef, rowsForClientByStatus, setAbsent,
-  setProgress, setRef, setStoragePath,
+  DOWNLOAD_STATUSES, UNCONFIRMED_AFTER_MS, advanceStatus, failRow, failUnconfirmed, heldRefs, rowByRef,
+  rowsForClientByStatus, setAbsent, setProgress, setRef, setStoragePath,
 } from './rows.ts';
 import type { DownloadRow, DownloadStatus } from './rows.ts';
 import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
@@ -84,6 +84,15 @@ export interface ReconcileResult {
    * were worth.
    */
   foreign: number;
+  /**
+   * `submitting` rows failed because the client never confirmed them within
+   * `UNCONFIRMED_AFTER_MS` of being written (#95). Set only by the settle
+   * step `walkSnapshot` runs last, and only when the snapshot is both
+   * successful and complete -- never on an unreachable client, which has no
+   * list to say whether a row ever arrived at all, and never on a partial
+   * one, which cannot show a row never arrived either.
+   */
+  unconfirmed: number;
 }
 
 /**
@@ -127,8 +136,8 @@ const ADVANCES_TO_COMPLETED: ReadonlySet<DownloadRow['status']> =
  * always asked "is this row somewhere an advance to `completed` is a real
  * transition from?" and skipped the write when it was not. The `failed` arm
  * asked nothing: a failed history entry issued one `UPDATE` per tick against
- * a row it had already failed, forever, at once per minute per client. That
- * cost three things. `updated_at` was rewritten on every tick, so the column
+ * a row it had already failed, forever, at every `RECONCILE_INTERVAL_S`
+ * (10s) per client. That cost three things. `updated_at` was rewritten on every tick, so the column
  * stopped answering "when did this row last change" for exactly the rows an
  * operator is most likely to be looking at. `result.failed` reported a fresh
  * failure every tick, so the count meant "failed rows the client still
@@ -558,12 +567,16 @@ function sweepAbsent(deps: ReconcileDeps, result: ReconcileResult): void {
  * this same walk on this same tick, rather than waiting a poll longer. The
  * absence sweep runs last, after every write the walk itself makes, so it
  * sees each row's final status for this tick rather than the one it read
- * it at.
+ * it at. The unconfirmed-settle step runs last of all, after the sweep, so
+ * a row recovery or the walk could still identify this tick is never failed
+ * out from under it (#95) -- and, like the sweep immediately above it, only
+ * when the snapshot is complete, since a partial list cannot show a row
+ * never arrived.
  */
 export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   const result: ReconcileResult = {
     advanced: 0, completed: 0, failed: 0, untracked: 0, recovered: 0, absent: 0,
-    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0,
+    refsAlreadyHeld: 0, recoverFailures: 0, foreign: 0, unconfirmed: 0,
   };
 
   recoverRefs(deps, result);
@@ -576,6 +589,25 @@ export function walkSnapshot(deps: ReconcileDeps): ReconcileResult {
   }
 
   sweepAbsent(deps, result);
+
+  // Last, after recovery has attached every ref the client's own list can
+  // supply and the walk has advanced every row it can identify. A row still
+  // `submitting` this long after its pick was never going to be confirmed,
+  // and until it is settled migration 18's unique index refuses a re-pick
+  // (#95).
+  //
+  // Guarded on `deps.snapshot.complete`, the same reason `recoverRefs` and
+  // `sweepAbsent` both guard on it: a partial list cannot show a row never
+  // arrived. qBittorrent and SABnzbd can both resolve a snapshot with
+  // `complete: false` without throwing -- a failed page, an unparseable
+  // total, hitting the page cap, a response body that is not an array --
+  // and `runTick` treats that as a reachable client, reaching this function
+  // regardless. Failing an old `submitting` row off a page the client
+  // simply did not return this tick would free its unique-index slot for a
+  // duplicate re-pick while the original download is still running.
+  if (deps.snapshot.complete) {
+    result.unconfirmed = failUnconfirmed(deps.raw, deps.clientId, deps.now - UNCONFIRMED_AFTER_MS, deps.now);
+  }
 
   return result;
 }

@@ -437,6 +437,8 @@ function selectSql(table: string, placeholders: string): string | undefined {
       // for its redaction. The two secret-name columns are absent on
       // purpose; see this function's doc and the file's top docblock.
       return `SELECT id, name, type, implementation, url, username, category,
+                      consecutive_failures AS consecutiveFailures,
+                      unreachable_since AS unreachableSince,
                       created_at AS createdAt, updated_at AS updatedAt
                  FROM download_client WHERE id IN (${placeholders})`;
     default:

@@ -36,7 +36,7 @@ export { normalizeVideoResolution } from './videoResolution.ts';
 export type { AddFeedInput, AddFeedRefusalCode } from './feeds.ts';
 export { ADD_FEED_REFUSALS } from './feeds.ts';
 export type { AddDownloadClientInput, AddDownloadClientRefusalCode } from './download-clients.ts';
-export { ADD_DOWNLOAD_CLIENT_REFUSALS } from './download-clients.ts';
+export { ADD_DOWNLOAD_CLIENT_REFUSALS, CLIENT_UNREACHABLE_AFTER_FAILURES } from './download-clients.ts';
 export type { RequestPickRefusalCode, RetryLookupRefusalCode } from './picks.ts';
 export { REQUEST_PICK_REFUSALS, RETRY_LOOKUP_REFUSALS } from './picks.ts';
 export type { AddMappingInput, EditMappingInput, MappingRefusalCode } from './mappings.ts';

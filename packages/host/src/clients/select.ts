@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { ClientTypeMismatchError, NoClientOfTypeError } from '../errors.ts';
+import { isReachable } from './health.ts';
 
 /**
  * The `rss_feed` columns `selectClientForFeed` needs, narrowed the way
@@ -53,10 +54,10 @@ function readClientType(raw: DatabaseSync, clientId: number): ClientTypeRow | un
   };
 }
 
-/** The ids of every `download_client` row of `downloadType`, lowest id first. */
-function readCandidateClientIds(raw: DatabaseSync, downloadType: string): number[] {
-  const rows = raw.prepare('SELECT id FROM download_client WHERE type = ? ORDER BY id').all(downloadType);
-  return rows.map((row) => Number((row as { id: unknown }).id));
+/** Every `download_client` of `downloadType`, lowest id first, with its consecutive-failure count. */
+function readCandidates(raw: DatabaseSync, downloadType: string): { id: number; consecutiveFailures: number }[] {
+  return raw.prepare('SELECT id, consecutive_failures FROM download_client WHERE type = ? ORDER BY id').all(downloadType)
+    .map((row) => ({ id: Number(row['id']), consecutiveFailures: Number(row['consecutive_failures']) }));
 }
 
 /**
@@ -134,11 +135,17 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
     return client.id;
   }
 
-  const candidates = readCandidateClientIds(raw, feed.downloadType);
+  const all = readCandidates(raw, feed.downloadType);
 
-  if (candidates.length === 0) {
+  if (all.length === 0) {
     throw new NoClientOfTypeError(feed);
   }
+
+  // Prefer a client the reconcile cycle can currently reach (#93), and fall
+  // back to every candidate when none is: a health filter that could empty
+  // the list would turn a wrong health reading into a refused pick.
+  const reachable = all.filter((candidate) => isReachable(candidate.consecutiveFailures));
+  const candidates = (reachable.length > 0 ? reachable : all).map((candidate) => candidate.id);
 
   if (candidates.length > 1) {
     // This branch used to refuse. The reasoning it refused with is kept,
@@ -164,13 +171,11 @@ export function selectClientForFeed(raw: DatabaseSync, feedId: number, chooseInd
     // kept the question open. Now that a pick reaches here, refusing would
     // fail a pick on an install whose two clients are both able to take it.
     //
-    // Health is not consulted, because no health state exists to consult:
-    // `download_client` has no status column, no `last_seen` and no failure
-    // counter, and nothing records one per client. So a draw can land on a
-    // client that is down, and will keep doing so one time in N rather than
-    // routing around it. Filed as #93 rather than solved here; an install
-    // with one client of a type -- nearly all of them -- never reaches this
-    // branch at all.
+    // Health is consulted before the draw happens, above: `candidates` is
+    // already narrowed to the reachable ones (or, with none reachable, to
+    // every candidate, so a pick still goes somewhere). An install with one
+    // client of a type -- nearly all of them -- never reaches this branch at
+    // all.
     const index = chooseIndex(candidates.length);
     const chosen = candidates[index];
     if (chosen === undefined) {

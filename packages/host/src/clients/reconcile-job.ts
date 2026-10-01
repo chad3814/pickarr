@@ -6,15 +6,51 @@
  * reschedules itself -- the same shape `host.ts`'s own `poll` job already
  * uses, for the same reasons.
  *
- * **Rescheduling happens only after the whole tick resolves, never around a
- * throw.** A handler that reschedules unconditionally would give a failing
- * client two live cycles for one -- the dispatcher's own retry of this same
- * row, through its backoff curve, *and* a fresh job this handler enqueued
- * regardless -- and every further failure would double the rate again,
- * permanently. Leaving the reschedule off the throw path means a failing
- * tick is retried through the dispatcher's own backoff on the row that is
- * already there, which is what `host.ts`'s `pollHandler` does and what its
- * own doc comment explains at more length.
+ * **The tick never rejects.** `runTick` below catches every failure --
+ * contacting the client (its config, its adapter, its snapshot) is one
+ * phase, and everything the rest of the tick does is another -- and answers
+ * one of four outcomes rather than rejecting: `ok`, `unreachable`, `fault`,
+ * or `abandoned` (see below). `createReconcileHandler`'s handler reaches its
+ * one call to `scheduleReconcile` on every outcome except `abandoned`.
+ *
+ * **The dispatcher's timeout is the one remaining retry path.**
+ * `run-job.ts`'s `runJob` races this handler against `JOB_TIMEOUT_MS` and,
+ * on timeout, readies this very job row -- `state = 'ready'`, a fresh
+ * `run_at` -- while the handler keeps running: nothing can kill a running
+ * JavaScript function, so the timeout bounds the row, not the work (see
+ * `run-job.ts`'s own doc on `JOB_TIMEOUT_MS`). That readied row already IS
+ * the retry; the dispatcher's own timer will pick it back up on its own.
+ * If this handler went on, after that, to call `scheduleReconcile` anyway,
+ * it would enqueue a SECOND, sibling job for the same client:
+ * `scheduleReconcile`'s guard excludes only the row that is itself still
+ * `running`, and the timeout has already moved this row out of `running`
+ * and back to `ready`, so the guard no longer sees anything to decline
+ * against and happily schedules a competing cycle. Two cycles running at
+ * once means `deliver()` can be called twice for the same completed row.
+ *
+ * **So a tick that finds its own job already reclaimed stops, rather than
+ * rescheduling.** `runTick` checks `signal?.aborted` once its snapshot has
+ * resolved -- the one point in the tick cheap enough to check without
+ * threading the signal into every adapter's own fetches, which this module
+ * deliberately does not do (see `buildReconcileAdapter`: no adapter is ever
+ * handed this signal). If the signal is already aborted by then, the tick
+ * abandons: it skips the walk and the delivery pass entirely and answers
+ * `{ kind: 'abandoned' }`. `createReconcileHandler` does not call
+ * `scheduleReconcile` for that outcome -- not even through the
+ * `exceptJobId` guard below, which would find nothing to except now that
+ * the row is `ready` again and decline to schedule anything, silencing the
+ * client's cycle for good. The row the dispatcher already readied is the
+ * only continuation this client needs.
+ *
+ * **In-flight requests still finish.** Checking `signal?.aborted` is not
+ * cancelling anything -- nothing here calls `AbortController.abort` on any
+ * request this tick itself issued, and no adapter is ever given the signal
+ * to cancel with. The snapshot that already resolved finishes exactly as it
+ * would have otherwise; an abandoned tick simply declines to start the
+ * walk and the delivery pass that would have come after it, which is also
+ * why the check sits where it does: after the snapshot, before any of this
+ * host's own post-snapshot writes begin, so an abandoned tick never leaves
+ * one of those half-done.
  *
  * **The client row is read first, before any work.** `readClientConfig`
  * throws on a client id it cannot find, and if that lookup happened only
@@ -58,9 +94,11 @@ import { walkSnapshot } from './reconcile.ts';
 import type { ReconcileResult } from './reconcile.ts';
 import { deliverCompleted } from './deliver.ts';
 import type { DeliverDeps, DeliverResult } from './deliver.ts';
+import { recordContactFailure, recordContactSuccess, reconcileRetryDelayMs } from './health.ts';
+import { redactText } from './redact.ts';
 
 /** How long after a tick resolves before the same client is reconciled again. */
-export const RECONCILE_INTERVAL_S = 60;
+export const RECONCILE_INTERVAL_S = 10;
 
 /**
  * Narrows a `reconcile` job's `unknown` payload rather than casting it, so a
@@ -175,7 +213,8 @@ export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch):
  * and nobody outside a test had `reclaimed: 0` either.
  *
  * Filtering to the non-zero ones is the choice worth arguing. A settled
- * client ticks once a minute forever with nothing to report, so logging all
+ * client ticks every `RECONCILE_INTERVAL_S` (10s) forever with nothing to
+ * report, so logging all
  * thirteen every time -- twelve of them zero -- is a line an operator
  * learns to skip, and a line nobody reads is worth no more than the silence
  * it replaced. Omitting the zeros means the line's *length* carries
@@ -258,10 +297,12 @@ export async function scheduleReconcile(
 }
 
 /**
- * Builds the `reconcile` `JobHandler`. See the module doc for the full
- * ordering and why each step is where it is.
+ * The dependencies `createReconcileHandler` and `runTick` both need. Pulled
+ * out of `createReconcileHandler`'s own parameter so `runTick` can name a
+ * type instead of repeating the inline object type -- the same fields, the
+ * same docblocks, nothing added or dropped.
  */
-export function createReconcileHandler(deps: {
+export interface ReconcileHandlerDeps {
   raw: DatabaseSync;
   fetch: QueuedFetch;
   /**
@@ -274,30 +315,100 @@ export function createReconcileHandler(deps: {
   now: () => number;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
   deliver: (pluginId: string, file: DownloadedFile) => Promise<void>;
-}): JobHandler {
-  return async (job: JobRecord, ctx) => {
-    const { clientId } = readReconcilePayload(job.payload);
+}
 
-    // The client was deleted; end its reconcile cycle rather than dead-letter
-    // on a row that is gone. See the module doc for why this check must run
-    // before any other work, including `readClientConfig`.
-    if (!clientRowExists(deps.raw, clientId)) return;
+/** What one tick decided, for `createReconcileHandler` to turn into a reschedule delay. */
+type TickOutcome =
+  | { kind: 'ok' }
+  | { kind: 'unreachable'; failures: number }
+  | { kind: 'fault' }
+  | { kind: 'abandoned' };
 
-    const config = await readClientConfig(deps.raw, clientId, deps.secrets);
-    const category = normalizeClientCategory(config.category);
-    const adapter = buildReconcileAdapter(config, deps.fetch);
+/**
+ * One tick, never rejecting. Contacting the client (its config, its adapter,
+ * its snapshot) is one phase, and a failure there is the client's: it is
+ * recorded against its health and answered `unreachable`. Everything after a
+ * good snapshot is this host's own work, and a fault there is logged and
+ * answered `fault`, leaving health alone. `signal` is checked once the
+ * snapshot has resolved, and `{ kind: 'abandoned' }` is answered instead of
+ * doing any of that post-snapshot work if it is already aborted -- see the
+ * module doc for why that is the dispatcher's timeout having already
+ * readied this same job, and why the check sits here rather than being
+ * threaded into the adapter's own fetches.
+ */
+async function runTick(
+  deps: ReconcileHandlerDeps,
+  clientId: number,
+  lastUnreadable: Map<number, string>,
+  signal?: AbortSignal,
+): Promise<TickOutcome> {
+  let config: Awaited<ReturnType<typeof readClientConfig>>;
+  let category: string | null;
+  let adapter: ReturnType<typeof buildReconcileAdapter>;
+  let snapshot: ClientSnapshot;
+  try {
+    config = await readClientConfig(deps.raw, clientId, deps.secrets);
+    category = normalizeClientCategory(config.category);
+    adapter = buildReconcileAdapter(config, deps.fetch);
+    snapshot = await adapter.snapshot();
+  } catch (error) {
+    const failures = recordContactFailure(deps.raw, clientId, deps.now());
+    deps.log('could not reach the download client, will try again', {
+      clientId,
+      failures,
+      error: error instanceof Error ? redactText(error.message) : String(error),
+    });
+    return { kind: 'unreachable', failures };
+  }
 
-    const snapshot = await adapter.snapshot();
+  if (signal?.aborted) {
+    // The dispatcher's timeout has already readied this job's own row while
+    // this tick was still waiting on the snapshot above. That readied row
+    // is the retry; see the module doc for why nothing further runs and why
+    // `createReconcileHandler` must not reschedule on this outcome either.
+    deps.log('reconcile tick abandoned: the dispatcher already readied this job, so a sibling job is not needed', {
+      clientId,
+    });
+    return { kind: 'abandoned' };
+  }
+
+  try {
+    // Inside this `try`, not between the two: a snapshot succeeding says
+    // the client is reachable, but writing that down is still this host's
+    // own work, on a row the tick's post-snapshot phase already owns (see
+    // the module doc). A throw here -- the same injected-`ABORT` fault
+    // `reconcile-job.test.ts` proves against `download_client` -- is a
+    // local fault like any other below, not a reason to leave the client's
+    // last-known `consecutive_failures`/`unreachable_since` only partly
+    // reset, or to let the throw escape to the dispatcher.
+    recordContactSuccess(deps.raw, clientId, deps.now());
+
     if (snapshot.unreadable.length > 0) {
       // See `ClientSnapshot.unreadable`'s own doc comment: this is the one
       // consumer that exists to log these, so an adapter's guess about an
       // unrecognised status or state shows up as a named value to add to a
       // list, rather than as an unexplained failure with no trace of why.
-      deps.log('client reported status or state values this adapter could not interpret', {
-        clientId,
-        kind: config.kind,
-        values: snapshot.unreadable,
-      });
+      //
+      // Logged only when the set of values differs from the last one logged
+      // for this client -- both adapters already answer `unreadable` sorted
+      // (see `snapshot.ts`'s own doc comment), so joining it is a stable key
+      // without this module re-sorting it. Without this, a client stuck
+      // reporting the same unrecognised status would log the identical line
+      // every `RECONCILE_INTERVAL_S` forever.
+      const key = snapshot.unreadable.join(',');
+      if (lastUnreadable.get(clientId) !== key) {
+        deps.log('client reported status or state values this adapter could not interpret', {
+          clientId,
+          kind: config.kind,
+          values: snapshot.unreadable,
+        });
+        lastUnreadable.set(clientId, key);
+      }
+    } else {
+      // Nothing unreadable this tick: forget what was last logged, so a
+      // value that goes away and later comes back is reported again rather
+      // than staying silent because of a match against a stale memory.
+      lastUnreadable.delete(clientId);
     }
 
     const walked = walkSnapshot({
@@ -331,16 +442,48 @@ export function createReconcileHandler(deps: {
     // once rather than in two halves a reader has to pair up. See
     // `logTickSummary` for why only the non-zero counters are named.
     logTickSummary(deps.log, clientId, walked, delivery);
-
-    // Reschedule only now that the whole tick has resolved -- see the
-    // module doc for why a throw above must never reach this line.
-    await scheduleReconcile(
-      deps.raw,
-      ctx.jobs,
+    return { kind: 'ok' };
+  } catch (error) {
+    deps.log('a reconcile tick failed after a good snapshot, will try again', {
       clientId,
-      deps.now() + RECONCILE_INTERVAL_S * 1000,
-      job.id,
-      deps.log,
-    );
+      error: error instanceof Error ? redactText(error.message) : String(error),
+    });
+    return { kind: 'fault' };
+  }
+}
+
+/**
+ * Builds the `reconcile` `JobHandler`. See the module doc for the full
+ * ordering and why each step is where it is.
+ */
+export function createReconcileHandler(deps: ReconcileHandlerDeps): JobHandler {
+  // One handler per client-independent dispatcher registration, so one map
+  // closed over here is shared by every tick of every client this handler
+  // ever runs -- which is exactly what lets "the same values as last time"
+  // mean anything. Keyed by `clientId`, holding each client's last-logged
+  // `snapshot.unreadable`, joined (see `runTick`'s own comment on the key).
+  const lastUnreadable = new Map<number, string>();
+
+  return async (job: JobRecord, ctx, signal) => {
+    const { clientId } = readReconcilePayload(job.payload);
+
+    // The client was deleted; end its reconcile cycle rather than dead-letter
+    // on a row that is gone. See the module doc for why this check must run
+    // before any other work, including `readClientConfig`.
+    if (!clientRowExists(deps.raw, clientId)) return;
+
+    const outcome = await runTick(deps, clientId, lastUnreadable, signal);
+    // `abandoned` is the one outcome that does not reach `scheduleReconcile`
+    // at all -- not even through its `exceptJobId` guard, which would find
+    // nothing to except now that the dispatcher's timeout has already moved
+    // this row back to `ready`, and would therefore decline to schedule
+    // anything. See the module doc.
+    if (outcome.kind === 'abandoned') return;
+    const delayMs = outcome.kind === 'unreachable'
+      ? reconcileRetryDelayMs(outcome.failures)
+      : RECONCILE_INTERVAL_S * 1000;
+    // The only reschedule, and every other outcome reaches it: see the
+    // module doc.
+    await scheduleReconcile(deps.raw, ctx.jobs, clientId, deps.now() + delayMs, job.id, deps.log);
   };
 }

@@ -85,6 +85,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DestinationRefusalCode, SaveDestinationRequest } from '@pickarr/contract';
 import { canonicalRoot, unmatchedDirSegments, validateShape } from './shape.ts';
 import type { ShapeRefusalCode } from './shape.ts';
+import { clearImportWait } from '../clients/rows.ts';
 
 /**
  * Where an unmatched release lands when no destination names a directory --
@@ -470,5 +471,9 @@ export function saveDestination(
   if (row === undefined || !('id' in row)) {
     throw new Error('the destination upsert returned no id');
   }
+  // A new destination or shape is the operator's likely fix for a refused
+  // import, so this plugin's waiting rows are offered again on the next
+  // tick rather than left to their backoff. See `clearImportWait` (#101).
+  clearImportWait(deps.raw, pluginId);
   return { id: Number(row.id) };
 }

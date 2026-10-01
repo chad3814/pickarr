@@ -1408,6 +1408,29 @@ UPDATE rss_item
 }
 
 /**
+ * Phase 2 (#93, #101): download-client health, and a per-row import backoff.
+ *
+ * `ADD COLUMN` only, so every sync trigger survives in place
+ * (`docs/database-migrations.md`'s table).
+ *
+ * `download_client`'s two columns are synced: `sync/tables.ts` projects
+ * them. The download tables' two are host-only; they are bookkeeping for
+ * `clients/deliver.ts`, and no projection names them.
+ *
+ * A row replicated before this migration keeps its old shape in every
+ * browser until the row next changes. `web/src/settings/useDownloadClients.ts`
+ * reads a missing health field as "no failures".
+ */
+const MIGRATION_25 = `
+ALTER TABLE download_client ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE download_client ADD COLUMN unreachable_since INTEGER;
+ALTER TABLE torrent_download ADD COLUMN import_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE torrent_download ADD COLUMN import_retry_at INTEGER;
+ALTER TABLE nzb_download ADD COLUMN import_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nzb_download ADD COLUMN import_retry_at INTEGER;
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1437,6 +1460,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 22, up: (db) => db.exec(MIGRATION_22) },
   { version: 23, up: (db) => db.exec(MIGRATION_23) },
   { version: 24, up: (db) => migration24(db) },
+  { version: 25, up: (db) => db.exec(MIGRATION_25) },
 ];
 
 /**
