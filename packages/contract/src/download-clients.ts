@@ -144,7 +144,9 @@ export type AddDownloadClientRefusalCode = (typeof ADD_DOWNLOAD_CLIENT_REFUSALS)
  * The consecutive-failure count at which a download client is unreachable.
  * Here, in the contract, because two sides must agree on it and neither may
  * import the other: the host's `selectClientForFeed` passes such a client
- * over, and the web settings list labels it. If they disagreed, the screen
- * would call a client reachable while picks avoided it.
+ * over when a feed names no client of its own -- a feed that names a client
+ * always uses it, health notwithstanding -- and the web settings list labels
+ * it. If they disagreed, the screen would call a client reachable while
+ * picks avoided it.
  */
 export const CLIENT_UNREACHABLE_AFTER_FAILURES = 3;

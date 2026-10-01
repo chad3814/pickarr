@@ -1,5 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { freshDb } from '../store/harness.ts';
@@ -7,7 +9,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts } from '../../src/store/notify.ts';
-import { DownloadClients, type DownloadClientsListSource } from '../../src/settings/DownloadClients.tsx';
+import { DownloadClients, healthLine, type DownloadClientsListSource } from '../../src/settings/DownloadClients.tsx';
 import type { MappingSubmit } from '../../src/settings/postMapping.ts';
 import { REFUSAL_MESSAGES, type AddDownloadClientOutcome } from '../../src/settings/AddDownloadClient.tsx';
 import type { AddDownloadClientInput } from '@pickarr/contract';
@@ -188,6 +190,50 @@ test('a client row replicated before migration 25, with no health fields, is sti
   await waitFor(() => {
     assert.ok(screen.queryByRole('heading', { name: 'Old row' }), 'the row is not dropped');
   });
+  // Review Focus 1, in full: missing keys must read as no failures, not as
+  // an unreachable client or a blank line.
+  const row = screen.getByRole('heading', { name: 'Old row' }).closest('li')?.textContent ?? '';
+  assert.ok(row.includes('Reachable'), 'a missing consecutiveFailures/unreachableSince reads as no failures');
+});
+
+test('a client under the threshold reads Reachable, and one at it reads Unreachable since, as visible text', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    clientOp({ id: 1, name: 'Flaky', consecutiveFailures: 2, unreachableSince: 1_700_000_000_000 }),
+    clientOp({ id: 2, name: 'Down', consecutiveFailures: 3, unreachableSince: 1_700_000_000_000 }),
+  ]);
+  render(<DownloadClients source={sourceFor(db)} submit={neverSubmit} submitMapping={neverSubmitMapping} />);
+  await waitFor(() => {
+    assert.ok(screen.queryByRole('heading', { name: 'Down' }));
+  });
+  const itemText = (name: string): string =>
+    screen.getByRole('heading', { name }).closest('li')?.textContent ?? '';
+  assert.ok(itemText('Flaky').includes('Reachable'), 'two failures is still reachable');
+  assert.match(itemText('Down'), /Unreachable since .+ \(3 failed checks\)/);
+
+  // settings.css keys every download-client rule by structure or by an ARIA
+  // attribute, never by a class (that file's own docblock, asserted there
+  // with a repo-wide `grep -rn className`), so this line is found and styled
+  // the same way -- not through a class this component would be the first
+  // to add.
+  const line = [...(screen.getByRole('heading', { name: 'Down' }).closest('li')?.querySelectorAll('p') ?? [])]
+    .find((p) => (p.textContent ?? '').startsWith('Unreachable'));
+  assert.ok(line !== undefined, 'the line is a real element');
+  assert.ok(!line.hasAttribute('aria-label'), 'visible text, not an aria-label');
+  const selector = "ul[aria-label='download clients'] li h3 + p + p";
+  assert.ok(line.matches(selector), 'it is the element the stylesheet styles, right after the implementation line');
+
+  // And that rule exists (`App.test.tsx`'s technique for `base.css`'s
+  // session notice, copied here for `settings.css`'s health line).
+  const css = await readFile(join(import.meta.dirname, '..', '..', 'src', 'styles', 'settings.css'), 'utf8');
+  assert.ok(css.includes(`${selector} {`), 'settings.css styles the health line, so it is not an unstyled line of text');
+});
+
+test('healthLine names the failure count and the start of the streak', () => {
+  assert.equal(healthLine({ consecutiveFailures: 0, unreachableSince: null }), 'Reachable');
+  const text = healthLine({ consecutiveFailures: 4, unreachableSince: 1_700_000_000_000 });
+  assert.ok(text.startsWith('Unreachable since '));
+  assert.ok(text.endsWith('(4 failed checks)'));
 });
 
 test('clicking Add download client calls submit, and the row appears through the replica\'s own subscription, not a refetch', async () => {

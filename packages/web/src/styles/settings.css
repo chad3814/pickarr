@@ -223,6 +223,23 @@ ul[aria-label='download clients'] li p {
 }
 
 /*
+ * A download client's reachability (#93): secondary detail, in the same
+ * dimmed meta text the rule above already gives every `<p>` in this list --
+ * which this one restates rather than relies on, because that rule is keyed
+ * on `li p` alone and nothing ties it to *this* line specifically. Keyed by
+ * structure, not a class (this file's own docblock: no component in this
+ * repo sets one, and this is not where that starts): `DownloadClients.tsx`
+ * renders the health line as the client `<li>`'s second `<p>`, immediately
+ * after the implementation line and immediately after the name `<h3>`, so
+ * `h3 + p + p` names it without ambiguity -- the url, category and username
+ * lines that follow are never the second `+p` in that chain.
+ */
+ul[aria-label='download clients'] li h3 + p + p {
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/*
  * The two add forms (`AddFeed.tsx`, `AddDownloadClient.tsx`). Keyed on the
  * heading id each `<form>` already carries via `aria-labelledby` --
  * load-bearing for accessibility, reused rather than a hook added for
