@@ -114,6 +114,11 @@ export type UnauthenticatedReason = 'signed-out' | 'sync' | 'expired';
  * changes nothing about the response `sync.ts` sees -- it still decides for
  * itself whether `res.ok`. Never reads the body (Global Constraints): the
  * status is the whole of what this needs to know.
+ *
+ * With the event stream open the tail polls only every 30s
+ * (`TAIL_INTERVAL_STREAMING_MS`, the poll is a safety net rather than the
+ * delivery mechanism), so a dead session is noticed within that window --
+ * not within the 3s polling cadence a stream-less tab falls back to.
  */
 function withUnauthenticatedCheck(fetch: SyncFetch, onUnauthenticated: () => void): SyncFetch {
   return async (url, signal) => {

@@ -1034,10 +1034,12 @@ export const test = base.extend<{ harness: Harness }>({
       // do, and why `context.close()` rather than `page.close()`.
       await context.close();
       await server.close();
-      // Right after the listener, on `createShutdown`'s own reasoning
-      // (`main.ts`): an open stream is a connection `server.close()` would
-      // otherwise wait on to drain, so ending every stream here is what lets
-      // that drain actually finish.
+      // Not what lets `server.close()` drain, on `createShutdown`'s own
+      // reasoning (`main.ts`): `ReadServer.close` already calls
+      // `closeAllConnections()`, which drops every open connection --
+      // including an `EventSource`'s -- synchronously. `events.close()`'s
+      // own job here is stopping the heartbeat interval and clearing the
+      // stream registry.
       events.close();
       // After the read server rather than before it: the only thing that
       // ever dials this fake is an adapter call made while serving

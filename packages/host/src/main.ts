@@ -696,11 +696,12 @@ export function createShutdown(
     // and drops open connections synchronously, before it returns the promise
     // this is discarding.
     void server.close();
-    // An open stream is a connection `server.close()` would otherwise wait
-    // on to drain; ending every stream and the heartbeat here, right after
-    // asking the listener to close, is what lets that drain actually finish
-    // rather than leaving a browser's `EventSource` holding the socket open
-    // forever.
+    // Not what lets `server.close()` drain: `ReadServer.close` already calls
+    // `closeAllConnections()`, which drops every open connection -- an
+    // `EventSource`'s socket included -- synchronously, without waiting on
+    // anything. `events.close()`'s own job here is stopping the heartbeat
+    // interval and clearing the stream registry, so nothing keeps sending
+    // to (or tracking) a response that connection close already ended.
     events.close();
     host.stop();
     raw.close();

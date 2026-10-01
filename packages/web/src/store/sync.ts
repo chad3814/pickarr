@@ -534,6 +534,17 @@ export function startSync(deps: SyncDeps): SyncHandle {
     });
     stream?.addEventListener('error', () => {
       streaming = false;
+      // A tick already scheduled while the stream looked open was armed at
+      // the 30s streaming cadence (`nextTailDelay`); left alone, it would
+      // not catch up to the 3s polling cadence until it next fires on its
+      // own, up to 30s from now. Only reschedule a tick that is merely
+      // *pending* -- one already running is `tick`'s own business, via
+      // `inFlight` -- and only when the loop is not failing, for the same
+      // reason `onChanged` leaves a failing tail alone: a backoff tick
+      // already knows when it means to retry.
+      if (pending.has('tail') && !failures.has('tail')) {
+        schedule('tail', TAIL_INTERVAL_POLLING_MS);
+      }
     });
     stream?.addEventListener('changed', (event) => {
       void onChanged(event.data).catch(reportStreamFailure);

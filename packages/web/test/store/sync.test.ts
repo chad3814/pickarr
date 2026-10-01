@@ -1282,6 +1282,23 @@ test('a changed event with a different generation runs the tail now, and the tai
   }, 'the reset to land');
 });
 
+test('an error shortens an already-scheduled 30 s tick to the 3 s polling cadence at once', async () => {
+  // Review item 4: a tick armed while the stream looked open must not wait
+  // out its full 30 s before falling back, once the stream has actually
+  // errored.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  opened[0]?.open();
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_STREAMING_MS, 'armed at the streaming cadence');
+  opened[0]?.fail();
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'the error reschedules it at the polling cadence immediately, not up to 30 s later');
+});
+
 test('the tail polls every 30 s while the stream is open and every 3 s while it is down', async () => {
   // Review Focus 1: a stream that opens but never delivers still leaves the tab correct.
   const db = await freshDb();
