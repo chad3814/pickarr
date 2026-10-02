@@ -220,6 +220,41 @@ test('a catalog wake re-reads from the top and a page appended from the stale cu
   db.close();
 });
 
+test('wakes during an in-flight reload coalesce into exactly one further reload that shows the latest data', async () => {
+  const db = await freshDb();
+  await seed(db, [{ id: 1, title: 'Old', updatedAt: 10, picked: 1 }]);
+  let reads = 0;
+  let releaseFirst: (() => void) | undefined;
+  const { source, wake } = sourceFor(db, async (query, opts) => {
+    reads += 1;
+    if (reads > 1) return listCatalog(db, query, opts);
+    // The first read is answered from the data as it was now, and held.
+    const stale = await listCatalog(db, query, opts);
+    await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    return stale;
+  });
+  render(<Listing source={source} query={PICKED} pageSize={5} />);
+  await waitFor(() => {
+    assert.ok(releaseFirst !== undefined, 'the first reload is in flight and held');
+  });
+
+  await seed(db, [{ id: 2, title: 'Newer', updatedAt: 20, picked: 1 }]);
+  wake();
+  wake();
+  wake();
+  await settleRenders();
+  assert.equal(reads, 1, 'wakes during a reload start no read of their own');
+
+  releaseFirst?.();
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Newer', 'Old']);
+  });
+  await settleRenders();
+  assert.equal(reads, 2, 'three wakes cost exactly one further read');
+
+  db.close();
+});
+
 test('empty is false until the first page resolves, then true for zero matches', async () => {
   const db = await freshDb();
   let release: ((records: readonly CatalogRecord[]) => void) | undefined;

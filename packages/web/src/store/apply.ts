@@ -213,14 +213,15 @@ export async function applyBatch(
     // synchronous throw does not abort a transaction, so `put`s issued
     // earlier in this loop would commit anyway (measured).
     //
-    // The guard around it is insurance rather than a pinned path, and the
-    // distinction is stated because an earlier version of this comment
-    // claimed otherwise. `abort()` on an already-aborted transaction throws
-    // `InvalidStateError` (measured), which would replace the error the
-    // caller actually needs -- but the loop above is synchronous, so no error
-    // event can land in the middle of it, and no test here can construct a
-    // transaction that is already aborted on arrival. So this is cheap
-    // protection for a path the suite cannot reach, not a covered one.
+    // The guard around it is load-bearing, not insurance. `abort()` on an
+    // already-aborted transaction throws `InvalidStateError` (measured),
+    // which would replace the error the caller actually needs. The `put` loop
+    // is synchronous, but the catalog phase after it awaits requests, so an
+    // asynchronous IndexedDB failure (a `catalog.put` that aborts the
+    // transaction, say) can land mid-phase: the transaction is then already
+    // aborted, the next request rejects with `AbortError`, and this catch
+    // runs against a dead transaction. `catalog-apply.test.ts` injects
+    // exactly that failure.
     try {
       tx.abort();
     } catch {

@@ -5,6 +5,7 @@ import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { request } from '../../src/store/idb.ts';
+import { readCursors } from '../../src/store/meta.ts';
 import { buildHaystack, type CatalogRecord } from '../../src/store/catalog.ts';
 
 // Measured on fake-indexeddb with the 500-op batch below: three runs gave
@@ -22,6 +23,8 @@ const release = (id: number, mediaItemId: number | null, filename: string): Sync
   ({ op: 'create', table: 'rss_item', id, value: { id, feedId: 1, filename, createdAt: 1, updatedAt: 1, downloadType: 'torrent', mediaItemId, rankingScore: null, lookupState: 'resolved', lookupStateDetail: null, videoResolution: null, lookupJson: '{"secret":"never-in-haystack"}', deliveredAt: null } });
 const torrent = (id: number, rssItemId: number, status = 'failed'): SyncOp =>
   ({ op: 'create', table: 'torrent_download', id, value: { id, rssItemId, downloadClientId: 1, infohash: null, clientRef: null, status, attempts: 1, createdAt: 1, updatedAt: 1, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null } });
+const nzb = (id: number, rssItemId: number): SyncOp =>
+  ({ op: 'create', table: 'nzb_download', id, value: { id, rssItemId, downloadClientId: 1, clientRef: null, status: 'failed', attempts: 1, createdAt: 1, updatedAt: 1, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null } });
 const role = (id: number, mediaItemId: number, personId: number): SyncOp =>
   ({ op: 'create', table: 'role', id, value: { id, mediaItemId, personId, role: 'actor', name: null, billingOrder: null, createdAt: 1 } });
 const person = (id: number, name: string): SyncOp =>
@@ -53,6 +56,24 @@ test('a later download flips picked; a tombstoned download flips it back', async
   assert.equal((await record(db, 1))?.picked, 1);
   await applyBatch(db, [del('torrent_download', 1)], { since: 3, before: null });
   assert.equal((await record(db, 1))?.picked, 0);
+});
+
+test('an nzb download flips picked the same way; its tombstone flips it back', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [item(1, 'Arrival', null), release(11, 1, 'Arrival.nzb')], CURSORS);
+  assert.equal((await record(db, 1))?.picked, 0);
+  await applyBatch(db, [nzb(1, 11)], { since: 2, before: null });
+  assert.equal((await record(db, 1))?.picked, 1);
+  await applyBatch(db, [del('nzb_download', 1)], { since: 3, before: null });
+  assert.equal((await record(db, 1))?.picked, 0);
+});
+
+test('a download id shared by two download tables does not let a tombstone of one clear picked', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [item(1, 'Arrival', null), release(11, 1, 'Arrival.mkv'), torrent(1, 11), nzb(1, 11)], CURSORS);
+  assert.equal((await record(db, 1))?.picked, 1);
+  await applyBatch(db, [del('torrent_download', 1)], { since: 2, before: null });
+  assert.equal((await record(db, 1))?.picked, 1, 'the nzb download still picks it');
 });
 
 test('a release arriving before its media item is picked up when the item arrives', async () => {
@@ -107,6 +128,37 @@ test('a refused batch leaves the catalog untouched', async () => {
   await applyBatch(db, [item(1, 'A', null)], CURSORS);
   await assert.rejects(applyBatch(db, [{ ...item(1, 'B', null), op: 'upsert' }, { op: 'upsert', table: 'media_item', id: 2, value: null }], { since: 2, before: null }));
   assert.equal((await record(db, 1))?.haystack, 'a');
+});
+
+test('a transaction that aborts after the catalog phase wrote rejects with that failure and leaves nothing behind', async () => {
+  // The catalog phase awaits requests, so IndexedDB can fail the transaction
+  // mid-phase: here the first `catalog.put` aborts its own transaction right
+  // after issuing the write. The catch in `applyBatch` then runs against an
+  // already-aborted transaction, where `abort()` throws `InvalidStateError`;
+  // the guard around it is what lets the original failure reach the caller.
+  const db = await freshDb();
+  await applyBatch(db, [item(1, 'Before', null)], CURSORS);
+  const original = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function put(this: IDBObjectStore, ...args: Parameters<IDBObjectStore['put']>) {
+    const req = original.apply(this, args);
+    if (this.name === 'catalog') this.transaction.abort();
+    return req;
+  };
+  let failure: unknown;
+  try {
+    await applyBatch(db, [item(2, 'After', null), { ...item(1, 'Renamed', null), op: 'upsert' }], { since: 2, before: null });
+  } catch (err) {
+    failure = err;
+  } finally {
+    IDBObjectStore.prototype.put = original;
+  }
+  assert.ok(failure instanceof Error, 'applyBatch rejected');
+  assert.notEqual(failure.name, 'InvalidStateError', 'the abort guard swallowed its own InvalidStateError');
+  assert.equal(await record(db, 2), undefined, 'no catalog record for the batch');
+  assert.equal((await record(db, 1))?.haystack, 'before', 'the existing record is unchanged');
+  const rows = db.transaction('rows', 'readonly').objectStore('rows');
+  assert.equal(await request(rows.get(['media_item', 2])), undefined, 'no row for the batch');
+  assert.deepEqual(await readCursors(db), { since: 1, before: null }, 'the cursor did not move');
 });
 
 test('buildHaystack lowercases, collapses whitespace per part and joins with newlines', () => {

@@ -14,7 +14,9 @@
  * had occupied, and a record entering can land anywhere in it too, so a
  * cursor resume cannot reconcile either. `windowSizeRef` tracks how many
  * records the window has asked for in total, and a `subscribeCatalog` wake
- * re-issues that request from the top. Only `loadMore` resumes from a cursor,
+ * re-issues that request from the top. Wakes coalesce like `Unmatched`'s
+ * refresh: one reload at a time, and any number of wakes during it cost one
+ * further reload when it settles. Only `loadMore` resumes from a cursor,
  * and `windowGenerationRef` drops a page that resolves after a reload has
  * replaced the window it was appended to (`useMediaItems.ts` explains the
  * duplicate that otherwise appears).
@@ -29,17 +31,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import type { Store } from '../store/index.ts';
 import type { CatalogQuery, CatalogRecord, ListCatalogOptions } from '../store/catalog.ts';
-import { isMediaItem, PAGE_SIZE, type MediaItemsResult } from './useMediaItems.ts';
+import { isMediaItem, isStoreClosed, PAGE_SIZE, type MediaItemsResult } from './useMediaItems.ts';
 
 export interface CatalogItemsSource {
   listCatalog: (query: CatalogQuery, opts: ListCatalogOptions) => Promise<readonly CatalogRecord[]>;
   getRows: Store['getRows'];
   subscribeCatalog: (cb: (ids: readonly number[]) => void) => () => void;
-}
-
-/** IndexedDB's complaint that the connection is already closed -- see `useMediaItems.ts`'s `isStoreClosed`. */
-function isStoreClosed(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
 }
 
 interface Cursor {
@@ -104,11 +101,32 @@ export function useCatalogItems(
       setResolved(true);
     }
 
+    // Wakes coalesce; they do not queue (`Unmatched.tsx`'s `makeRefresh`
+    // explains the same shape). A wake during an in-flight reload sets
+    // `dirty` instead of starting a second read, and one more reload runs
+    // when the first settles: the one in flight may have started before the
+    // change committed, so it cannot be trusted to have seen it. That is also
+    // what keeps two reloads from resolving out of order and leaving the
+    // older answer on screen.
+    let reloading = false;
+    let dirty = false;
     function safeReload(): void {
-      reloadWindow().catch((err: unknown) => {
-        if (isStoreClosed(err)) return;
-        throw err;
-      });
+      if (reloading) {
+        dirty = true;
+        return;
+      }
+      reloading = true;
+      reloadWindow()
+        .catch((err: unknown) => {
+          if (isStoreClosed(err)) return;
+          throw err;
+        })
+        .finally(() => {
+          reloading = false;
+          if (!dirty) return;
+          dirty = false;
+          if (!cancelled) safeReload();
+        });
     }
 
     safeReload();

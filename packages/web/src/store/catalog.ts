@@ -14,7 +14,10 @@
  */
 export const CATALOG_STORE = 'catalog';
 
-export { buildHaystack } from './catalog-apply.ts';
+/** A record's haystack: each part trimmed, lowercased and whitespace-collapsed, newline-joined so a term cannot match across parts. */
+export function buildHaystack(parts: readonly string[]): string {
+  return parts.map(normalizeTerm).join('\n');
+}
 
 export interface CatalogRecord {
   id: number;

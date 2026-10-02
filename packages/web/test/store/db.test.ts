@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { done, request } from '../../src/store/idb.ts';
@@ -167,6 +167,30 @@ test('a tab still holding the old version open steps aside instead of blocking t
     // Idempotent by the standard, and the point of the test is that the
     // `versionchange` handler already did this.
     firstTab.close();
+  }
+});
+
+const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+afterEach(() => {
+  if (originalLocation === undefined) Reflect.deleteProperty(globalThis, 'location');
+  else Object.defineProperty(globalThis, 'location', originalLocation);
+});
+
+test('an old tab closes its connection and reloads when another tab bumps the version', async () => {
+  // The old bundle cannot speak the new schema, and a leader that merely
+  // closed would keep its Web Lock lease; the reload releases it. Node has no
+  // `location`, so one is stubbed and restored by the afterEach above.
+  let reloads = 0;
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { reload: () => { reloads += 1; } } });
+  const name = freshDbName();
+  const oldTab = await openStore(name, 1);
+  const newTab = await openStore(name, 2);
+  try {
+    assert.equal(reloads, 1, 'the old tab reloaded exactly once');
+    assert.throws(() => oldTab.transaction('rows'), { name: 'InvalidStateError' }, 'and its connection is closed');
+  } finally {
+    newTab.close();
+    oldTab.close();
   }
 });
 

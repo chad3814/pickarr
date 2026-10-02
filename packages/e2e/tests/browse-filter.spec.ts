@@ -78,4 +78,6 @@ test('the Unpicked filter hides a picked item, search narrows by filename, and t
   await page.reload();
   await expect(page.getByRole('searchbox', { name: 'Search' })).toHaveValue('A.Show.S01E01');
   await expect(page.getByRole('button', { name: 'A Show' })).toBeVisible({ timeout: 15_000 });
+  // The list, not just the box, is filtered after the reload.
+  await expect(page.getByRole('button', { name: 'B Show' })).toHaveCount(0, { timeout: 5_000 });
 });

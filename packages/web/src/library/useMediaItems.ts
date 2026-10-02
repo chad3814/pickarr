@@ -75,7 +75,7 @@ export function isMediaItem(value: unknown): value is MediaItemSyncRead {
  * be mounted and subscribed when the store it reads from stops (sign-out, a
  * 401). Anything else is rethrown.
  */
-function isStoreClosed(err: unknown): boolean {
+export function isStoreClosed(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
 }
 

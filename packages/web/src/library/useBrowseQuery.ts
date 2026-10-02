@@ -13,10 +13,12 @@
  * with it: the debounce timer is cancelled and the filter is written
  * together with the typed value, so neither is lost or delayed. The timer
  * itself reads the filter current when it fires, not the one in scope when
- * the key was pressed.
+ * the key was pressed. A pending keystroke is dropped when the pathname
+ * changes (this instance outlives a category switch), and a pending timer
+ * stops the URL re-seeding the box over what was typed after it.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { useLocation, useSearchParams } from 'react-router';
 import { normalizeTerm, type PickedFilter } from '../store/catalog.ts';
 
 export const SEARCH_DEBOUNCE_MS = 150;
@@ -56,10 +58,26 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
   const pendingQ = useRef('');
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  const { pathname } = useLocation();
+  const lastPathname = useRef(pathname);
   // The URL is the source of truth; a back/forward navigation re-seeds the box.
+  // Two guards, both about a keystroke whose timer has not fired yet. A pending
+  // timer means the box holds something newer than the URL (typed between a
+  // debounce firing and its `q` committing), so the re-seed would overwrite it
+  // and is skipped. And a new pathname is a different category -- `Shell` keys
+  // the `<Route>`, not the element, so this instance survives the switch --
+  // where the pending keystroke would otherwise be written onto the new
+  // category's URL; it is dropped, and the box then re-seeds from the new URL.
   useEffect(() => {
-    setInput(q);
-  }, [q]);
+    if (lastPathname.current !== pathname) {
+      lastPathname.current = pathname;
+      if (timer.current !== undefined) {
+        clearTimeout(timer.current);
+        timer.current = undefined;
+      }
+    }
+    if (timer.current === undefined) setInput(q);
+  }, [pathname, q]);
   useEffect(
     () => () => {
       if (timer.current !== undefined) clearTimeout(timer.current);

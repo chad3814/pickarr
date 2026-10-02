@@ -59,9 +59,10 @@ test('a term filters by substring of the haystack across all, picked and unpicke
     rec(2, 20, 1, 'dune: part two\n2024\ndune.part.two.2024.mkv\nzendaya'),
     rec(3, 30, 0, 'arrival\n2016\narrival.2016.mkv\namy adams'),
     rec(4, 40, 1, 'blade runner 2049\n2017\nbr2049.mkv\nryan gosling'),
+    rec(9, 99, 0, 'dune\n2021\ndune.2021.mkv\narrival', 'movie'),
   ]);
   const q = (filter: 'all' | 'picked' | 'unpicked', term: string, limit = 10) => listCatalog(db, { pluginId: 'tv', filter, term }, { limit });
-  assert.deepEqual((await q('all', 'dune')).map((r) => r.id), [2, 1]);
+  assert.deepEqual((await q('all', 'dune')).map((r) => r.id), [2, 1], 'the movie plugin\'s matching record is excluded');
   assert.deepEqual((await q('picked', 'dune')).map((r) => r.id), [2]);
   assert.deepEqual((await q('unpicked', 'dune')).map((r) => r.id), [1]);
   assert.deepEqual((await q('all', 'zendaya')).map((r) => r.id), [2], 'matches a person');

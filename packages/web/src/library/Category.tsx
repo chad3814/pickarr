@@ -1,16 +1,19 @@
 /**
  * One category's screen: `pluginId`'s media items, newest first, paged on
- * demand via `useMediaItems`, each row expanding into a `MediaItemCard`
- * (design spec §6, §7).
+ * demand, each row expanding into a `MediaItemCard`
+ * (design spec §6, §7). The unfiltered view pages `rows` through
+ * `useMediaItems`; a picked filter or a search term pages the derived
+ * `catalog` store through `useCatalogItems` (browse-filter-search design
+ * spec §3), with the filter and term read from the URL by `useBrowseQuery`.
  *
- * **`data-testid={`category-${pluginId}`}` on the root element carries task
- * 4's route-mapping contract forward.** `Shell.test.tsx`'s per-category
+ * **`data-testid={`category-${pluginId}`}` on the root element is the
+ * route-mapping contract.** `Shell.test.tsx`'s per-category
  * mapping tests find whichever screen renders at each plugin's own path by
  * this marker, not by its rendered prose, so this component's own text and
  * layout are free to change without touching those tests. That was the
- * point of choosing a marker: task 4 put it on the placeholder this
- * component replaced -- the placeholder and its docblock are gone, but the
- * contract is the marker, and it is kept here. The marker is on this outer
+ * point of choosing a marker. It first sat on a placeholder this component
+ * replaced; the placeholder is gone and the marker moved here. The marker is
+ * on this outer
  * element regardless of whether `store` has arrived yet, so it is present
  * the instant the route matches.
  *
@@ -22,7 +25,7 @@
  *
  * **Plugin rows are fetched here, once per page, and handed to each card.**
  * `usePluginRows` reads the whole page's rows in one batched query as soon
- * as `useMediaItems` resolves a page of ids -- before any card expands --
+ * as the list hook resolves a page of ids -- before any card expands --
  * because a collapsed card needs its plugin's rows too (design spec §4,
  * acceptance 1), and a per-card fetch gated on expansion cannot answer for
  * one that never expands.
@@ -131,8 +134,9 @@ interface ItemListProps {
 function ItemList({ store, tables, submit, result, emptyMessage }: ItemListProps): ReactElement | null {
   const { items, loadMore, done, empty } = result;
 
-  // Stable across renders unless `items` itself changes (`useMediaItems`'s
-  // own state, replaced wholesale rather than mutated in place): a fresh
+  // Stable across renders unless `items` itself changes (the
+  // state in `useMediaItems` and `useCatalogItems` alike, replaced wholesale
+  // rather than mutated in place): a fresh
   // `.map` every render would be a new array every render, and
   // `usePluginRows` refetches whenever this reference changes.
   const mediaItemIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -157,7 +161,8 @@ function ItemList({ store, tables, submit, result, emptyMessage }: ItemListProps
 
   // `items.length === 0 && !empty` is the one state `empty` cannot yet
   // distinguish from "still loading" on its own -- see `useMediaItems.ts`'s
-  // own doc on `empty`. Rendering nothing here, rather than "Nothing here
+  // own doc on `empty`, which `useCatalogItems` honours too. Rendering nothing
+  // here, rather than "Nothing here
   // yet", is what keeps that message honest: it appears only once the first
   // page has actually resolved to zero rows.
   if (items.length === 0 && !empty) return null;

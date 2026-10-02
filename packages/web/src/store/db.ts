@@ -166,7 +166,18 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // `useMediaItems.ts` and `Unmatched.tsx` each carry an `isStoreClosed`
       // guard for exactly that. The alternative -- holding the connection
       // and prompting -- would need UI this module has no business owning.
-      db.addEventListener('versionchange', () => { db.close(); });
+      //
+      // **And then the page reloads.** Closing the connection is not enough
+      // for the tab that was *leading* on the old bundle: it keeps its Web
+      // Lock lease and never demotes, so after the bump a new tab is a
+      // follower with nothing to follow until the old tab is closed. The old
+      // bundle cannot speak schema 3 in any case, so reloading to load the
+      // new bundle is the only useful thing it can do, and the old
+      // document's lock releases with it.
+      db.addEventListener('versionchange', () => {
+        db.close();
+        if (typeof location !== 'undefined') location.reload();
+      });
       resolve(db);
     }, { once: true });
     req.addEventListener(
