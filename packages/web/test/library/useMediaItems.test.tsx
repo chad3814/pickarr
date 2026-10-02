@@ -8,7 +8,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTablePlugin } from '../../src/store/rows.ts';
 import type { StoredRow } from '../../src/store/db.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribeTouched } from '../../src/store/notify.ts';
 import { useMediaItems, type MediaItemsSource } from '../../src/library/useMediaItems.ts';
 
 /**
@@ -57,7 +57,7 @@ function mediaItem({
 function sourceFor(db: IDBDatabase): MediaItemsSource {
   return {
     listByTablePlugin: (table, pluginId, opts) => listByTablePlugin(db, table, pluginId, opts),
-    subscribeInserts,
+    subscribeTouched,
   };
 }
 
@@ -150,7 +150,28 @@ test('a row arriving for this category appears without a reload', async () => {
   });
   await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'Arrived', updatedAt: 10 })]);
   await waitFor(() => {
-    assert.deepEqual(titlesShown(), ['Arrived'], 'subscribeInserts refreshed the list');
+    assert.deepEqual(titlesShown(), ['Arrived'], 'subscribeTouched refreshed the list');
+  });
+
+  db.close();
+});
+
+test('a tombstone for a listed item removes it without any insert', async () => {
+  // A deletion reaches `applyBatch` as a tombstone, which `Changed` reports
+  // under `touched` and never under `inserted`; an insert-only subscription
+  // left the dropped card on screen until reload.
+  const db = await freshDb();
+  await seed(db, [
+    mediaItem({ id: 1, pluginId: 'tv', title: 'Staying', updatedAt: 10 }),
+    mediaItem({ id: 2, pluginId: 'tv', title: 'Dropped', updatedAt: 20 }),
+  ]);
+  render(<Listing source={sourceFor(db)} pluginId="tv" pageSize={24} />);
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Dropped', 'Staying']);
+  });
+  await seed(db, [{ op: 'delete', table: 'media_item', id: 2 }]);
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['Staying'], 'the tombstone woke the list and the dropped item left it');
   });
 
   db.close();
@@ -213,7 +234,7 @@ test('clicking load more twice before the first page resolves issues only one re
   let pagingCalls = 0;
   let releasePage: (() => void) | undefined;
   const source: MediaItemsSource = {
-    subscribeInserts: real.subscribeInserts,
+    subscribeTouched: real.subscribeTouched,
     listByTablePlugin: (table, pluginId, opts) => {
       if (opts.from === undefined) return real.listByTablePlugin(table, pluginId, opts);
       pagingCalls += 1;
@@ -256,7 +277,7 @@ test('before the first page resolves, neither the empty message nor a list appea
       new Promise((resolve) => {
         releaseFirstLoad = resolve;
       }),
-    subscribeInserts: () => () => {},
+    subscribeTouched: () => () => {},
   };
 
   render(<Listing source={source} pluginId="tv" pageSize={2} />);
@@ -331,7 +352,7 @@ test('a row arriving while a page is in flight neither duplicates a row nor stra
   // discarded page changes nothing on screen to wait for.
   let releasePage: (() => Promise<void>) | undefined;
   const source: MediaItemsSource = {
-    subscribeInserts: real.subscribeInserts,
+    subscribeTouched: real.subscribeTouched,
     listByTablePlugin: (table, pluginId, opts) => {
       if (opts.from === undefined) return real.listByTablePlugin(table, pluginId, opts);
       return new Promise((resolve) => {

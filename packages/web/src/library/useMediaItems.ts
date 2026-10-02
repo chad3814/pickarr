@@ -12,7 +12,9 @@
  * **The window, not the cursor, is what a live insert re-reads.** This hook
  * tracks how many rows the current window has asked for in total
  * (`windowSizeRef`, starting at `pageSize` and growing by `pageSize` on every
- * `loadMore`), and a `subscribeInserts` wake re-issues *that* request from
+ * `loadMore`), and a `subscribeTouched` wake (an insert, an update or a delete -- a
+ * tombstone is reported under `touched` only, so a dropped item leaves the
+ * list live) re-issues *that* request from
  * the top (`from` absent) rather than resuming from wherever the last page
  * left off. A cursor-based resume on a wake would need to reconcile a page
  * boundary against rows the insert may have shifted underneath it; asking
@@ -24,7 +26,7 @@
  *
  * **Lists come from the replica only. There is no remote fallback**
  * (Global Constraint; storage design spec §9). This hook never calls
- * `fetch` -- `listByTablePlugin` and `subscribeInserts` are the whole of
+ * `fetch` -- `listByTablePlugin` and `subscribeTouched` are the whole of
  * what it is built on.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -48,7 +50,7 @@ const TABLE = 'media_item';
  */
 export interface MediaItemsSource {
   listByTablePlugin: Store['listByTablePlugin'];
-  subscribeInserts: Store['subscribeInserts'];
+  subscribeTouched: Store['subscribeTouched'];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -131,7 +133,7 @@ export function useMediaItems(
   // How many rows the current window has asked for in total, and where the
   // next `loadMore` resumes from. Refs, not state: neither is itself
   // rendered, and both must be readable inside `loadMore` and inside the
-  // `subscribeInserts` callback without either closing over a stale render.
+  // `subscribeTouched` callback without either closing over a stale render.
   const windowSizeRef = useRef(pageSize);
   const cursorRef = useRef<{ updatedAt: number; id: number } | undefined>(undefined);
 
@@ -218,7 +220,7 @@ export function useMediaItems(
     }
 
     safeReload();
-    const unsubscribe = source.subscribeInserts(TABLE, safeReload);
+    const unsubscribe = source.subscribeTouched(TABLE, safeReload);
     return () => {
       cancelled = true;
       unsubscribe();

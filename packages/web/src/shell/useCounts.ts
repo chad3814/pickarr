@@ -1,6 +1,6 @@
 /**
  * The shell's whole relationship with the replica: one count per category,
- * read through `countByPlugin` and kept current by `subscribeInserts`
+ * read through `countByPlugin` and kept current by `subscribeTouched`
  * (design spec §6). `countByPlugin` counts the `by_table_plugin_updated`
  * index -- `IDBIndex.count()` over a key range scoped to one `pluginId` --
  * so this hook never reads a row to produce a number, only one index
@@ -56,14 +56,14 @@ const ZERO_COUNTS: Counts = CATEGORIES.reduce<Record<string, number>>((counts, c
 /**
  * The two operations this hook needs, and nothing else `Store` offers.
  * Narrower than `Store` itself so a test can hand it a bare database's
- * `countByPlugin` and `subscribeInserts` directly, without assembling a
+ * `countByPlugin` and `subscribeTouched` directly, without assembling a
  * whole `Store` around them (see `useCounts.test.tsx`). A real `Store`
  * satisfies this by structural assignment, so `Shell` passes one through
  * unchanged.
  */
 export interface CountsSource {
   countByPlugin: Store['countByPlugin'];
-  subscribeInserts: Store['subscribeInserts'];
+  subscribeTouched: Store['subscribeTouched'];
 }
 
 /**
@@ -85,12 +85,15 @@ function isStoreClosed(err: unknown): boolean {
 
 /**
  * One index count per category, kept current by re-counting on
- * every `subscribeInserts('media_item', …)` wake rather than adjusting the
+ * every `subscribeTouched('media_item', …)` wake -- an insert, an update or a
+ * delete -- rather than adjusting the
  * previous counts incrementally. `countByPlugin` is an `IDBIndex.count()`
  * over a key range -- it reads no rows -- so a full re-count on each wake
- * costs nothing worth optimising away, and it keeps a tombstone's exclusion
- * (already enforced by the index itself, per `rows.ts`) automatic rather
- * than something this hook has to reason about a second time.
+ * costs nothing worth optimising away. A re-count runs on every touch,
+ * including a delete: a tombstone is reported under `touched` and never
+ * under `inserted`, so an insert-only subscription would leave the count of
+ * a dropped item standing until reload. The index itself excludes the
+ * tombstone (per `rows.ts`), so the re-count lowers the number.
  *
  * `undefined` means "no store yet" -- `Shell` has none until `createStore`
  * resolves -- and reads as {@link ZERO_COUNTS}, the same reading an empty
@@ -149,7 +152,7 @@ export function useCounts(store: CountsSource | undefined): Counts {
     }
 
     safeRefresh();
-    const unsubscribe = source.subscribeInserts('media_item', safeRefresh);
+    const unsubscribe = source.subscribeTouched('media_item', safeRefresh);
     return () => {
       cancelled = true;
       unsubscribe();

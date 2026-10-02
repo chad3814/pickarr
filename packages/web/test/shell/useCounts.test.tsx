@@ -7,7 +7,7 @@ import { freshDb } from '../store/harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { countByPlugin } from '../../src/store/rows.ts';
-import { subscribeInserts } from '../../src/store/notify.ts';
+import { subscribeTouched } from '../../src/store/notify.ts';
 import { useCounts, CATEGORIES, type CountsSource } from '../../src/shell/useCounts.ts';
 
 /**
@@ -38,7 +38,7 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
 function sourceFor(db: IDBDatabase): CountsSource {
   return {
     countByPlugin: (table, pluginId) => countByPlugin(db, table, pluginId),
-    subscribeInserts,
+    subscribeTouched,
   };
 }
 
@@ -60,6 +60,24 @@ function textOf(category: string): string {
   return screen.getByTestId(category).textContent ?? '';
 }
 
+test('a tombstone for a counted item lowers the count without any insert', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } },
+    { op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'tv', updatedAt: 2 } },
+  ]);
+  render(<Counts store={sourceFor(db)} />);
+  await waitFor(() => {
+    assert.equal(textOf('tv'), '2');
+  });
+  await seed(db, [{ op: 'delete', table: 'media_item', id: 2 }]);
+  await waitFor(() => {
+    assert.equal(textOf('tv'), '1', 'the tombstone woke the hook and the re-count excluded it');
+  });
+
+  db.close();
+});
+
 test('a count comes from the replica and climbs when rows arrive', async () => {
   const db = await freshDb();
   await seed(db, [{ op: 'upsert', table: 'media_item', id: 1, value: { pluginId: 'tv', updatedAt: 1 } }]);
@@ -73,7 +91,7 @@ test('a count comes from the replica and climbs when rows arrive', async () => {
   await seed(db, [{ op: 'upsert', table: 'media_item', id: 2, value: { pluginId: 'tv', updatedAt: 2 } }]);
 
   await waitFor(() => {
-    assert.equal(textOf('tv'), '2', 'subscribeInserts woke the hook and it re-read the table');
+    assert.equal(textOf('tv'), '2', 'subscribeTouched woke the hook and it re-read the table');
   });
 
   db.close();
@@ -164,7 +182,7 @@ test('counting asks the index once per category and reads no rows', async () => 
       calls.push(`${table}:${pluginId}`);
       return pluginId === 'tv' ? 2 : 0;
     },
-    subscribeInserts: () => () => {},
+    subscribeTouched: () => () => {},
   };
 
   render(<Counts store={source} />);
@@ -193,7 +211,7 @@ test('a store-closed rejection during refresh is caught, not left as an unhandle
       new Promise((_resolve, reject) => {
         rejectRead = reject;
       }),
-    subscribeInserts,
+    subscribeTouched,
   };
 
   const escaped: unknown[] = [];

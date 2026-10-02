@@ -43,14 +43,13 @@ test('editing a release moves it to the chosen title and drops the title it left
   await box.fill('B Show');
   await page.getByRole('option', { name: 'B Show', exact: true }).click();
   await page.getByRole('button', { name: 'Save' }).click();
-  // The move reaches the open card live: B's row is touched, so B re-gathers.
+  // The dropped title leaves the list live: its tombstone wakes the category
+  // list, so no reload is needed.
+  await expect(page.getByRole('button', { name: 'A Show' })).toHaveCount(0, { timeout: 15_000 });
+  // And the release is under B: opening B's card gathers it fresh, which
+  // proves the relink landed in the replica.
   await page.getByRole('button', { name: 'B Show' }).click();
   await expect(page.getByText('A.Show.S01E01.mkv')).toBeVisible({ timeout: 15_000 });
-  // The dropped title leaves the list on reload, not live: the category list
-  // re-reads on inserts only, and a deletion is not an insert.
-  await page.reload();
-  await expect(page.getByRole('button', { name: 'B Show' })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('button', { name: 'A Show' })).toHaveCount(0);
 });
 
 test('requery on a matched release is accepted and the line says it is looking', async ({
