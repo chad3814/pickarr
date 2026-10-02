@@ -95,3 +95,13 @@ test('all with an empty input leaves no params', () => {
   fireEvent.click(screen.getByText('set-all'));
   assert.equal(text('search'), '');
 });
+
+test('changing the filter while a keystroke is pending keeps both, now and after the debounce', async () => {
+  renderAt('/tv');
+  fireEvent.click(screen.getByText('type-dune'));
+  fireEvent.click(screen.getByText('set-picked'));
+  assert.equal(text('search'), '?filter=picked&q=dune');
+  await new Promise((resolve) => { realSetTimeout(resolve, 200); });
+  assert.equal(text('search'), '?filter=picked&q=dune');
+  assert.equal(text('input'), 'dune');
+});

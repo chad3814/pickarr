@@ -8,6 +8,12 @@
  * land do not stack). Clearing is immediate: an empty box should empty the
  * list without a pause. All-with-empty-q writes no params at all, so the
  * default URL stays bare.
+ *
+ * Changing the filter is immediate too, and it takes a pending keystroke
+ * with it: the debounce timer is cancelled and the filter is written
+ * together with the typed value, so neither is lost or delayed. The timer
+ * itself reads the filter current when it fires, not the one in scope when
+ * the key was pressed.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
@@ -46,6 +52,10 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
   const q = params.get('q') ?? '';
   const [input, setInput] = useState(q);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  /** The typed value the pending timer will write; meaningful only while `timer` is set. */
+  const pendingQ = useRef('');
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
   // The URL is the source of truth; a back/forward navigation re-seeds the box.
   useEffect(() => {
     setInput(q);
@@ -64,7 +74,13 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
   );
   const setFilter = useCallback(
     (f: PickedFilter) => {
-      write(f, q);
+      let nextQ = q;
+      if (timer.current !== undefined) {
+        clearTimeout(timer.current);
+        timer.current = undefined;
+        nextQ = pendingQ.current;
+      }
+      write(f, nextQ);
     },
     [write, q],
   );
@@ -72,15 +88,18 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
     (value: string) => {
       setInput(value);
       if (timer.current !== undefined) clearTimeout(timer.current);
+      timer.current = undefined;
       if (value.trim() === '') {
-        write(filter, '');
+        write(filterRef.current, '');
         return;
       }
+      pendingQ.current = value;
       timer.current = setTimeout(() => {
-        write(filter, value);
+        timer.current = undefined;
+        write(filterRef.current, value);
       }, SEARCH_DEBOUNCE_MS);
     },
-    [write, filter],
+    [write],
   );
   return {
     query: { filter, q, term: normalizeTerm(q) },
