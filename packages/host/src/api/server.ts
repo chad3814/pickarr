@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, nineteen routes --
- * seventeen behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, twenty routes --
+ * eighteen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -23,7 +23,8 @@
  * /api/feeds/:id`, a second route answering two methods, and to eighteen
  * with `POST /api/unmatched/:id/retry`, letting an operator ask for an
  * unmatched release to be identified again, and to nineteen with
- * `GET /api/sync/events`, the live-push slice's stream of sync nudges.)
+ * `GET /api/sync/events`, the live-push slice's stream of sync nudges, and
+ * to twenty with `GET /api/activity`, the Activities slice's read.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -156,6 +157,8 @@ import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { SyncEvents } from '../sync/events.ts';
+import type { ActivityHost } from '@pickarr/contract';
+import { readActivity } from './activity.ts';
 import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
 import { json } from './answer.ts';
@@ -478,6 +481,8 @@ export interface ReadServerDeps {
    * Built by `main.ts` and the e2e harness; a test builds a quiet one.
    */
   events: SyncEvents;
+  /** The fetch layer's `snapshot`, which `GET /api/activity` reads; a test hands in a constant. */
+  fetchSnapshot: () => readonly ActivityHost[];
   /**
    * The interface to bind, or `undefined` for `DEFAULT_HOST`.
    *
@@ -862,8 +867,8 @@ interface Route {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The nineteen routes -- seventeen guarded, two `open: true`, the same split
- * this module's own doc states. Nineteen *routes*, twenty-one
+ * The twenty routes -- eighteen guarded, two `open: true`, the same split
+ * this module's own doc states. Twenty *routes*, twenty-two
  * route-and-method pairs: `/api/mappings/:id` and `/api/feeds/:id` are the
  * two entries here that declare two methods each, so the two counts have
  * parted company and a reader counting "endpoints" will get a different
@@ -878,9 +883,10 @@ const STATIC_ROUTE_PATH = '/*';
  * (The picks slice made it thirteen and corrected both; the mappings slice
  * made it fifteen and the importer slice sixteen. The feed-removal slice
  * made it seventeen and the retry slice eighteen, both missing this line
- * too. The live-push slice's `GET /api/sync/events` made it nineteen.
+ * too. The live-push slice's `GET /api/sync/events` made it nineteen
+ * and the Activities slice's `GET /api/activity` twenty.
  * Measured with the `grep` below on each occasion, not incremented on
- * sight -- `19` on this tree.) That is not an argument for deleting the number:
+ * sight -- `20` on this tree.) That is not an argument for deleting the number:
  * a reader wants to know whether the table below is the whole set. It is
  * an argument for checking it, because no test pins the total and none
  * can usefully. The one count assertion in `api/server.test.ts` is
@@ -1000,6 +1006,13 @@ export const ROUTES: readonly Route[] = [
     // is a side channel onto the same data, and the session guard runs
     // before this answer is ever built (design spec 2026-10-01 §2).
     answer: ({ deps }) => ({ kind: 'stream', attach: (response) => { deps.events.attach(response); } }),
+  },
+  {
+    path: '/api/activity',
+    methods: ['GET'],
+    open: false,
+    // The host's own work is as private as the library it works on.
+    answer: ({ deps }) => json(200, readActivity(deps.raw, deps.fetchSnapshot)),
   },
   {
     path: '/api/sync/bootstrap',

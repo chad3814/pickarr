@@ -261,6 +261,8 @@ async function start(
     // `raw` -- `overrides.events` (the stream test passes one wired to
     // `setSyncChangedListener`) wins through the spread below.
     events: eventsFor(raw),
+    // No fetch layer in this file: an empty queue, unless a test hands in a snapshot.
+    fetchSnapshot: () => [],
     host,
     port: 0,
     webRoot: MISSING_WEB_ROOT,
@@ -3728,6 +3730,27 @@ test('the event stream is guarded session-first like every route', async () => {
     assert.deepEqual(await anonymous.json(), { error: 'unauthorized' });
     const post = await fetch(`${originOf(server)}/api/sync/events`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     assert.equal(post.status, 401, 'anonymous first: a POST without a session learns nothing about methods');
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /api/activity is guarded session-first and answers the activity shape', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const { server, cookie } = await startSignedIn(raw, db, () => undefined, {
+    fetchSnapshot: () => [{ hostname: 'h', limit: 1, inFlight: [], waiting: [{ method: 'GET', target: 'https://h/x' }] }],
+  });
+  try {
+    const anonymous = await fetch(`${originOf(server)}/api/activity`);
+    assert.equal(anonymous.status, 401);
+    const post = await fetch(`${originOf(server)}/api/activity`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(post.status, 405);
+    const ok = await get(server, '/api/activity', cookie);
+    assert.equal(ok.status, 200);
+    const body: unknown = await ok.json();
+    assert.ok(typeof body === 'object' && body !== null && 'jobs' in body && 'fetches' in body);
+    assert.ok(!/payload/i.test(JSON.stringify(body)));
   } finally {
     await server.close();
   }
