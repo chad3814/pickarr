@@ -771,3 +771,10 @@ section > p:not(.details-foot) {
   display: block;
   max-width: 80vw; max-height: 70vh; object-fit: contain;
 }
+
+/* The picked filter and search form. These selectors reach `BrowseControls.tsx`'s form and nothing else. */
+form[role='search'] { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block-end: var(--space-3); }
+form[role='search'] fieldset { display: flex; gap: var(--space-2); border: 0; padding: 0; margin: 0; }
+form[role='search'] legend { float: left; margin-inline-end: var(--space-2); }
+form[role='search'] fieldset label { display: inline-flex; align-items: center; gap: var(--space-1); }
+form[role='search'] > label { display: inline-flex; align-items: center; gap: var(--space-2); }
