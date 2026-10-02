@@ -69,9 +69,9 @@
  * **What "self-correcting" means here.** This hook subscribes to the
  * gathered media item's own row (`table: 'media_item'`) for as long as it is
  * `enabled`, and a notification on that row triggers a fresh gather that
- * replaces the cached one. It does *not* subscribe to every release or
- * download the first gather found, because it has no way to name a row that
- * gather never saw in the first place.
+ * replaces the cached one. Rows the gather found are watched too (the
+ * paragraphs below), and what it cannot do is name a row that gather never
+ * saw in the first place.
  *
  * **The `new download` half of that is now covered, by the channel built for
  * rows with no id yet.** This paragraph used to end by saying a correction

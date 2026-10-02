@@ -166,7 +166,7 @@ test('arrow keys move the highlight with wrapping and aria-activedescendant foll
   fireEvent.keyDown(combobox(), { key: 'ArrowDown' });
   assert.ok(activeIsOption(1));
   fireEvent.keyDown(combobox(), { key: 'Enter' });
-  assert.equal(combobox().value, 'Dune: Part Two', 'Enter chose the highlighted title');
+  assert.equal(combobox().value, 'Dune: Part Two (2024)', 'Enter chose the highlighted title, filled with its label');
   assert.equal(combobox().getAttribute('aria-expanded'), 'false');
   assert.ok(!combobox().hasAttribute('aria-activedescendant'));
 
@@ -174,7 +174,7 @@ test('arrow keys move the highlight with wrapping and aria-activedescendant foll
   assert.equal(combobox().getAttribute('aria-expanded'), 'true', 'an arrow reopens a closed list');
   fireEvent.keyDown(combobox(), { key: 'Escape' });
   assert.equal(combobox().getAttribute('aria-expanded'), 'false', 'Escape closes the list');
-  assert.equal(combobox().value, 'Dune: Part Two', 'and keeps what was typed');
+  assert.equal(combobox().value, 'Dune: Part Two (2024)', 'and keeps what was typed');
   assert.equal(cancelled, 0, 'and does not close the form');
 });
 
@@ -208,6 +208,45 @@ test('choosing a candidate posts media-item; choosing the look-up option posts n
     assert.equal(named.requests.length, 1);
   });
   assert.deepEqual(named.requests, [{ rssItemId: 7, request: { mode: 'name', name: 'Dune   Part Two' } }]);
+});
+
+test('blur closes the list', async () => {
+  const stub = stubIdentify(() => Promise.resolve(DUNE));
+  renderForm(stub.identify);
+  await type(stub, 'dune', 1);
+  await waitFor(() => {
+    assert.equal(combobox().getAttribute('aria-expanded'), 'true');
+  });
+  fireEvent.blur(combobox());
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false');
+});
+
+test('a mouse choice keeps focus on the input, and still lands before blur could close the list', async () => {
+  const stub = stubIdentify(() => Promise.resolve(DUNE));
+  renderForm(stub.identify);
+  await type(stub, 'dune', 1);
+  await waitFor(() => {
+    assert.equal(optionTexts().length, 4);
+  });
+  const input = combobox();
+  input.focus();
+  // `fireEvent` answers false when a handler cancelled the event, which is
+  // what stops a real browser moving focus to the option.
+  const notCancelled = fireEvent.mouseDown(screen.getByRole('option', { name: 'Dune (2021)' }));
+  assert.equal(notCancelled, false, 'mousedown on an option is default-prevented');
+  assert.equal(document.activeElement === input, true, 'focus is still in the input');
+  assert.equal(input.value, 'Dune (2021)');
+});
+
+test('the open listbox is named by the Title label', async () => {
+  const stub = stubIdentify(() => Promise.resolve(DUNE));
+  renderForm(stub.identify);
+  await type(stub, 'dune', 1);
+  await waitFor(() => {
+    assert.equal(optionTexts().length, 4);
+  });
+  const listboxId = combobox().getAttribute('aria-controls') ?? '';
+  assert.equal(screen.getByRole('listbox', { name: 'Title' }).id === listboxId, true);
 });
 
 test('editing after a choice reverts to name mode', async () => {
@@ -347,14 +386,14 @@ test('choosing an option while a newer suggest is in flight keeps the list close
 
   await type(stub, 'dune', 2);
   fireEvent.mouseDown(screen.getByRole('option', { name: 'Dune (2021)' }));
-  assert.equal(combobox().value, 'Dune');
+  assert.equal(combobox().value, 'Dune (2021)');
   await act(async () => {
     resolvers.get('dune')?.([{ mediaItemId: 99, title: 'Duel', year: '1971' }]);
     await Promise.resolve();
   });
 
   assert.equal(combobox().getAttribute('aria-expanded'), 'false', 'the late answer does not reopen the list');
-  assert.equal(combobox().value, 'Dune', 'and the chosen title stays');
+  assert.equal(combobox().value, 'Dune (2021)', 'and the chosen title stays');
 });
 
 test('choosing an option inside the debounce window cancels the pending lookup', async () => {

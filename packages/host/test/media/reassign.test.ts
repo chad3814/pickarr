@@ -8,7 +8,8 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { createMediaWriter } from '../../src/media/writer.ts';
 import { reassignRelease, type ReassignDeps } from '../../src/media/reassign.ts';
 import { createTvPlugin } from '@pickarr/plugin-tv';
-import { insertFeed } from './support.ts';
+import { insertFeed, withArtworkStore } from './support.ts';
+import { gifBytes } from '../support/gif.ts';
 
 const NOW = 1_700_000_000_000;
 
@@ -142,4 +143,57 @@ test('moving the last release off an item succeeds with the engine lookup table 
   assert.equal(item(raw, 1), undefined);
   assert.equal(raw.prepare('SELECT media_item_id FROM tv_lookup WHERE rss_item_id = 10').get()?.['media_item_id'], null);
   assert.equal(raw.prepare('SELECT count(*) AS n FROM tv_release').get()?.['n'], 0);
+});
+
+/**
+ * The dropped item's cached poster file is unlinked once, after the move has
+ * committed, and never when the move rolled back. Real store, so the row and
+ * the file are the real ones; `remove` is wrapped only to count calls.
+ */
+async function reassignWithPoster(dropRows: ReassignDeps['dropRows']): Promise<{
+  raw: DatabaseSync;
+  removed: string[];
+  inTransactionAtUnlink: boolean[];
+  posterPath: string;
+}> {
+  let captured: { raw: DatabaseSync; removed: string[]; inTransactionAtUnlink: boolean[]; posterPath: string } | undefined;
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const removed: string[] = [];
+    const inTransactionAtUnlink: boolean[] = [];
+    const counting: ArtworkStore = {
+      ...artwork,
+      remove: async (path) => {
+        removed.push(path);
+        inTransactionAtUnlink.push(raw.isTransaction);
+        await artwork.remove(path);
+      },
+    };
+    const writer = createMediaWriter(db, () => NOW, counting, { dropRows });
+    const feedId = insertFeed(raw, 'http://feed.invalid/a');
+    seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1);
+    await writer.attachPoster(1, { title: null, language: null, url: 'https://images.test/p.gif', bytes: gifBytes(300, 450) });
+    const row = raw.prepare('SELECT path FROM poster WHERE media_item_id = 1').get();
+    const posterPath = String(row?.['path']);
+    captured = { raw, removed, inTransactionAtUnlink, posterPath };
+    // A throwing hook rejects; the caller asserts on the state the move left.
+    await writer.reassignRelease(10, 2).catch(() => {});
+  });
+  if (captured === undefined) throw new Error('withArtworkStore did not run');
+  return captured;
+}
+
+test('a successful move unlinks the dropped item\'s poster file once, after the commit, and its row is gone', async () => {
+  const { raw, removed, inTransactionAtUnlink, posterPath } = await reassignWithPoster(async () => {});
+  assert.deepEqual(removed, [posterPath]);
+  assert.deepEqual(inTransactionAtUnlink, [false], 'the savepoint was released before any file I/O');
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM poster WHERE media_item_id = 1').get()?.['n'], 0);
+});
+
+test('a move whose plugin hook throws unlinks nothing and keeps the poster row', async () => {
+  const { raw, removed } = await reassignWithPoster(async () => { throw new Error('plugin refused'); });
+  assert.deepEqual(removed, []);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM poster WHERE media_item_id = 1').get()?.['n'], 1);
+  assert.equal(release(raw, 10)?.['media_item_id'], 1);
 });

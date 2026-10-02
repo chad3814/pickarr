@@ -88,8 +88,8 @@ export interface ProviderClaim {
  * **Nothing here is scoped to the calling plugin -- do not infer symmetry
  * with `MediaReader`.** Unlike the reader, which the host builds once *per
  * plugin* around that plugin's id, there is one writer shared by every
- * plugin context and it closes over no plugin id at all: thirteen of its fourteen
- * methods are handed none, and `createMediaItem` stores the `pluginId` in
+ * plugin context and it closes over no plugin id at all: every method but
+ * `createMediaItem` is handed none, and `createMediaItem` stores the `pluginId` in
  * `MediaItemInit` without checking it against the plugin doing the writing.
  * So every method acts on the bare row id it is given, whoever wrote that
  * row: `setLookupState` on another plugin's rss item, `updateMediaItem` and

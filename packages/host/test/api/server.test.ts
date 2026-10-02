@@ -2366,6 +2366,7 @@ test('identify: a bad body is 400 invalid-shape and the host is never asked', as
       { mode: 'name', name: '   ' },
       { mode: 'name' },
       { mode: 'media-item', mediaItemId: '7' },
+      { mode: 'media-item', mediaItemId: 7.5 },
       { mode: 'media-item' },
       { mode: 'other' },
     ]) {

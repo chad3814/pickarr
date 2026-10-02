@@ -14,9 +14,11 @@
  * it was issued at, so an answer for `du` that lands after the answer for
  * `dune` is dropped rather than overwriting it.
  *
- * Options use `onMouseDown`, not `onClick`: the input's blur fires between
- * the two, and a list that closes on blur would be gone before the click
- * landed.
+ * The list closes when the input blurs. Options therefore use `onMouseDown`,
+ * not `onClick`: the input's blur fires between the two, and a list that
+ * closes on blur would be gone before the click landed. The option's
+ * `mousedown` also calls `preventDefault()`, so the click does not move focus
+ * out of the input in the first place.
  *
  * `aria-activedescendant` is present only while the list is open; a closed
  * list has no active option to name.
@@ -60,6 +62,7 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
   const uid = useId();
   const base = `identify-${String(rssItemId)}-${uid}`;
   const inputId = `${base}-input`;
+  const labelId = `${base}-label`;
   const listboxId = `${base}-listbox`;
   const optionId = `${base}-option`;
 
@@ -114,7 +117,7 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
       setChosen(null);
     } else {
       setChosen(candidate.mediaItemId);
-      setInput(candidate.title);
+      setInput(candidateLabel(candidate));
     }
     setOpen(false);
   }
@@ -179,7 +182,7 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
         void save();
       }}
     >
-      <label htmlFor={inputId}>Title</label>
+      <label id={labelId} htmlFor={inputId}>Title</label>
       <input
         id={inputId}
         role="combobox"
@@ -190,16 +193,20 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
         value={input}
         onChange={onInput}
         onKeyDown={onKey}
+        onBlur={() => {
+          setOpen(false);
+        }}
         {...activeProps}
       />
-      <ul id={listboxId} role="listbox" hidden={!open}>
+      <ul id={listboxId} role="listbox" aria-labelledby={labelId} hidden={!open}>
         {options.map((candidate, index) => (
           <li
             key={candidate.mediaItemId}
             id={`${optionId}-${String(index)}`}
             role="option"
             aria-selected={index === highlight}
-            onMouseDown={() => {
+            onMouseDown={(event) => {
+              event.preventDefault();
               choose(index);
             }}
           >
@@ -211,7 +218,8 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
             id={`${optionId}-${String(lookUpIndex)}`}
             role="option"
             aria-selected={highlight === lookUpIndex}
-            onMouseDown={() => {
+            onMouseDown={(event) => {
+              event.preventDefault();
               choose(lookUpIndex);
             }}
           >

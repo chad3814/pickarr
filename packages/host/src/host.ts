@@ -538,8 +538,8 @@ export function createHost(deps: {
   let started = false;
 
   // One instance shared by every plugin, because `MediaWriter` is
-  // plugin-agnostic: thirteen of its fourteen methods take no plugin id at all, and
-  // the fourteenth — `createMediaItem`, through `MediaItemInit.pluginId` —
+  // plugin-agnostic: every method but `createMediaItem` takes no plugin id at all, and
+  // that one — `createMediaItem`, through `MediaItemInit.pluginId` —
   // stores the id it is handed without checking it against the plugin doing
   // the writing. So there is nothing per-plugin here to close over, and equally
   // nothing that stops `ctx.media.setLookupState(anyRssItemId, …)` or

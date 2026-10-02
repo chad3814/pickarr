@@ -50,7 +50,7 @@ import { useInfiniteScroll } from './useInfiniteScroll.ts';
 import type { IdentifySubmit } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
-/** Everything this screen needs from a store: `useMediaItems`'s two members, `useCatalogItems`' three (`getRows` is shared with `MediaItemCard`'s), `MediaItemCard`'s own four (through `useGatheredItem`), and `usePluginRows`' one -- `subscribeInserts` is shared by two of the three. A real `Store` satisfies this by structural assignment. */
+/** Everything this screen needs from a store: `useMediaItems`'s two (`listByTablePlugin`, `subscribeTouched`), `useCatalogItems`' three (`listCatalog`, `getRows`, `subscribeCatalog`), `useGatheredItem`'s four (`gatherMediaItem`, `subscribe`, `subscribeInserts`, `getRows`), and `usePluginRows`' three (`pluginRowsByMediaItems`, `subscribeTouched`, `getRows`) -- `getRows` is shared by three of the four and `subscribeTouched` by two. A real `Store` satisfies this by structural assignment. */
 export interface CategorySource extends MediaItemsSource, CatalogItemsSource, GatheredSource, PluginRowsSource {}
 
 export interface CategoryProps {

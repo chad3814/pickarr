@@ -807,7 +807,11 @@ dl form {
 
 /* The options are `<li>`s inside a release's `<li>`, so the release-row rule
    above (flex, a top rule, a baseline gap) reaches them too: this resets
-   exactly what it sets, at the same specificity and later in the file. */
+   exactly what it sets. The first selector outranks the row rule by
+   specificity (two attribute selectors against one), so it wins wherever it
+   sits in the file; the bare `[role='option']` is the lower-specificity
+   fallback for options outside a release row, as in the unmatched card's
+   `dl`, where no row rule applies. */
 ul[aria-label='releases'] li[role='option'],
 [role='option'] {
   display: block;
