@@ -6,10 +6,13 @@
  * that was asleep).
  *
  * **A refetch, not a patch.** The event carries nothing, and the answer is
- * small, so every wake replaces the whole read. A failed refetch keeps the
- * last good read and flags `unreachable` rather than blanking the page: an
+ * small, so every wake replaces the whole read. A failed refetch (offline, a
+ * non-200, or a body that is not an `ActivityRead`) after a good read keeps
+ * that read and flags `unreachable` rather than blanking the page: an
  * operator watching a stalled queue should not lose it because one request
- * dropped.
+ * dropped. A failure before any read has nothing to keep and is the
+ * `unreachable` phase instead, so the page says so rather than staying on
+ * `loading`; the next good read moves either to `ready`.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { ActivityHost, ActivityJob, ActivityRead, ActivityRequest } from '@pickarr/contract';
@@ -20,6 +23,7 @@ export const ACTIVITY_POLL_MS = 30_000;
 
 export type ActivityState =
   | { readonly phase: 'loading' }
+  | { readonly phase: 'unreachable' }
   | { readonly phase: 'ready'; readonly read: ActivityRead; readonly unreachable: boolean };
 
 export interface ActivitySource {
@@ -116,7 +120,7 @@ export function useActivity(
         setState({ phase: 'ready', read: result.body, unreachable: false });
         return;
       }
-      setState((prev) => (prev.phase === 'ready' ? { ...prev, unreachable: true } : prev));
+      setState((prev) => (prev.phase === 'ready' ? { ...prev, unreachable: true } : { phase: 'unreachable' }));
     }
 
     function run(): void {

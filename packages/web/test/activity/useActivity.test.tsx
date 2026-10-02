@@ -65,6 +65,7 @@ function Harness({
 }): ReactElement {
   const state = useActivity(SOURCE, fetch, onExpired, intervalMs);
   if (state.phase === 'loading') return <p>loading</p>;
+  if (state.phase === 'unreachable') return <p>failed first</p>;
   const running = state.read.jobs.running.map((j) => j.kind).join(',');
   return <p>{`ready ${running} ${state.unreachable ? 'unreachable' : 'reachable'}`}</p>;
 }
@@ -133,20 +134,21 @@ test('an offline answer after a ready one keeps the last read and flags unreacha
   });
 });
 
-test('a non-200 answer and an unrecognisable body count as unreachable, and before any read leave the page loading', async () => {
-  const s = sequence([answered({ error: 'boom' }, 500), answered({ jobs: 'nope' }), answered(readWithRunning('ok'))]);
+test('a failure before any read is the unreachable phase, and a later good read makes it ready', async () => {
+  const s = sequence([{ outcome: 'offline' }, answered({ error: 'boom' }, 500), answered({ jobs: 'nope' }), answered(readWithRunning('ok'))]);
   render(<Harness fetch={s.fetch} onExpired={() => {}} />);
   await waitFor(() => {
-    assert.equal(s.calls(), 1);
+    assert.ok(screen.getByText('failed first'), 'offline');
   });
-  assert.ok(screen.getByText('loading'), 'a 500 with no earlier read stays loading');
-  act(() => {
-    emitActivity();
-  });
-  await waitFor(() => {
-    assert.equal(s.calls(), 2);
-  });
-  assert.ok(screen.getByText('loading'), 'a body of the wrong shape is not a read');
+  for (const calls of [2, 3]) {
+    act(() => {
+      emitActivity();
+    });
+    await waitFor(() => {
+      assert.equal(s.calls(), calls);
+    });
+    assert.ok(screen.getByText('failed first'), 'a 500 and a body of the wrong shape are failures too');
+  }
   act(() => {
     emitActivity();
   });

@@ -487,3 +487,19 @@ test('activeDownloads lists every non-terminal download with its filename, title
   assert.deepEqual(rows.map((r) => r.updatedAt), [9, 3], 'newest first');
   db.close();
 });
+
+test('activeDownloads finds a quiet live download behind more terminal rows than one page', async () => {
+  const db = await freshDb();
+  const download = (id: number, status: string, updatedAt: number): SyncOp => ({
+    op: 'upsert',
+    table: 'torrent_download',
+    id,
+    value: { id, rssItemId: 1, downloadClientId: 1, infohash: null, clientRef: null, status, attempts: 1, createdAt: 1, updatedAt, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null },
+  });
+  const ops: SyncOp[] = [download(1, 'submitting', 1)];
+  for (let id = 2; id <= 12; id += 1) ops.push(download(id, id % 2 === 0 ? 'delivered' : 'failed', id * 10));
+  await applyBatch(db, ops, { since: 1, before: null });
+  const rows = await activeDownloads(db, 3);
+  assert.deepEqual(rows.map((r) => [r.id, r.status]), [[1, 'submitting']], 'the oldest row is live and 11 newer terminal rows span four pages of three');
+  db.close();
+});

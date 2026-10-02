@@ -516,8 +516,8 @@ export interface ActiveDownload {
   readonly updatedAt: number;
 }
 
-/** A page far past any plausible number of live downloads; terminal rows share it, so it is a ceiling on the newest 500 of either table. */
-const ACTIVE_DOWNLOADS_LIMIT = 500;
+/** Rows read per `listByTable` page while walking a download table. */
+const ACTIVE_DOWNLOADS_PAGE = 200;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -559,17 +559,31 @@ function stringField(value: unknown, key: string): string | undefined {
  * replicated (log order is not row order) falls back rather than dropping
  * the download: the page would otherwise hide work that is really running.
  */
-export async function activeDownloads(db: IDBDatabase): Promise<readonly ActiveDownload[]> {
-  const opts: ListByTableOptions = { direction: 'prev', limit: ACTIVE_DOWNLOADS_LIMIT };
-  const [torrents, nzbs] = await Promise.all([
-    listByTable(db, 'torrent_download', opts),
-    listByTable(db, 'nzb_download', opts),
-  ]);
+export async function activeDownloads(
+  db: IDBDatabase,
+  pageSize: number = ACTIVE_DOWNLOADS_PAGE,
+): Promise<readonly ActiveDownload[]> {
   const live: { table: ActiveDownload['table']; raw: RawDownload }[] = [];
-  for (const [table, rows] of [['torrent_download', torrents], ['nzb_download', nzbs]] as const) {
-    for (const row of rows) {
-      const raw = toRawDownload(row.value);
-      if (raw !== undefined && raw.status !== 'delivered' && raw.status !== 'failed') live.push({ table, raw });
+  for (const table of ['torrent_download', 'nzb_download'] as const) {
+    // Walks the whole table newest first, page by page, keeping the
+    // non-terminal rows as it goes. There is no cap on rows read: a quiet live
+    // download (a stalled `submitting`, an old `updatedAt`) can sit behind any
+    // number of newer terminal rows, and a fixed limit would hide it.
+    let from: { updatedAt: number; id: number } | undefined;
+    for (;;) {
+      const page = await listByTable(db, table, from === undefined ? { direction: 'prev', limit: pageSize } : { direction: 'prev', limit: pageSize, from });
+      for (const row of page) {
+        const raw = toRawDownload(row.value);
+        if (raw !== undefined && raw.status !== 'delivered' && raw.status !== 'failed') live.push({ table, raw });
+      }
+      const last = page[page.length - 1];
+      if (page.length < pageSize || last === undefined) break;
+      const lastRaw = toRawDownload(last.value);
+      // `by_table_updated` only indexes rows with an `updatedAt`, so a row
+      // listed here without a readable one cannot happen; stopping is the
+      // safe answer if it ever did, rather than looping on the same page.
+      if (lastRaw === undefined) break;
+      from = { updatedAt: lastRaw.updatedAt, id: last.id };
     }
   }
 

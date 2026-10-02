@@ -171,6 +171,8 @@ export function Activities({ source, fetchActivity, onExpired }: ActivitiesProps
       <h1 id="activities-heading">Activities</h1>
       {activity.phase === 'loading' ? (
         <p>Loading…</p>
+      ) : activity.phase === 'unreachable' ? (
+        <p role="status">Couldn&apos;t reach Pickarr</p>
       ) : (
         <>
           {activity.unreachable ? <p role="status">Couldn&apos;t reach Pickarr</p> : null}

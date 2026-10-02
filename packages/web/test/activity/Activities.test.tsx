@@ -121,6 +121,12 @@ test('index.css imports activities.css into the components layer', async () => {
   assert.ok(css.includes("@import './activities.css' layer(components);"));
 });
 
+test('a first load that fails says Couldn\'t reach Pickarr, not Loading…', async () => {
+  render(<Activities source={sourceWith(() => [])} fetchActivity={() => Promise.resolve({ outcome: 'offline' })} onExpired={noExpiry} />);
+  await screen.findByText('Couldn\'t reach Pickarr');
+  assert.ok(!screen.queryByText('Loading…'));
+});
+
 test('an offline answer after a read keeps it and says Couldn\'t reach Pickarr', async () => {
   let offline = false;
   const fetchActivity: ActivityFetch = () =>
