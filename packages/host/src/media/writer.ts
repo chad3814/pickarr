@@ -11,6 +11,7 @@ import type {
 import { normalizeVideoResolution } from '@pickarr/contract';
 import type { ArtworkStore } from '../artwork/store.ts';
 import type { HostDb } from '../db/open.ts';
+import { reassignRelease, type ReassignDeps } from './reassign.ts';
 
 /** SQLite's own code for a UNIQUE constraint failure -- verified against `node:sqlite`. */
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
@@ -57,7 +58,12 @@ function isUniqueConstraintViolation(err: unknown): boolean {
  * That makes this writer perform filesystem I/O it did not before -- the
  * cost of that one writer.
  */
-export function createMediaWriter(db: HostDb, now: () => number, artwork: ArtworkStore): MediaWriter {
+export function createMediaWriter(
+  db: HostDb,
+  now: () => number,
+  artwork: ArtworkStore,
+  hooks: { dropRows: ReassignDeps['dropRows'] },
+): MediaWriter {
   const raw = db.$client;
 
   /**
@@ -139,7 +145,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
     );
   }
 
-  return {
+  const writer: MediaWriter = {
     async createMediaItem(init: MediaItemInit): Promise<number> {
       const at = now();
       const result = raw.prepare(`
@@ -224,11 +230,27 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
       }
     },
 
+    reassignRelease(rssItemId: number, mediaItemId: number): Promise<void> {
+      return reassignRelease(
+        { raw, relink: writer.relinkRssItem, drop: writer.dropMediaItemRows, unlink: (path) => artwork.remove(path), now, dropRows: hooks.dropRows },
+        rssItemId,
+        mediaItemId,
+      );
+    },
+
     async dropMediaItem(mediaItemId: number): Promise<void> {
-      // Read the paths, delete the rows, then unlink the files best-effort --
-      // in that order. A failed unlink after the row is gone leaks a file; a
-      // failed row delete after the unlink leaves a row pointing at nothing,
-      // which is worse, because something will try to serve it.
+      // Rows first, then the files: a failed unlink after the row is gone
+      // leaks a file; a failed row delete after the unlink leaves a row
+      // pointing at nothing, which is worse, because something will try to
+      // serve it.
+      const paths = writer.dropMediaItemRows(mediaItemId);
+      await Promise.all(paths.map((path) => artwork.remove(path)));
+    },
+
+    dropMediaItemRows(mediaItemId: number): readonly string[] {
+      // Read the paths and delete the rows; the caller unlinks the files
+      // afterwards, outside any savepoint of its own. Synchronous so a
+      // caller inside a savepoint (`reassignRelease`) holds it across no I/O.
       const paths = artworkPaths(mediaItemId);
       const at = now();
       // One savepoint for the three artwork tables, the media item row and
@@ -282,7 +304,7 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
         throw err;
       }
       raw.exec('RELEASE drop_media_item');
-      await Promise.all(paths.map((path) => artwork.remove(path)));
+      return paths;
     },
 
     async attachPoster(mediaItemId: number, poster: ImageInit): Promise<void> {
@@ -425,4 +447,5 @@ export function createMediaWriter(db: HostDb, now: () => number, artwork: Artwor
         .run(value, now(), rssItemId, value);
     },
   };
+  return writer;
 }

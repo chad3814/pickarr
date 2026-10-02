@@ -116,6 +116,14 @@ export function retryIdFrom(pathname: string): number | undefined {
 }
 
 /**
+ * The release id in `/api/releases/:id/identify`: five segments, the id
+ * third, exactly as {@link retryIdFrom}.
+ */
+export function identifyIdFrom(pathname: string): number | undefined {
+  return idAt(pathname, 5, 3);
+}
+
+/**
  * The integer at `index` of a pathname with exactly `segments` parts, or
  * `undefined` for anything else.
  *

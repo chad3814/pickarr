@@ -215,3 +215,12 @@ export async function applyTv(args: ApplyArgs): Promise<void> {
     now,
   });
 }
+
+/**
+ * Deletes the release row for a media item the host is dropping
+ * (`MediaPlugin.onMediaItemDropped`). The series and seasons are shared
+ * across items and stay.
+ */
+export function dropTvRows(mediaItemId: number, raw: DatabaseSync): void {
+  raw.prepare('DELETE FROM tv_release WHERE media_item_id = ?').run(mediaItemId);
+}

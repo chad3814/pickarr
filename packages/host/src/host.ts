@@ -6,6 +6,8 @@ import type {
   DownloadClients,
   DownloadedFile,
   EditMappingInput,
+  IdentifyReleaseOutcome,
+  IdentifyRequest,
   JobHandler,
   MediaPlugin,
   PluginContext,
@@ -36,6 +38,7 @@ import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
 import { retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
+import { identifyRelease as identifyReleaseRule } from './media/identify.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
 import {
   addMapping as addMappingRule,
@@ -185,6 +188,13 @@ export interface Host {
    * its three refusals it decides itself.
    */
   retryLookup(rssItemId: number): Promise<RetryLookupOutcome>;
+  /**
+   * Identifies a release by hand: asks its plugin to look it up again
+   * (`requery`), to look it up under a corrected name (`name`), or links it
+   * to a media item the library already has (`media-item`). Refusals are
+   * values; a plugin fault throws. See `media/identify.ts`.
+   */
+  identifyRelease(rssItemId: number, request: IdentifyRequest): Promise<IdentifyReleaseOutcome>;
   /**
    * Validates and writes a new `rss_feed` row, then schedules its first poll
    * immediately -- the same call `main.ts` already makes at boot for every
@@ -528,8 +538,8 @@ export function createHost(deps: {
   let started = false;
 
   // One instance shared by every plugin, because `MediaWriter` is
-  // plugin-agnostic: ten of its eleven methods take no plugin id at all, and
-  // the eleventh — `createMediaItem`, through `MediaItemInit.pluginId` —
+  // plugin-agnostic: every method but `createMediaItem` takes no plugin id at all, and
+  // that one — `createMediaItem`, through `MediaItemInit.pluginId` —
   // stores the id it is handed without checking it against the plugin doing
   // the writing. So there is nothing per-plugin here to close over, and equally
   // nothing that stops `ctx.media.setLookupState(anyRssItemId, …)` or
@@ -538,7 +548,13 @@ export function createHost(deps: {
   // keeps a plugin on its own side of them is convention and explicit
   // wiring, not enforcement.
   const artwork = createArtworkStore(deps.artworkDir, hostLog);
-  const media = createMediaWriter(deps.db, deps.now, artwork);
+  const media = createMediaWriter(deps.db, deps.now, artwork, {
+    dropRows: async (pluginId, mediaItemId) => {
+      const plugin = plugins.get(pluginId);
+      if (plugin === undefined) throw new PluginNotRegisteredError(pluginId);
+      await plugin.onMediaItemDropped(mediaItemId, ctxFor(pluginId));
+    },
+  });
 
   function ctxFor(pluginId: string): PluginContext {
     return {
@@ -845,6 +861,14 @@ export function createHost(deps: {
       // ids nothing claims, and a retry that re-implemented either would be
       // a second copy free to drift.
       return retryLookupRule({ raw: deps.raw, notify: notifyNewRssItems }, rssItemId);
+    },
+
+    identifyRelease(rssItemId, request) {
+      return identifyReleaseRule(
+        { raw: deps.raw, pluginFor: (id) => plugins.get(id), ctxFor, reassign: media.reassignRelease },
+        rssItemId,
+        request,
+      );
     },
 
     async requestPick(rssItemId) {

@@ -22,7 +22,7 @@ import {
   MAPPING_REFUSALS,
   REQUEST_PICK_REFUSALS,
 } from '@pickarr/contract';
-import type { DestinationRefusalCode } from '@pickarr/contract';
+import type { DestinationRefusalCode, IdentifyReleaseRefusalCode, IdentifyRequest } from '@pickarr/contract';
 import { shippedPlugins } from '../../src/main.ts';
 import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { PAGE_SIZE, encodeCursor, encodeUnionCursor } from '../../src/api/cursor.ts';
@@ -206,6 +206,11 @@ async function start(
     // those tests pass for the wrong reason.
     retryLookup: () => {
       throw new Error('retryLookup not stubbed in this test');
+    },
+    // Same reasoning once more: the guard probes reach `/api/releases/:id/identify`
+    // with a session and a body the shape guard refuses ahead of this.
+    identifyRelease: () => {
+      throw new Error('identifyRelease not stubbed in this test');
     },
     requestPick: () => {
       throw new Error('requestPick not stubbed in this test');
@@ -2279,6 +2284,125 @@ test('a retry path whose id is not an integer is an unknown route, and never rea
       assert.equal(answer.status, 404, `${path} is not a route`);
     }
     assert.equal(called, 0, 'and the host was never asked about any of them');
+  } finally {
+    await server.close();
+  }
+});
+
+test('identify: media-item answers 200 linked, requery and name answer 202, and the id travels from the path', async () => {
+  const { raw, db } = setup();
+  const asked: [number, IdentifyRequest][] = [];
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    identifyRelease: async (rssItemId, request) => {
+      asked.push([rssItemId, request]);
+      return request.mode === 'media-item'
+        ? { outcome: 'linked', mediaItemId: request.mediaItemId }
+        : { accepted: true };
+    },
+  });
+  try {
+    const requery = await post(server, '/api/releases/860531/identify', cookie, { mode: 'requery' });
+    assert.equal(requery.status, 202);
+    assert.deepEqual(JSON.parse(requery.text), { accepted: true });
+
+    // Padded on the wire, trimmed before the host sees it.
+    const named = await post(server, '/api/releases/860531/identify', cookie, { mode: 'name', name: '  Dune   Part Two ' });
+    assert.equal(named.status, 202);
+    assert.deepEqual(JSON.parse(named.text), { accepted: true });
+
+    const linked = await post(server, '/api/releases/860531/identify', cookie, { mode: 'media-item', mediaItemId: 7 });
+    assert.equal(linked.status, 200);
+    assert.deepEqual(JSON.parse(linked.text), { outcome: 'linked', mediaItemId: 7 });
+
+    assert.deepEqual(asked, [
+      [860531, { mode: 'requery' }],
+      [860531, { mode: 'name', name: 'Dune   Part Two' }],
+      [860531, { mode: 'media-item', mediaItemId: 7 }],
+    ]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('identify: each refusal answers its own status', async () => {
+  const cases: [IdentifyReleaseRefusalCode, number][] = [
+    ['unknown-release', 422],
+    ['plugin-not-registered', 422],
+    ['unknown-media-item', 422],
+    ['wrong-plugin', 422],
+    ['already-linked', 409],
+  ];
+  assert.equal(new Set(cases.map(([, status]) => status)).size, 2, 'the table distinguishes two statuses');
+
+  await Promise.all(cases.map(async ([refusal, status]) => {
+    const { raw, db } = setup();
+    const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly, {
+      identifyRelease: async () => ({ refusal }),
+    });
+    try {
+      const answer = await post(server, '/api/releases/860531/identify', cookie, { mode: 'requery' });
+      assert.equal(answer.status, status, `${refusal} answers ${String(status)}`);
+      assert.deepEqual(JSON.parse(answer.text), { refusal });
+      assert.ok(!answer.text.includes('860531'), 'no refusal repeats the id it was asked about');
+      assert.ok(!JSON.stringify(logs).includes('860531'), 'and nothing about it is written down either');
+    } finally {
+      await server.close();
+    }
+  }));
+});
+
+test('identify: a bad body is 400 invalid-shape and the host is never asked', async () => {
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    identifyRelease: async () => {
+      called += 1;
+      return { accepted: true };
+    },
+  });
+  try {
+    for (const body of [
+      {},
+      { mode: 'name', name: '   ' },
+      { mode: 'name' },
+      { mode: 'media-item', mediaItemId: '7' },
+      { mode: 'media-item', mediaItemId: 7.5 },
+      { mode: 'media-item' },
+      { mode: 'other' },
+    ]) {
+      // eslint-disable-next-line no-await-in-loop -- one server, and each answer is asserted before the next request is sent
+      const answer = await post(server, '/api/releases/860531/identify', cookie, body);
+      assert.equal(answer.status, 400, JSON.stringify(body));
+      assert.deepEqual(JSON.parse(answer.text), { refusal: 'invalid-shape' });
+    }
+    assert.equal(called, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test('identify: a non-integer id is 404', async () => {
+  const { raw, db } = setup();
+  let called = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    identifyRelease: async () => {
+      called += 1;
+      return { accepted: true };
+    },
+  });
+  try {
+    for (const path of [
+      '/api/releases/abc/identify',
+      '/api/releases/ /identify',
+      '/api/releases/0x7/identify',
+      '/api/releases//identify',
+      '/api/releases/7/identify/extra',
+    ]) {
+      // eslint-disable-next-line no-await-in-loop -- one server, and each answer is asserted before the next request is sent
+      const answer = await post(server, path, cookie, { mode: 'requery' });
+      assert.equal(answer.status, 404, `${path} is not a route`);
+    }
+    assert.equal(called, 0);
   } finally {
     await server.close();
   }

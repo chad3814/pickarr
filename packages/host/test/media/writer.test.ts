@@ -1,15 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ArtworkStore } from '../../src/artwork/store.ts';
-import { createArtworkStore } from '../../src/artwork/store.ts';
+import { readdir } from 'node:fs/promises';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createMediaWriter } from '../../src/media/writer.ts';
 import { gifBytes } from '../support/gif.ts';
+import { insertFeed, noHooks, withArtworkStore } from './support.ts';
 
 /** An `ArtworkStore` that fails loudly if a test that attaches no artwork somehow reaches it. */
 const unusedArtwork: ArtworkStore = {
@@ -17,39 +15,6 @@ const unusedArtwork: ArtworkStore = {
   putPerson: async () => { throw new Error('artwork.putPerson: not used by this test'); },
   remove: async () => { throw new Error('artwork.remove: not used by this test'); },
 };
-
-/** One entry per call to the log function a real `createArtworkStore` was built with. */
-interface LoggedCall {
-  message: string;
-  detail: Readonly<Record<string, unknown>> | undefined;
-}
-
-/**
- * A minimal, valid GIF: `image-size` reads width and height straight out of
- * the logical screen descriptor (bytes 6-9), with no CRC or pixel data
- * needed -- probed directly against `image-size` before this file was
- * written. Far cheaper than constructing a PNG, which does need a valid CRC
- * per chunk.
- */
-
-/**
- * A real `ArtworkStore` backed by a fresh temp directory, removed afterward
- * so a test that attaches artwork does not leave files behind. Real, rather
- * than a fake that skips the filesystem: these tests are exactly the ones
- * that need to prove the row and the cached file agree. `logs` collects
- * every call the store's `log` made, for the one test that needs to see one.
- */
-async function withArtworkStore(
-  run: (artwork: ArtworkStore, dir: string, logs: LoggedCall[]) => Promise<void>,
-): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), 'pickarr-writer-artwork-'));
-  const logs: LoggedCall[] = [];
-  try {
-    await run(createArtworkStore(dir, (message, detail) => logs.push({ message, detail })), dir, logs);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
 
 /** A row read back from `media_item`, narrowed the same way `migrate.test.ts` does. */
 function readMediaItem(raw: DatabaseSync, id: number) {
@@ -98,14 +63,6 @@ function readPerson(raw: DatabaseSync, id: number) {
   return row as { name: unknown; provider_ref: unknown; updated_at: unknown } | undefined;
 }
 
-/** An rss feed, inserted directly: nothing in `MediaWriter` writes this table. */
-function insertFeed(raw: DatabaseSync, url: string): number {
-  const result = raw.prepare(`
-    INSERT INTO rss_feed (plugin_id, name, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-  `).run('alpha', 'a feed', url, 0, 0);
-  return Number(result.lastInsertRowid);
-}
-
 /** An rss item pointed at nothing yet, so a test can `relinkRssItem` it. */
 function insertRssItem(raw: DatabaseSync, feedId: number, at: number): number {
   const result = raw.prepare(`
@@ -118,7 +75,7 @@ function insertRssItem(raw: DatabaseSync, feedId: number, at: number): number {
 test('claiming an unheld provider ref keeps the caller and drops nothing', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const id = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   const claim = await writer.claimProviderRef(id, 'tmdb', 'ref-1');
@@ -133,7 +90,7 @@ test('claiming an unheld provider ref keeps the caller and drops nothing', async
 test('claiming a held provider ref keeps the holder and reports the caller as dropped', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const holderId = await writer.createMediaItem({ pluginId: 'alpha', title: 'first', releaseDate: null, description: null });
   const first = await writer.claimProviderRef(holderId, 'tmdb', 'shared-ref');
@@ -158,7 +115,7 @@ test('claiming a held provider ref keeps the holder and reports the caller as dr
 test('a non-unique sqlite failure is not mistaken for a lost race', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   // A legitimate holder for (tmdb, ref-1) -- so that if the mutation this
   // test targets (catching every ERR_SQLITE_ERROR, not just 2067) were
@@ -186,7 +143,7 @@ test('a non-unique sqlite failure is not mistaken for a lost race', async () => 
 test('two unclaimed items do not collide, because NULL refs are distinct in SQLite', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const first = await writer.createMediaItem({ pluginId: 'alpha', title: 'one', releaseDate: null, description: null });
   const second = await writer.createMediaItem({ pluginId: 'alpha', title: 'two', releaseDate: null, description: null });
@@ -209,7 +166,7 @@ test('relinkRssItem repoints the item and bumps updated_at', async () => {
   assert.ok(before);
   assert.equal(before.updated_at, 500);
 
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
   await writer.relinkRssItem(itemId, mediaItemId);
@@ -229,7 +186,7 @@ test('relinkRssItem(id, null) unlinks and bumps updated_at', async () => {
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 500);
 
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   await writer.relinkRssItem(itemId, mediaItemId);
 
@@ -259,7 +216,7 @@ test('linking a release to a media item clears its stored lookup answer', async 
 
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 500);
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
   await writer.setLookupState(itemId, 'unresolved', 'nothing recognised', '{"state":"unresolved"}');
   const stranded = readRssItem(raw, itemId);
   assert.ok(stranded);
@@ -287,7 +244,7 @@ test('unlinking a release leaves its stored lookup answer alone', async () => {
 
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 500);
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   await writer.relinkRssItem(itemId, mediaItemId);
   await writer.setLookupState(itemId, 'unresolved', 'nothing recognised', '{"state":"unresolved"}');
@@ -303,7 +260,7 @@ test('unlinking a release leaves its stored lookup answer alone', async () => {
 test('relinkRssItem on an rss item that does not exist throws', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   await assert.rejects(() => writer.relinkRssItem(999_999, null));
 });
@@ -312,7 +269,7 @@ test('updateMediaItem replaces title, release date and description, and bumps up
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   let at = 1000;
-  const writer = createMediaWriter(db, () => at, unusedArtwork);
+  const writer = createMediaWriter(db, () => at, unusedArtwork, noHooks);
 
   const mediaItemId = await writer.createMediaItem({
     pluginId: 'alpha',
@@ -341,7 +298,7 @@ test('updateMediaItem replaces title, release date and description, and bumps up
 test('updateMediaItem leaves plugin_id, provider and provider_ref untouched', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const mediaItemId = await writer.createMediaItem({
     pluginId: 'alpha',
@@ -370,7 +327,7 @@ test('updateMediaItem leaves plugin_id, provider and provider_ref untouched', as
 test('updateMediaItem on an id that does not exist throws rather than silently doing nothing', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   await assert.rejects(() => writer.updateMediaItem(999_999, {
     title: 'nope',
@@ -382,7 +339,7 @@ test('updateMediaItem on an id that does not exist throws rather than silently d
 test('creating an item, linking, unlinking with null, then dropping it succeeds', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 0);
@@ -408,7 +365,7 @@ test('setLookupState records refused and unresolved as different states', async 
   migrateHost(raw);
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 0);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   await writer.setLookupState(itemId, 'refused', null, '{"lookupId":"lk_1"}');
   const refused = readRssItem(raw, itemId);
@@ -438,7 +395,7 @@ test('setLookupState clears lookup_json a failed attempt left, when the retry re
   migrateHost(raw);
   const feedId = insertFeed(raw, 'https://example.test/feed');
   const itemId = insertRssItem(raw, feedId, 0);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   await writer.setLookupState(itemId, 'unresolved', 'unrecognised filename', '{"lookupId":"lk_3"}');
   assert.equal(readRssItem(raw, itemId)?.lookup_json, '{"lookupId":"lk_3"}', 'the failed attempt left an envelope');
@@ -453,7 +410,7 @@ test('setVideoResolution stores a normalized value or null, and moves updated_at
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
 
   await writer.setVideoResolution(itemId, '2160p');
   assert.equal(storedVideoResolution(raw, itemId), '2160p');
@@ -471,7 +428,7 @@ test('setVideoResolution writes nothing when the stored value already matches', 
   migrateHost(raw);
   const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
   let clock = 1000;
-  const writer = createMediaWriter(db, () => clock, unusedArtwork);
+  const writer = createMediaWriter(db, () => clock, unusedArtwork, noHooks);
 
   await writer.setVideoResolution(itemId, '1080p');
   assert.equal(readRssItem(raw, itemId)?.updated_at, 1000);
@@ -488,7 +445,7 @@ test('setVideoResolution refuses a value the contract would not normalize to its
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const itemId = insertRssItem(raw, insertFeed(raw, 'https://example.test/feed'), 500);
-  const writer = createMediaWriter(db, () => 999, unusedArtwork);
+  const writer = createMediaWriter(db, () => 999, unusedArtwork, noHooks);
   for (const bad of ['1080P', '4K', '1080p/', '']) {
     await assert.rejects(writer.setVideoResolution(itemId, bad), /video resolution/, `refused ${bad}`);
   }
@@ -498,7 +455,7 @@ test('setVideoResolution refuses a value the contract would not normalize to its
 test('upsertPerson returns the same id for a repeated providerRef', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const firstId = await writer.upsertPerson({ name: 'Ada', providerRef: 'p-1' });
   const secondId = await writer.upsertPerson({ name: 'Ada Lovelace', providerRef: 'p-1' });
@@ -513,7 +470,7 @@ test('upsertPerson returns the same id for a repeated providerRef', async () => 
 test('dropMediaItem removes the loser and leaves the keeper', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 1000, unusedArtwork);
+  const writer = createMediaWriter(db, () => 1000, unusedArtwork, noHooks);
 
   const keeperId = await writer.createMediaItem({ pluginId: 'alpha', title: 'keeper', releaseDate: null, description: null });
   await writer.claimProviderRef(keeperId, 'tmdb', 'shared-ref');
@@ -548,7 +505,7 @@ test('attachRole is idempotent: the same part attached twice is one row, with th
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   let at = 1000;
-  const writer = createMediaWriter(db, () => at, unusedArtwork);
+  const writer = createMediaWriter(db, () => at, unusedArtwork, noHooks);
 
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   const personId = await writer.upsertPerson({ name: 'Ada', providerRef: 'p-1' });
@@ -584,7 +541,7 @@ test('attaching a poster stores the row with the measured width and height', asy
   await withArtworkStore(async (artwork) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
     // The caller supplies no width or height at all -- `ImageInit` has none
@@ -608,7 +565,7 @@ test('attaching a logo stores a row, which slice A had no way to do', async () =
   await withArtworkStore(async (artwork) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
     await writer.attachLogo(mediaItemId, {
@@ -629,7 +586,7 @@ test('attaching a person\'s picture stores the row with the measured width and h
   await withArtworkStore(async (artwork) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
 
     await writer.attachPersonImage(personId, {
@@ -650,7 +607,7 @@ test('attaching a person\'s picture twice leaves one row and one file', async ()
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
     const url = 'https://images.test/headshot.gif';
 
@@ -680,7 +637,7 @@ test('attaching a person\'s picture at a NEW url replaces the old one, row and f
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
 
     await writer.attachPersonImage(personId, {
@@ -713,7 +670,7 @@ test('attaching a poster at a new url replaces the old one too', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({
       pluginId: 'movie', title: 'A Film', releaseDate: null, description: null,
     });
@@ -737,7 +694,7 @@ test('a person and a media item that share an id and a url get two files, not on
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     // `person.id` and `media_item.id` are two different tables' primary
     // keys, so the first row each table ever gets is id 1 in both -- exactly
     // the coincidence `ArtworkStore.putPerson`'s docblock describes. Sharing
@@ -765,7 +722,7 @@ test('attaching the same url twice leaves one row and one file', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
     const url = 'https://images.test/poster.gif';
 
@@ -789,7 +746,7 @@ test('dropping a media item deletes its artwork rows and their files', async () 
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
     await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450) });
@@ -814,7 +771,7 @@ test('the same url on two different media items gets two files, and dropping one
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const itemA = await writer.createMediaItem({ pluginId: 'alpha', title: 'a', releaseDate: null, description: null });
     const itemB = await writer.createMediaItem({ pluginId: 'alpha', title: 'b', releaseDate: null, description: null });
 
@@ -853,7 +810,7 @@ test('a portrait image and a landscape image are stored as given, not reclassifi
   await withArtworkStore(async (artwork) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
-    const writer = createMediaWriter(db, () => 1000, artwork);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
     // A landscape image attached as a poster, and a portrait image attached
@@ -915,7 +872,7 @@ function guardAgainstDeleting(raw: DatabaseSync, mediaItemId: number): void {
 test('dropping a media item writes a tombstone naming its plugin', async () => {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
   await writer.dropMediaItem(mediaItemId);
@@ -935,7 +892,7 @@ test('a drop that fails leaves neither the deletion nor the tombstone', async ()
   // the tombstone are absent. This is what putting it in the savepoint buys.
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   const posterId = insertPathlessPoster(raw, mediaItemId, 'https://images.test/poster.gif');
   guardAgainstDeleting(raw, mediaItemId);
@@ -960,7 +917,7 @@ test('a drop whose tombstone cannot be written deletes nothing', async () => {
   // deletion down with it rather than leaving a deleted row nothing records.
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
-  const writer = createMediaWriter(db, () => 4321, unusedArtwork);
+  const writer = createMediaWriter(db, () => 4321, unusedArtwork, noHooks);
   const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
   raw.exec(`
     CREATE TRIGGER guard_tombstone BEFORE INSERT ON deleted_media_item
@@ -983,7 +940,7 @@ test('a media item id reused after a drop is tombstoned again, not collided with
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   let clock = 1000;
-  const writer = createMediaWriter(db, () => clock, unusedArtwork);
+  const writer = createMediaWriter(db, () => clock, unusedArtwork, noHooks);
 
   const first = await writer.createMediaItem({ pluginId: 'alpha', title: 'first', releaseDate: null, description: null });
   await writer.dropMediaItem(first);

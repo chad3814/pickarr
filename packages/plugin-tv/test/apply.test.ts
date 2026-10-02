@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Media, MediaKind, MediaParent } from '@pickarr/openmetadata';
 import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyTv, checkTv } from '../src/apply.ts';
+import { applyTv, checkTv, dropTvRows } from '../src/apply.ts';
 import { TV_MIGRATIONS } from '../src/migrations.ts';
 
 const NOW = 1_700_000_000_000;
@@ -230,4 +230,16 @@ test('migration 3 creates the placement table the engine records imports in', ()
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tv_placement'")
     .get();
   assert.ok(row !== undefined, 'tv_placement was not created');
+});
+
+test('dropRows removes the release row for one item, keeps the other item\'s, and leaves series and seasons', async () => {
+  const harness = harnessWithTables();
+  await apply(harness, episode(), 1);
+  await apply(harness, episode({ providerRef: 'tmdb:episode:2', details: { seasonNumber: 3, episodeNumber: 2 } }), 2);
+
+  dropTvRows(1, harness.raw);
+
+  assert.deepEqual(rows(harness.raw, 'SELECT media_item_id FROM tv_release ORDER BY media_item_id'), [{ media_item_id: 2 }]);
+  assert.equal(rows(harness.raw, 'SELECT id FROM tv_series').length, 1, 'the series is shared and stays');
+  assert.equal(rows(harness.raw, 'SELECT id FROM tv_season').length, 1, 'the season is shared and stays');
 });

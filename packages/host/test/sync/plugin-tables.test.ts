@@ -70,6 +70,8 @@ function fakePlugin(synced: readonly SyncedTable<unknown>[]): MediaPlugin {
     onNewRssItems: async () => {},
     onDownloadedFile: async () => {},
     onDownloadRequest: async () => {},
+    onMediaItemDropped: async () => {},
+    onLookupRequest: async () => {},
   };
 }
 

@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Media } from '@pickarr/openmetadata';
 import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyXxx, checkXxx } from '../src/apply.ts';
+import { applyXxx, checkXxx, dropXxxRows } from '../src/apply.ts';
 import { XXX_MIGRATIONS } from '../src/migrations.ts';
 import { createXxxPlugin } from '../src/index.ts';
 
@@ -195,4 +195,22 @@ test('a scene expects a single file', async () => {
     () => plugin.onDownloadedFile({ path: '/d/r', sizeBytes: 1, downloadClientId: 1, rssItemId: 7, mediaItemId: 1 }, harness.ctx),
     /too-many-video-files/,
   );
+});
+
+test('dropRows removes the scene row for one item, keeps the other item\'s, and leaves the site', async () => {
+  const harness = harnessWithTables();
+  for (const mediaItemId of [1, 2]) {
+    await applyXxx({
+      media: scene(`tpdb:scene:${String(mediaItemId)}`, SITE),
+      mediaItemId,
+      raw: harness.raw,
+      ctx: harness.ctx,
+      now: NOW,
+    });
+  }
+
+  dropXxxRows(1, harness.raw);
+
+  assert.deepEqual(rows(harness.raw, 'SELECT media_item_id FROM xxx_scene ORDER BY media_item_id'), [{ media_item_id: 2 }]);
+  assert.equal(rows(harness.raw, 'SELECT id FROM xxx_site').length, 1, 'the site is shared and stays');
 });

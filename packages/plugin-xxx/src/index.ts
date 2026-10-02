@@ -1,7 +1,7 @@
 import type { MediaPlugin } from '@pickarr/contract';
 import type { LookupPluginDeps } from '@pickarr/openmetadata';
 import { createLookupPlugin } from '@pickarr/openmetadata';
-import { applyXxx, checkXxx } from './apply.ts';
+import { applyXxx, checkXxx, dropXxxRows } from './apply.ts';
 import { XXX_MIGRATIONS } from './migrations.ts';
 import { XXX_SYNCED } from './sync.ts';
 import { XXX_TOKENS } from './tokens.ts';
@@ -16,6 +16,7 @@ export function createXxxPlugin(deps: LookupPluginDeps): MediaPlugin {
     category: 'xxx',
     migrations: XXX_MIGRATIONS,
     check: checkXxx,
+    dropRows: dropXxxRows,
     apply: applyXxx,
     synced: XXX_SYNCED,
     tokens: XXX_TOKENS,
@@ -24,7 +25,7 @@ export function createXxxPlugin(deps: LookupPluginDeps): MediaPlugin {
   }, deps);
 }
 
-export { applyXxx, checkXxx } from './apply.ts';
+export { applyXxx, checkXxx, dropXxxRows } from './apply.ts';
 export { XXX_MIGRATIONS } from './migrations.ts';
 export { XXX_SYNCED } from './sync.ts';
 export { XXX_TOKENS } from './tokens.ts';

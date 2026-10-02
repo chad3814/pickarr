@@ -778,3 +778,46 @@ form[role='search'] fieldset { display: flex; gap: var(--space-2); border: 0; pa
 form[role='search'] legend { float: left; margin-inline-end: var(--space-2); }
 form[role='search'] fieldset label { display: inline-flex; align-items: center; gap: var(--space-1); }
 form[role='search'] > label { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+/*
+ * The identify form (`@pickarr/plugin-ui`'s `IdentifyForm.tsx`): a combobox
+ * over library titles with a listbox beneath it, rendered inside a release
+ * row (`ul[aria-label='releases'] li`) and inside the unmatched card's
+ * `dl`. Keyed on the form's position and on the ARIA roles the combobox
+ * pattern already requires, never on a class.
+ */
+ul[aria-label='releases'] li > form,
+dl form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  flex-basis: 100%;
+}
+
+[role='combobox'] { min-width: 20rem; }
+
+[role='listbox'] {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-line);
+}
+
+[role='listbox'][hidden] { display: none; }
+
+/* The options are `<li>`s inside a release's `<li>`, so the release-row rule
+   above (flex, a top rule, a baseline gap) reaches them too: this resets
+   exactly what it sets. The first selector outranks the row rule by
+   specificity (two attribute selectors against one), so it wins wherever it
+   sits in the file; the bare `[role='option']` is the lower-specificity
+   fallback for options outside a release row, as in the unmatched card's
+   `dl`, where no row rule applies. */
+ul[aria-label='releases'] li[role='option'],
+[role='option'] {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  border-top: 0;
+  cursor: pointer;
+}
+
+[role='option'][aria-selected='true'] { background: var(--color-surface-2); }

@@ -108,3 +108,11 @@ export async function applyXxx(args: ApplyArgs): Promise<void> {
     now,
   );
 }
+
+/**
+ * Deletes the scene row for a media item the host is dropping
+ * (`MediaPlugin.onMediaItemDropped`). Sites are shared across scenes and stay.
+ */
+export function dropXxxRows(mediaItemId: number, raw: DatabaseSync): void {
+  raw.prepare('DELETE FROM xxx_scene WHERE media_item_id = ?').run(mediaItemId);
+}

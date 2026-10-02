@@ -1716,9 +1716,10 @@ test('an operator can pick a release and watch its status take the button’s pl
   // tidiness: the button's accessible name is composed from its own label
   // and the filename, so pressing it changes that name from
   // `Pick <filename>` to `Picking… <filename>` and the `pick` locator stops
-  // matching. The row holds exactly one button while it has no download.
+  // matching. The row also holds `Requery` and `Edit` while it has no
+  // download, so the pending button is found by its new name.
   const row = page.getByRole('listitem', { name: RELEASE_FILENAME });
-  const rowButton = row.getByRole('button');
+  const rowButton = row.getByRole('button', { name: /^Picking\u2026/ });
 
   // **Acceptance 6, in a browser.** The pick has been accepted by the host
   // and the `torrent_download` row has not reached this tab yet, so the
@@ -1751,11 +1752,12 @@ test('an operator can pick a release and watch its status take the button’s pl
   // settled value rather than asserting the first status to appear.
   await expect(row).toContainText('Status: submitted', { timeout: 15_000 });
 
-  // The button is gone rather than merely disabled: `ReleaseList` renders
-  // one only for a release with no download, so its absence is the same
+  // The pick button is gone rather than merely disabled (`Requery` and `Edit`
+  // stay, so this names the pick button): `ReleaseList` renders
+  // it only for a release with no download, so its absence is the same
   // fact as the status's presence read from the other side (picks design
   // §2, acceptance item 5).
-  await expect(row.getByRole('button')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: /^Pick/ })).toHaveCount(0);
 });
 
 test('a pick with no download client set up says so, in words that are styled as the alarm they are', async ({ page, harness }) => {

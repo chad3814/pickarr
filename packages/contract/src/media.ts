@@ -88,8 +88,8 @@ export interface ProviderClaim {
  * **Nothing here is scoped to the calling plugin -- do not infer symmetry
  * with `MediaReader`.** Unlike the reader, which the host builds once *per
  * plugin* around that plugin's id, there is one writer shared by every
- * plugin context and it closes over no plugin id at all: ten of its eleven
- * methods are handed none, and `createMediaItem` stores the `pluginId` in
+ * plugin context and it closes over no plugin id at all: every method but
+ * `createMediaItem` is handed none, and `createMediaItem` stores the `pluginId` in
  * `MediaItemInit` without checking it against the plugin doing the writing.
  * So every method acts on the bare row id it is given, whoever wrote that
  * row: `setLookupState` on another plugin's rss item, `updateMediaItem` and
@@ -150,8 +150,32 @@ export interface MediaWriter {
    */
   relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void>;
 
+  /**
+   * Relink, then drop the previous item if nothing else points at it; the
+   * host's one move primitive, which the engine's resolved path uses instead
+   * of `relinkRssItem` so a re-lookup of a matched release cleans up after
+   * itself.
+   *
+   * One savepoint covers the whole move: the release is marked `resolved`
+   * with its stored answer cleared, both items are bumped so their cards
+   * re-gather, and an orphaned previous item has its plugin rows
+   * (`MediaPlugin.onMediaItemDropped`), roles and row removed. A throw
+   * anywhere rolls all of it back. A null or identical previous link is a
+   * relink plus a bump, with no drop. Throws if `rssItemId` does not exist.
+   */
+  reassignRelease(rssItemId: number, mediaItemId: number): Promise<void>;
+
   /** Deletes a media item that lost a provider-ref claim. */
   dropMediaItem(mediaItemId: number): Promise<void>;
+
+  /**
+   * `dropMediaItem` without the file unlinks: synchronously writes the
+   * tombstone and deletes the artwork rows and the item inside one savepoint,
+   * and returns the cached artwork paths the caller must now unlink. For a
+   * caller already inside a savepoint of its own (`reassignRelease`), which
+   * must hold it across no I/O.
+   */
+  dropMediaItemRows(mediaItemId: number): readonly string[];
 
   /**
    * Attaches a poster, keyed on its url: attaching the same url twice leaves

@@ -236,6 +236,8 @@ function makePlugin(overrides: Partial<MediaPlugin> & { id: string }): MediaPlug
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
+    onMediaItemDropped: unusedEntryPoint('onMediaItemDropped'),
+    onLookupRequest: unusedEntryPoint('onLookupRequest'),
     ...overrides,
   };
 }

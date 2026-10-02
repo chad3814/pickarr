@@ -808,5 +808,11 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
       const reference = await ctx.downloads.submit({ rssItemId });
       ctx.log('submitted a download', { rssItemId, reference });
     },
+
+    // The double writes no rows of its own beyond the shared tables, so a
+    // dropped item leaves nothing for it to delete, and nothing asks it to
+    // look anything up.
+    async onMediaItemDropped() {},
+    async onLookupRequest() {},
   };
 }

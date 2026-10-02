@@ -8,7 +8,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { listByTable } from '../../src/store/rows.ts';
 import { subscribeTable } from '../../src/store/notify.ts';
-import { useFeedNames, type FeedNamesSource } from '../../src/library/useFeedNames.ts';
+import { useFeedNames, type FeedIdentity, type FeedNamesSource } from '../../src/library/useFeedNames.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -23,14 +23,14 @@ async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
 }
 
 /** One `upsert` `SyncOp` for `rss_feed`, matching `settings/useFeeds.test.tsx`'s own `feedOp`. */
-function feedOp({ id, name, url = 'https://tracker.example/rss' }: { id: number; name: string; url?: string }): SyncOp {
+function feedOp({ id, name, pluginId = 'tv', url = 'https://tracker.example/rss' }: { id: number; name: string; pluginId?: string; url?: string }): SyncOp {
   return {
     op: 'upsert',
     table: 'rss_feed',
     id,
     value: {
       id,
-      pluginId: 'tv',
+      pluginId,
       name,
       downloadType: 'torrent',
       pollIntervalS: 300,
@@ -51,7 +51,7 @@ function sourceFor(db: IDBDatabase): FeedNamesSource {
 }
 
 /** Every entry, sorted and stringified so a single query can read the whole map as one string. */
-function textOf(names: ReadonlyMap<number, string>): string {
+function textOf(names: ReadonlyMap<number, FeedIdentity>): string {
   return JSON.stringify([...names.entries()].toSorted((a, b) => a[0] - b[0]));
 }
 
@@ -67,7 +67,7 @@ function Harness({ source }: { source: FeedNamesSource }): ReactElement {
  */
 function Lookup({ source, id }: { source: FeedNamesSource; id: number }): ReactElement {
   const names = useFeedNames(source);
-  return <p data-testid="result">{String(names.get(id))}</p>;
+  return <p data-testid="result">{JSON.stringify(names.get(id)) ?? 'undefined'}</p>;
 }
 
 function resultText(): string {
@@ -81,7 +81,32 @@ test('a feed id resolves to its name', async () => {
   render(<Harness source={sourceFor(db)} />);
 
   await waitFor(() => {
-    assert.equal(resultText(), textOf(new Map([[1, 'Movies HD']])));
+    assert.equal(resultText(), textOf(new Map([[1, { name: 'Movies HD', pluginId: 'tv' }]])));
+  });
+  db.close();
+});
+
+test('a feed id resolves to the plugin that owns the feed as well', async () => {
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD', pluginId: 'movies' })]);
+
+  render(<Lookup source={sourceFor(db)} id={1} />);
+
+  await waitFor(() => {
+    assert.equal(resultText(), JSON.stringify({ name: 'Movies HD', pluginId: 'movies' }));
+  });
+  db.close();
+});
+
+test('a feed row with no plugin id is skipped rather than half-read', async () => {
+  const db = await freshDb();
+  const legacy: SyncOp = { op: 'upsert', table: 'rss_feed', id: 1, value: { id: 1, name: 'Old Feed' } };
+  await seed(db, [legacy, feedOp({ id: 2, name: 'Kept' })]);
+
+  render(<Harness source={sourceFor(db)} />);
+
+  await waitFor(() => {
+    assert.equal(resultText(), textOf(new Map([[2, { name: 'Kept', pluginId: 'tv' }]])));
   });
   db.close();
 });
@@ -109,13 +134,13 @@ test('a feed renamed after the first read is re-read', async () => {
   await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
   render(<Harness source={sourceFor(db)} />);
   await waitFor(() => {
-    assert.equal(resultText(), textOf(new Map([[1, 'Movies HD']])));
+    assert.equal(resultText(), textOf(new Map([[1, { name: 'Movies HD', pluginId: 'tv' }]])));
   });
 
   await seed(db, [feedOp({ id: 1, name: 'Movies UHD' })]);
 
   await waitFor(() => {
-    assert.equal(resultText(), textOf(new Map([[1, 'Movies UHD']])), 'the rename woke the reader, not just the next reload');
+    assert.equal(resultText(), textOf(new Map([[1, { name: 'Movies UHD', pluginId: 'tv' }]])), 'the rename woke the reader, not just the next reload');
   });
   db.close();
 });

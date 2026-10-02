@@ -557,8 +557,29 @@ test('the per-download subscriptions follow the gather and come down on unmount'
   const { source, live } = progressHarness([{ status: 'downloading', percentage: 10 }]);
   const { unmount } = render(<ProgressHarness source={source} />);
   await waitFor(() => {
-    assert.deepEqual(live(), ['media_item:7', 'torrent_download:11']);
+    assert.deepEqual(live(), ['media_item:7', 'rss_item:3', 'torrent_download:11']);
   });
   unmount();
   assert.deepEqual(live(), [], 'nothing is left subscribed once the card is gone');
+});
+
+test("an update to a release this item already shows re-gathers, so a requery's pending state appears", async () => {
+  // The defect: a requery writes the release's own `rss_item` row and
+  // nothing else, and this hook watched only the media item and the
+  // downloads, so the card kept the row it had gathered and `Requery` waited
+  // on an `updatedAt` it could never see change.
+  const { source, gathers, fire } = progressHarness([
+    { status: 'downloading', percentage: 10 },
+    { status: 'downloading', percentage: 55 },
+  ]);
+  render(<ProgressHarness source={source} />);
+  await waitFor(() => {
+    assert.equal(screen.getByTestId('progress').textContent, 'downloading:10');
+  });
+
+  fire('rss_item:3');
+  await waitFor(() => {
+    assert.equal(screen.getByTestId('progress').textContent, 'downloading:55');
+  });
+  assert.equal(gathers(), 2);
 });

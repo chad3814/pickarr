@@ -1,4 +1,4 @@
-import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMappingInput } from '@pickarr/contract';
+import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMappingInput, IdentifyRequest } from '@pickarr/contract';
 import type { SaveDestinationInput } from '../media/destinations.ts';
 
 /**
@@ -110,6 +110,31 @@ export function isDownloadClientBody(value: unknown): value is AddDownloadClient
 export function isPickBody(value: unknown): value is { rssItemId: number } {
   return typeof value === 'object' && value !== null
     && 'rssItemId' in value && typeof value.rssItemId === 'number';
+}
+
+/**
+ * `POST /api/releases/:id/identify`'s body: one of three modes. A `name` must
+ * have something in it once trimmed; {@link trimIdentifyBody} then strips the
+ * padding, so the host and the plugin see the operator's words without it.
+ * Extra keys are tolerated, as in the other body guards here.
+ */
+export function isIdentifyBody(value: unknown): value is IdentifyRequest {
+  if (typeof value !== 'object' || value === null || !('mode' in value)) return false;
+  switch (value.mode) {
+    case 'requery':
+      return true;
+    case 'name':
+      return 'name' in value && typeof value.name === 'string' && value.name.trim() !== '';
+    case 'media-item':
+      return 'mediaItemId' in value && typeof value.mediaItemId === 'number' && Number.isInteger(value.mediaItemId);
+    default:
+      return false;
+  }
+}
+
+/** The body with a `name`'s ends trimmed (inner runs are the lookup service's business); other modes unchanged. */
+export function trimIdentifyBody(body: IdentifyRequest): IdentifyRequest {
+  return body.mode === 'name' ? { mode: 'name', name: body.name.trim() } : body;
 }
 
 /**

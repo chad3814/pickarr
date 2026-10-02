@@ -72,7 +72,7 @@ test('creates the media item from the answer and claims its provider reference',
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-1', confidence: 0.94, media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -100,7 +100,7 @@ test('a resolved answer stores no envelope, and clears one left by an earlier fa
 
   await applyEnvelope(
     unresolvedEnvelope({ lookupId: 'lookup-fail' }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
   assert.notEqual(
@@ -111,7 +111,7 @@ test('a resolved answer stores no envelope, and clears one left by an earlier fa
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-9', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -129,7 +129,7 @@ test('records the lookup id, the reference and the confidence on its own row', a
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-2', confidence: 0.81, media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -147,7 +147,7 @@ test('hands the plugin the media item it should write against', async () => {
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-3', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -162,7 +162,7 @@ test('writes each person once and each part in billing order', async () => {
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-4', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -182,14 +182,14 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-5', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
   const methods = harness.media.calls.map((call) => call.method);
   assert.deepEqual(
     methods.slice(1, 5),
-    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem'],
+    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'reassignRelease'],
   );
   assert.equal(harness.media.items.has(1), false, 'the row that lost is gone');
   assert.deepEqual(harness.media.calls[4]?.args, [rssItemId, 99]);
@@ -197,9 +197,27 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   assert.equal(stateRow(harness)?.['media_item_id'], 99);
 });
 
+test('a resolved answer for a release already linked elsewhere moves it through reassignRelease', async () => {
+  const { harness, deps, rssItemId } = fixture();
+  harness.raw.prepare('UPDATE rss_item SET media_item_id = 77 WHERE id = ?').run(rssItemId);
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-8', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const moves = harness.media.calls.filter((call) => call.method === 'reassignRelease');
+  assert.deepEqual(moves.map((call) => call.args), [[rssItemId, 1]]);
+  assert.ok(
+    !harness.media.calls.some((call) => call.method === 'relinkRssItem'),
+    'the engine never relinks directly, so the host\'s cleanup cannot be skipped',
+  );
+});
+
 test('the release is linked before the plugin applies, so a throwing apply strands no answer', async () => {
   // **The call-site half of a two-part guarantee, and the half nothing
-  // pinned.** `MediaWriter.relinkRssItem` clears `lookup_json` in the same
+  // pinned.** `MediaWriter.relinkRssItem` (which `reassignRelease` calls) clears `lookup_json` in the same
   // statement that sets `media_item_id`, because a stored lookup answer is
   // only reachable while a release is unmatched. That fix is worth nothing
   // unless the link really does happen before the steps that can fail:
@@ -220,7 +238,7 @@ test('the release is linked before the plugin applies, so a throwing apply stran
   await assert.rejects(
     () => applyEnvelope(
       resolvedEnvelope({ lookupId: 'lookup-7', media: movieMedia() }),
-      { rssItemId, filename: 'dune.mkv', polls: 0 },
+      { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
       { ...deps, apply: async () => { throw boom; } },
     ),
     (err: unknown) => err === boom,
@@ -228,7 +246,7 @@ test('the release is linked before the plugin applies, so a throwing apply stran
   );
 
   const methods = harness.media.calls.map((call) => call.method);
-  assert.ok(methods.includes('relinkRssItem'), 'the link happened before the plugin could fail');
+  assert.ok(methods.includes('reassignRelease'), 'the link happened before the plugin could fail');
   assert.ok(
     !methods.includes('setLookupState'),
     'and the lookup state did not -- which is exactly why the clear cannot be left to it',
@@ -240,7 +258,7 @@ test('the lookup state is written last, after the rows a reader would then look 
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-6', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -265,7 +283,7 @@ test('a plugin that cannot represent the answer refuses it before a single share
   await assert.rejects(
     () => applyEnvelope(
       resolvedEnvelope({ lookupId: 'lookup-8', media: { ...movieMedia(), kind: 'scene' } }),
-      { rssItemId, filename: 'dune.mkv', polls: 0 },
+      { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
       refusing,
     ),
     /kind scene/,
@@ -284,7 +302,7 @@ test('a null confidence is stored as null rather than refused', async () => {
   const { harness, deps, rssItemId } = fixture();
   const envelope = { ...resolvedEnvelope({ lookupId: 'lookup-7', media: movieMedia() }), confidence: null };
 
-  await applyEnvelope(envelope, { rssItemId, filename: 'dune.mkv', polls: 0 }, deps);
+  await applyEnvelope(envelope, { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 }, deps);
 
   assert.equal(stateRow(harness)?.['confidence'], null);
 });
@@ -294,7 +312,7 @@ test('a resolved lookup enqueues one artwork job for the item it resolved', asyn
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-10', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -333,7 +351,7 @@ test('the artwork job names the media item that kept the claim, not the one that
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-11', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
 
@@ -373,7 +391,7 @@ test('the artwork payload carries the ancestors, nearest first and this provider
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-14', media }),
-    { rssItemId, filename: 'show.s01e01.mkv', polls: 0 },
+    { rssItemId, filename: 'show.s01e01.mkv', posted: 'show.s01e01.mkv', polls: 0 },
     deps,
   );
 
@@ -404,7 +422,7 @@ test('a refused or unresolved lookup enqueues nothing', async () => {
   const refused = fixture();
   await applyEnvelope(
     refusedEnvelope({ lookupId: 'lookup-12', refusal: 'this is a subtitle' }),
-    { rssItemId: refused.rssItemId, filename: 'dune.srt', polls: 0 },
+    { rssItemId: refused.rssItemId, filename: 'dune.srt', posted: 'dune.srt', polls: 0 },
     refused.deps,
   );
   assert.deepEqual(refused.harness.enqueued.map((job) => job.kind), []);
@@ -412,7 +430,7 @@ test('a refused or unresolved lookup enqueues nothing', async () => {
   const unresolved = fixture();
   await applyEnvelope(
     unresolvedEnvelope({ lookupId: 'lookup-13' }),
-    { rssItemId: unresolved.rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId: unresolved.rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     unresolved.deps,
   );
   assert.deepEqual(unresolved.harness.enqueued.map((job) => job.kind), []);
@@ -439,7 +457,7 @@ test('the enqueue happens after the lookup state is recorded', async () => {
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-14', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     { ...deps, ctx },
   );
 
@@ -461,7 +479,7 @@ test('a failing enqueue does not fail the lookup', async () => {
 
   await applyEnvelope(
     resolvedEnvelope({ lookupId: 'lookup-15', media: movieMedia() }),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     { ...deps, ctx },
   );
 
@@ -479,7 +497,7 @@ test('a resolved answer records its parsed video resolution too', async () => {
   const { harness, deps, rssItemId } = fixture();
   await applyEnvelope(
     withResolution(resolvedEnvelope({ lookupId: 'lookup-r', media: movieMedia() }), '2160p'),
-    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    { rssItemId, filename: 'dune.mkv', posted: 'dune.mkv', polls: 0 },
     deps,
   );
   assert.equal(harness.media.videoResolutions.get(rssItemId), '2160p');

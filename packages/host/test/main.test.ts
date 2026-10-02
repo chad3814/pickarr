@@ -101,6 +101,7 @@ function fakeHost(overrides: Partial<Host>): Host {
     requestDownload: async () => { throw new Error('requestDownload: not used by this test'); },
     requestPick: async () => { throw new Error('requestPick: not used by this test'); },
     retryLookup: async () => { throw new Error('retryLookup: not used by this test'); },
+    identifyRelease: async () => { throw new Error('identifyRelease: not used by this test'); },
     deliverToPlugin: async () => { throw new Error('deliverToPlugin: not used by this test'); },
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
     scheduleReconcile: async () => { throw new Error('scheduleReconcile: not used by this test'); },
@@ -137,6 +138,8 @@ const ownerPlugin: MediaPlugin = {
   onNewRssItems: async () => { throw new Error('onNewRssItems: not used by this test'); },
   onDownloadedFile: async () => { throw new Error('onDownloadedFile: not used by this test'); },
   onDownloadRequest: async () => { throw new Error('onDownloadRequest: not used by this test'); },
+  onMediaItemDropped: async () => { throw new Error('onMediaItemDropped: not used by this test'); },
+  onLookupRequest: async () => { throw new Error('onLookupRequest: not used by this test'); },
 };
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */

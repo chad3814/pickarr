@@ -1,5 +1,5 @@
 /**
- * `feedId -> name`, for any screen that holds `rss_item` rows and wants to
+ * `feedId -> { name, pluginId }`, for any screen that holds `rss_item` rows and wants to
  * say which feed produced one -- `library/Unmatched.tsx`, to start.
  *
  * **`subscribeTable`, not `subscribeInserts`.** A rename is an update, and
@@ -38,25 +38,33 @@ export interface FeedNamesSource {
   subscribeTable: Store['subscribeTable'];
 }
 
+/** What the replica knows of one feed that a screen showing its releases needs: the label, and which plugin the feed belongs to (the Edit form searches that plugin's titles). */
+export interface FeedIdentity {
+  name: string;
+  pluginId: string;
+}
+
 /**
- * The two fields this hook reads off a feed row -- `id` and `name`, and no
- * more -- narrowed with `in` and `typeof` rather than a cast (Global
+ * The three fields this hook reads off a feed row -- `id`, `name` and
+ * `pluginId`, and no more -- narrowed with `in` and `typeof` rather than a cast (Global
  * Constraint: never `as` a replica row). A replica outlives the build that
  * wrote it, so a row here may predate this code and carry neither field in
  * the shape expected.
  */
-function feedName(value: unknown): { id: number; name: string } | undefined {
+function feedIdentity(value: unknown): ({ id: number } & FeedIdentity) | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
-  if (!('id' in value) || !('name' in value)) return undefined;
-  const { id, name } = value;
-  return typeof id === 'number' && typeof name === 'string' ? { id, name } : undefined;
+  if (!('id' in value) || !('name' in value) || !('pluginId' in value)) return undefined;
+  const { id, name, pluginId } = value;
+  return typeof id === 'number' && typeof name === 'string' && typeof pluginId === 'string'
+    ? { id, name, pluginId }
+    : undefined;
 }
 
-function toNames(rows: readonly StoredRow[]): ReadonlyMap<number, string> {
-  const names = new Map<number, string>();
+function toNames(rows: readonly StoredRow[]): ReadonlyMap<number, FeedIdentity> {
+  const names = new Map<number, FeedIdentity>();
   for (const row of rows) {
-    const feed = feedName(row.value);
-    if (feed !== undefined) names.set(feed.id, feed.name);
+    const feed = feedIdentity(row.value);
+    if (feed !== undefined) names.set(feed.id, { name: feed.name, pluginId: feed.pluginId });
   }
   return names;
 }
@@ -73,7 +81,7 @@ function isStoreClosed(err: unknown): boolean {
 }
 
 /**
- * `feedId -> name`, kept current by `subscribeTable`.
+ * `feedId -> { name, pluginId }`, kept current by `subscribeTable`.
  *
  * An id no feed claims is simply absent from the map, never mapped to an
  * empty string (Global Constraint: zero is an answer, and the id space
@@ -81,8 +89,8 @@ function isStoreClosed(err: unknown): boolean {
  * exactly what `CardHeading`'s optional `trailing` prop wants: no trailing
  * label at all, a different thing from a feed named `''`.
  */
-export function useFeedNames(source: FeedNamesSource): ReadonlyMap<number, string> {
-  const [names, setNames] = useState<ReadonlyMap<number, string>>(new Map());
+export function useFeedNames(source: FeedNamesSource): ReadonlyMap<number, FeedIdentity> {
+  const [names, setNames] = useState<ReadonlyMap<number, FeedIdentity>>(new Map());
 
   useEffect(() => {
     let cancelled = false;

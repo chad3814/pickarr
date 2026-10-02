@@ -1018,6 +1018,7 @@ export async function main(
     // `ReadServerDeps.requestPick`.
     requestPick: (rssItemId) => host.requestPick(rssItemId),
     retryLookup: (rssItemId) => host.retryLookup(rssItemId),
+    identifyRelease: (rssItemId, request) => host.identifyRelease(rssItemId, request),
     // The three `/api/mappings` operations, wired the same way again --
     // one function each, never the `Host` itself. None of the three
     // schedules anything: `clients/deliver.ts` re-reads `filepath_mapping`

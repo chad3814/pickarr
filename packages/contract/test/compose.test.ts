@@ -71,6 +71,8 @@ const fixture: MediaPlugin = {
     const reference = await ctx.downloads.submit({ rssItemId });
     ctx.log('submitted download', { reference: reference === null ? null : reference.toUpperCase() });
   },
+  onMediaItemDropped: async () => {},
+  onLookupRequest: async () => {},
 };
 
 test('the contract composes into a whole plugin', () => {

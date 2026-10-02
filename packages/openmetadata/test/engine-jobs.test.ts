@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import type { DatabaseSync } from 'node:sqlite';
 import { ARTWORK_JOB } from '../src/artwork/job.ts';
 import { VIDEO_RESOLUTION_BACKFILL_JOB } from '../src/backfill.ts';
 import { LOOKUP_JOB, POLL_JOB, createLookupPlugin } from '../src/engine.ts';
@@ -9,6 +10,7 @@ import {
   partialEnvelope,
   refusedEnvelope,
   resolvedEnvelope,
+  unresolvedEnvelope,
 } from '../src/testing.ts';
 import { MAX_BATCH } from '../src/client.ts';
 import { placementTableMigration } from '../src/placement.ts';
@@ -58,7 +60,11 @@ function sceneMedia(providerRef: string): Media {
 }
 
 /** The plugin under test: the engine, with an `apply` that only records. */
-function build(service?: { fetch: HostFetch }, expectation: Expectation = { kind: 'single' }) {
+function build(
+  service?: { fetch: HostFetch },
+  expectation: Expectation = { kind: 'single' },
+  dropRows: (mediaItemId: number, raw: DatabaseSync) => void = (): void => {},
+) {
   const applied: ApplyArgs[] = [];
   const plugin = createLookupPlugin({
     id: 'xxx',
@@ -68,6 +74,7 @@ function build(service?: { fetch: HostFetch }, expectation: Expectation = { kind
     // A scene is all this spec is ever handed, so the pre-flight has nothing
     // to refuse -- these tests are about jobs, not about what a plugin accepts.
     check: (): void => {},
+    dropRows,
     apply: async (args) => { applied.push(args); },
     // Not the real xxx plugin's list -- that one is asserted in the host,
     // against the plugin the host actually builds. Here it only has to be
@@ -96,6 +103,7 @@ test('carries the engine state table as migration 1, before the spec migrations'
     category: 'xxx',
     migrations: [{ version: 2, up: (db) => db.exec('CREATE TABLE xxx_own (id INTEGER PRIMARY KEY)') }],
     check: (): void => {},
+    dropRows: (): void => {},
     apply: async () => {},
     tokens: NAMED_TOKENS,
     expects: async () => ({ kind: 'single' }),
@@ -114,6 +122,7 @@ test("carries the spec's tokens through to the plugin, unchanged and unmerged", 
     category: 'xxx',
     migrations: [],
     check: (): void => {},
+    dropRows: (): void => {},
     apply: async () => {},
     tokens: { site: siteToken, title: titleToken, ext: extToken },
     expects: async () => ({ kind: 'single' }),
@@ -138,6 +147,7 @@ test('keeps a spec job handler alongside its own two', () => {
     migrations: [],
     jobs: { sweep: async () => {} },
     check: (): void => {},
+    dropRows: (): void => {},
     apply: async () => {},
     tokens: NAMED_TOKENS,
     expects: async () => ({ kind: 'single' }),
@@ -271,7 +281,58 @@ test('a still-partial poll schedules the next one, counting up', async () => {
     harness.ctx,
   );
 
-  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-d', rssItemId, polls: 5 });
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-d', rssItemId, polls: 5, posted: 'd.mp4' });
+});
+
+test('a poll payload from before posted existed still runs, quoting the filename', async () => {
+  const service = createFakeLookupService({
+    batch: new Map(),
+    polls: new Map([['lookup-g', [unresolvedEnvelope({ lookupId: 'lookup-g' })]]]),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('g.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[POLL_JOB];
+  assert.ok(handler !== undefined);
+  await handler({ id: 8, kind: POLL_JOB, payload: { lookupId: 'lookup-g', rssItemId, polls: 1 }, attempts: 1 }, harness.ctx);
+  assert.match(harness.media.lookupStates.get(rssItemId)?.detail ?? '', /g\.mp4/);
+});
+
+test('a poll payload that carries posted keeps it for the next poll', async () => {
+  const service = createFakeLookupService({
+    batch: new Map(),
+    polls: new Map([['lookup-e', [partialEnvelope({ lookupId: 'lookup-e' })]]]),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('e.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[POLL_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 6, kind: POLL_JOB, payload: { lookupId: 'lookup-e', rssItemId, polls: 1, posted: 'Typed Name' }, attempts: 1 },
+    harness.ctx,
+  );
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-e', rssItemId, polls: 2, posted: 'Typed Name' });
+});
+
+test('the lookup handler hands the posted name to the poll it enqueues', async () => {
+  const service = createFakeLookupService({
+    batch: new Map([['Typed Name', partialEnvelope({ lookupId: 'lookup-f' })]]),
+    polls: new Map(),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('f.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[LOOKUP_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 7, kind: LOOKUP_JOB, payload: { rssItemIds: [rssItemId], names: { [String(rssItemId)]: 'Typed Name' } }, attempts: 1 },
+    harness.ctx,
+  );
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-f', rssItemId, polls: 1, posted: 'Typed Name' });
 });
 
 test('a malformed payload throws naming what it should carry', async () => {
@@ -439,6 +500,7 @@ test('each entry resolves its tokens over its own path, not the download directo
     category: 'xxx',
     migrations: [placementTableMigration('xxx', 2)],
     check: (): void => {},
+    dropRows: (): void => {},
     apply: async () => {},
     tokens: { ext: extToken },
     expects: async () => ({ kind: 'single' }),
@@ -493,7 +555,7 @@ test('unmatched: every entry is placed, and expects is not asked', async () => {
   let asked = 0;
   const plugin = createLookupPlugin({
     id: 'xxx', mediaType: 'xxx', category: 'xxx', migrations: [placementTableMigration('xxx', 2)],
-    check: (): void => {}, apply: async () => {}, tokens: NAMED_TOKENS,
+    check: (): void => {}, dropRows: (): void => {}, apply: async () => {}, tokens: NAMED_TOKENS,
     expects: async () => { asked += 1; return { kind: 'single' }; },
   }, { now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'test-key' });
   const harness = createTestHarness();
@@ -690,4 +752,53 @@ test('a failed request is logged with its status, and still fails the job', asyn
   // The key travels in a header, so no log line could carry it -- and this one
   // carries no query string either.
   assert.equal(harness.logs[0]?.detail?.['url'], 'https://openmetadata.test/');
+});
+
+test('onLookupRequest marks the release pending, keeps its lookup row, and enqueues one job carrying the name only when hinted', async () => {
+  const { plugin, harness } = build();
+  const rssItemId = harness.insertRssItem('dune.mkv');
+  await plugin.onLookupRequest(rssItemId, undefined, harness.ctx);
+  const setStates = harness.media.calls.filter((call) => call.method === 'setLookupState');
+  assert.deepEqual(setStates.at(-1)?.args, [rssItemId, 'pending', null, null]);
+  assert.deepEqual(harness.enqueued.at(-1)?.payload, { rssItemIds: [rssItemId] });
+  await plugin.onLookupRequest(rssItemId, { name: 'Dune Part Two 2024' }, harness.ctx);
+  assert.deepEqual(harness.enqueued.at(-1)?.payload, { rssItemIds: [rssItemId], names: { [String(rssItemId)]: 'Dune Part Two 2024' } });
+  assert.equal(harness.raw.prepare('SELECT count(*) AS n FROM xxx_lookup WHERE rss_item_id = ?').get(rssItemId)?.['n'], 1, 'the do-nothing upsert kept one row');
+  assert.equal(
+    harness.raw.prepare('SELECT lookup_job_id FROM xxx_lookup WHERE rss_item_id = ?').get(rssItemId)?.['lookup_job_id'],
+    harness.enqueued.at(-1)?.id,
+    'the row points at the job that is now looking it up',
+  );
+});
+
+test('the lookup job posts the hinted name in place of the filename, and the filename otherwise', async () => {
+  const service = createFakeLookupService({
+    batch: new Map([
+      ['Corrected Name', refusedEnvelope({ lookupId: 'lookup-a', refusal: 'nothing' })],
+      ['plain.mkv', refusedEnvelope({ lookupId: 'lookup-b', refusal: 'nothing' })],
+    ]),
+    polls: new Map(),
+  });
+  const { plugin, harness } = build(service);
+  const hinted = harness.insertRssItem('hinted.mkv');
+  const plain = harness.insertRssItem('plain.mkv');
+  for (const id of [hinted, plain]) {
+    harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)').run(id, NOW, NOW);
+  }
+  const handler = plugin.jobs[LOOKUP_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 1, kind: LOOKUP_JOB, payload: { rssItemIds: [hinted, plain], names: { [String(hinted)]: 'Corrected Name' } }, attempts: 1 },
+    harness.ctx,
+    new AbortController().signal,
+  );
+  assert.deepEqual(service.batchRequests, [['Corrected Name', 'plain.mkv']]);
+});
+
+test('onMediaItemDropped delegates to the spec\'s dropRows with the raw connection', async () => {
+  const seen: { id: number; raw: DatabaseSync }[] = [];
+  const { plugin, harness } = build(undefined, { kind: 'single' }, (id, raw) => { seen.push({ id, raw }); });
+  await plugin.onMediaItemDropped(42, harness.ctx);
+  assert.deepEqual(seen.map((entry) => entry.id), [42]);
+  assert.equal(seen[0]?.raw, harness.raw);
 });

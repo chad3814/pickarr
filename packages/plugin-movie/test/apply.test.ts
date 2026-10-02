@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Media } from '@pickarr/openmetadata';
 import { lookupTableMigration } from '@pickarr/openmetadata';
 import { createTestHarness } from '@pickarr/openmetadata/testing';
-import { applyMovie, checkMovie } from '../src/apply.ts';
+import { applyMovie, checkMovie, dropMovieRows } from '../src/apply.ts';
 import { MOVIE_MIGRATIONS } from '../src/migrations.ts';
 import { createMoviePlugin } from '../src/index.ts';
 
@@ -162,4 +162,16 @@ test('a film expects a single file', async () => {
     () => plugin.onDownloadedFile({ path: '/d/r', sizeBytes: 1, downloadClientId: 1, rssItemId: 7, mediaItemId: 1 }, harness.ctx),
     /too-many-video-files/,
   );
+});
+
+test('dropRows removes the film row for one item and keeps the other item\'s', async () => {
+  const harness = harnessWithTables();
+  for (const mediaItemId of [1, 2]) {
+    await applyMovie({ media: movie({ runtimeMinutes: 100 + mediaItemId }), mediaItemId, raw: harness.raw, ctx: harness.ctx, now: NOW });
+  }
+
+  dropMovieRows(1, harness.raw);
+
+  const left = harness.raw.prepare('SELECT media_item_id FROM movie_detail ORDER BY media_item_id').all();
+  assert.deepEqual(left.map((record) => record['media_item_id']), [2]);
 });
