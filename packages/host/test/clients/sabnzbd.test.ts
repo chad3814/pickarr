@@ -25,6 +25,7 @@ function makeConfig(overrides: Partial<SabnzbdConfig> = {}): SabnzbdConfig {
  */
 function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<unknown>): QueuedFetch {
   return {
+    snapshot: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       const body: unknown = await handler(url, init);
       return body as T;

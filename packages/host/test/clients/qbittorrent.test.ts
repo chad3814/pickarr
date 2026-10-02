@@ -40,6 +40,7 @@ function tick(): Promise<void> {
  */
 function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<string>): QueuedFetch {
   return {
+    snapshot: () => [],
     json<T>(): Promise<T> {
       throw new Error('json is not used by these tests');
     },
@@ -236,6 +237,7 @@ function fakeQbittorrentFetch(handlers: {
 }): { fetch: QueuedFetch; calls: Array<{ kind: 'text' | 'json'; url: string; init: RequestInit | undefined }> } {
   const calls: Array<{ kind: 'text' | 'json'; url: string; init: RequestInit | undefined }> = [];
   const fetch: QueuedFetch = {
+    snapshot: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       calls.push({ kind: 'json', url, init });
       const body: unknown = await handlers.json(url, init);
@@ -579,6 +581,7 @@ function fakeSnapshotFetch(
 ): { fetch: QueuedFetch; calls: Array<{ url: string; init: RequestInit | undefined }> } {
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const fetch: QueuedFetch = {
+    snapshot: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       calls.push({ url, init });
       const body = await handler(url, init);
