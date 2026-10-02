@@ -128,6 +128,9 @@
  * writes progress once per `RECONCILE_INTERVAL_S` (10s) per client
  * (`host/src/clients/reconcile-job.ts`), so it is small.
  *
+ * **A release it already shows is watched the same way**, by its `rss_item`
+ * row, so a requery's `pending` write (which touches no other row) re-gathers.
+ *
  * **What it still does not subscribe to.** A new `rss_item`: a release
  * arriving for an item already on screen is still only caught the next time
  * something touches the media item itself, or the next time this hook
@@ -227,7 +230,7 @@ export function useGatheredItem(
     if (!enabled) return;
     let cancelled = false;
 
-    // The per-row subscriptions on the downloads the latest gather found --
+    // The per-row subscriptions on the releases and downloads the latest gather found --
     // see this file's docblock. Replaced wholesale on every gather, so a
     // download that is gone from the replica stops being watched with it.
     let downloadOffs: (() => void)[] = [];
@@ -239,9 +242,13 @@ export function useGatheredItem(
 
     function watchDownloads(result: GatheredItem | undefined): void {
       unwatchDownloads();
-      downloadOffs = (result?.releases ?? []).flatMap((release) =>
-        release.downloads.map((download) => source.subscribe(download.table, download.id, safeGather)),
-      );
+      // The release's own row too: a requery writes `rss_item` and nothing
+      // else, so without this the card keeps the row it gathered and the
+      // `Requery` button waits on an `updatedAt` it can never see change.
+      downloadOffs = (result?.releases ?? []).flatMap((release) => [
+        source.subscribe('rss_item', release.id, safeGather),
+        ...release.downloads.map((download) => source.subscribe(download.table, download.id, safeGather)),
+      ]);
     }
 
     function apply(result: GatheredItem | undefined): void {
@@ -299,7 +306,7 @@ export function useGatheredItem(
 
     // Re-gathers on a notification for this item's own row, on a download
     // inserted under one of its releases, and (through `watchDownloads`) on
-    // any change to a download it already shows -- see this file's docblock
+    // any change to a release or download it already shows -- see this file's docblock
     // for exactly what those do and do not correct.
     const unsubscribe = source.subscribe('media_item', mediaItemId, safeGather);
     const unsubscribeInserts = DOWNLOAD_TABLES.map((table) =>
