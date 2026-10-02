@@ -2,7 +2,7 @@
  * The subscription registry, and the first consumer of `applyBatch`'s
  * `Changed` return value (design spec §8).
  *
- * Six registries, because the six subscription kinds key on different
+ * Seven registries, because the seven subscription kinds key on different
  * things: `subscribe` on one row (`table:id`), `subscribeInserts`,
  * `subscribeTable` and `subscribeTouched` on a whole table (a row that did
  * not exist when the caller subscribed has no `id` to key on yet),
@@ -16,6 +16,10 @@
  * `subscribeActivity` is the sixth: it keys on nothing because the
  * Activities page refetches `GET /api/activity` rather than reading a row,
  * so there is no table or id for a change to name.
+ *
+ * `subscribeCatalog` is the seventh: it keys on nothing either, and hears the
+ * media item ids whose derived catalog record a batch rewrote or deleted
+ * (`Changed.catalog`). A filtered list re-reads rather than patching.
  *
  * `emit` and `emitReset` are the write side, and each has two callers rather
  * than one. `store/apply.ts` emits after its own commit, for the tab that did
@@ -46,6 +50,7 @@ const tableSubscribers = new Map<string, Set<RowListener>>();
 const touchedSubscribers = new Map<string, Set<InsertListener>>();
 const resetSubscribers = new Set<RowListener>();
 const activitySubscribers = new Set<RowListener>();
+const catalogSubscribers = new Set<InsertListener>();
 
 function rowKey(table: string, id: number): string {
   return `${table}:${String(id)}`;
@@ -187,6 +192,14 @@ export function subscribeTouched(table: string, cb: InsertListener): () => void 
   return add(touchedSubscribers, table, cb);
 }
 
+/** Fires once per batch that rewrote or deleted catalog records, with their media item ids (`Changed.catalog`). */
+export function subscribeCatalog(cb: InsertListener): () => void {
+  catalogSubscribers.add(cb);
+  return () => {
+    catalogSubscribers.delete(cb);
+  };
+}
+
 /** Fires after a generation-mismatch reset commits (spec §6, §8). */
 export function subscribeReset(cb: RowListener): () => void {
   resetSubscribers.add(cb);
@@ -216,6 +229,7 @@ export function emit(changed: Changed): void {
   for (const [table, ids] of changed.inserted) {
     fireInsert(insertSubscribers.get(table), ids);
   }
+  if (changed.catalog.length > 0) fireInsert(catalogSubscribers, changed.catalog);
 }
 
 /** Called after a reset's rebuild commits (spec §6). Every tab subscribes, the leader included, so there is one code path rather than a leader's and a follower's. */

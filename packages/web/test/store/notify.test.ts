@@ -5,7 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import { getRow } from '../../src/store/rows.ts';
 import type { Changed } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { subscribe, subscribeInserts, subscribeTable, subscribeTouched, subscribeReset, subscribeActivity, emit, emitReset, emitActivity } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTable, subscribeTouched, subscribeReset, subscribeActivity, subscribeCatalog, emit, emitReset, emitActivity } from '../../src/store/notify.ts';
 
 /**
  * A `Changed` naming one touched row, optionally inserted -- most tests here
@@ -15,6 +15,7 @@ function changedOf(table: string, id: number, inserted: boolean): Changed {
   return {
     touched: new Map([[table, [id]]]),
     inserted: inserted ? new Map([[table, [id]]]) : new Map(),
+    catalog: [],
   };
 }
 
@@ -157,7 +158,7 @@ test('subscribeTable fires once per batch, not once per row', () => {
     wakes += 1;
   });
 
-  emit({ touched: new Map([['person', [1, 2, 3]]]), inserted: new Map() });
+  emit({ touched: new Map([['person', [1, 2, 3]]]), inserted: new Map(), catalog: [] });
 
   unsubscribe();
   assert.equal(wakes, 1);
@@ -231,6 +232,7 @@ test('emit looks up only the rows a batch touched: an untouched key in the same 
   emit({
     touched: new Map([['person', [1, 3, 4]]]),
     inserted: new Map(),
+    catalog: [],
   });
 
   unsubscribe();
@@ -288,10 +290,10 @@ test('unsubscribing twice does not detach subscribers that arrived in between', 
 test('subscribeTouched fires once per batch with every id the batch wrote to that table, inserted or not', () => {
   const heard: (readonly number[])[] = [];
   const off = subscribeTouched('tv_release', (ids) => { heard.push(ids); });
-  emit({ touched: new Map([['tv_release', [1, 2, 3]], ['other', [9]]]), inserted: new Map([['tv_release', [3]]]) });
+  emit({ touched: new Map([['tv_release', [1, 2, 3]], ['other', [9]]]), inserted: new Map([['tv_release', [3]]]), catalog: [] });
   assert.deepEqual(heard, [[1, 2, 3]]);
   off();
-  emit({ touched: new Map([['tv_release', [4]]]), inserted: new Map() });
+  emit({ touched: new Map([['tv_release', [4]]]), inserted: new Map(), catalog: [] });
   assert.deepEqual(heard, [[1, 2, 3]], 'unsubscribed');
 });
 
@@ -319,4 +321,16 @@ test('subscribeActivity hears emitActivity until unsubscribed', () => {
   off();
   emitActivity();
   assert.equal(heard, 1);
+});
+
+test('subscribeCatalog hears the ids of a batch that changed the catalog, and is not fired when catalog is empty', () => {
+  const heard: (readonly number[])[] = [];
+  const off = subscribeCatalog((ids) => {
+    heard.push(ids);
+  });
+  emit({ touched: new Map(), inserted: new Map(), catalog: [1, 2] });
+  emit({ touched: new Map([['person', [9]]]), inserted: new Map(), catalog: [] });
+  off();
+  emit({ touched: new Map(), inserted: new Map(), catalog: [3] });
+  assert.deepEqual(heard, [[1, 2]], 'once, with the ids; not for an empty catalog; not after unsubscribing');
 });

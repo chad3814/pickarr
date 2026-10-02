@@ -14,6 +14,8 @@
  */
 export const CATALOG_STORE = 'catalog';
 
+export { buildHaystack } from './catalog-apply.ts';
+
 export interface CatalogRecord {
   id: number;
   pluginId: string;
