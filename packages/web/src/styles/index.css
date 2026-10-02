@@ -22,6 +22,7 @@
  * than none. `settings.css` (the feed-settings slice's own styling task) is
  * the second: see its own docblock for why the settings screens got a file
  * of their own rather than a further section of `library.css`.
+ * `activities.css` is the third.
  */
 @layer tokens, base, components;
 
@@ -33,3 +34,4 @@
 @import './base.css' layer(base);
 @import './library.css' layer(components);
 @import './settings.css' layer(components);
+@import './activities.css' layer(components);

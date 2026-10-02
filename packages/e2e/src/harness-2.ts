@@ -119,8 +119,10 @@ import {
   createSyncRegistry,
   ensureClaimToken,
   ensureSyncGeneration,
+  installActivityTriggers,
   migrateHost,
   openDatabase,
+  setActivityChangedListener,
   setSyncChangedListener,
   type Host,
   type ReadServer,
@@ -597,6 +599,8 @@ async function boot(): Promise<Booted> {
   const dir = await mkdtemp(join(tmpdir(), 'pickarr-e2e-'));
   const { raw, db } = openDatabase(join(dir, 'pickarr.db'));
   migrateHost(raw);
+  // As `main.ts` does, right after the sync triggers: the jobs table's own.
+  installActivityTriggers(raw);
 
   // Started for every test, not only the one that picks: one listener on an
   // ephemeral loopback port costs about nothing, and a fixture that boots a
@@ -644,8 +648,9 @@ async function boot(): Promise<Booted> {
     defer: (fn) => { setImmediate(fn); },
   });
   setSyncChangedListener(raw, () => { events.notify(); });
+  setActivityChangedListener(raw, () => { events.notifyActivity(); });
 
-  const hostFetch = createHostFetch({ fetch: globalThis.fetch });
+  const hostFetch = createHostFetch({ fetch: globalThis.fetch, onChange: () => { events.notifyActivity(); } });
 
   // An in-memory `Secrets`, not the host's own `createSecrets`: that one is
   // not exported from `@pickarr/host`, and the chain it builds (environment,
@@ -750,6 +755,7 @@ async function boot(): Promise<Booted> {
     registry,
     generation,
     events,
+    fetchSnapshot: () => hostFetch.snapshot(),
     host: '127.0.0.1',
     port: 0,
     webRoot: webDist,

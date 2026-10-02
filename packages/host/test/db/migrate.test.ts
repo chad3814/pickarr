@@ -1992,3 +1992,11 @@ test('migration 25 adds client health and import backoff columns in place, with 
   assert.ok(maxLog() > before, 'an update to download_client after migration 25 still logs');
   raw.close();
 });
+
+test('migration 26 indexes done jobs by updated_at, for the prune', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const index = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'jobs_done_updated'").get();
+  assert.ok(index, 'the index exists');
+  assert.match(String(index['sql']), /WHERE state = 'done'/);
+});

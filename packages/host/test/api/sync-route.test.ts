@@ -136,6 +136,8 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
       timers: { setInterval: () => 0, clearInterval: () => {} },
       defer: (fn) => { setImmediate(fn); },
     }),
+    // Nor `/api/activity`: an empty queue answers the guard the same way.
+    fetchSnapshot: () => [],
     host: undefined,
     port: 0,
     webRoot: MISSING_WEB_ROOT,

@@ -497,3 +497,122 @@ export async function countByPlugin(db: IDBDatabase, table: string, pluginId: st
     req.addEventListener('error', () => reject(req.error ?? new Error('indexeddb count failed')), { once: true });
   });
 }
+
+/**
+ * One download that has not finished, joined to what the Activities page
+ * shows beside it. Built from the replica alone: the host does no work for it.
+ */
+export interface ActiveDownload {
+  readonly table: 'torrent_download' | 'nzb_download';
+  readonly id: number;
+  readonly status: string;
+  readonly percentage: number | null;
+  /** `'unknown release'` when the `rss_item` has not replicated yet. */
+  readonly filename: string;
+  /** `null` when the release is unmatched, or its `media_item` has not replicated. */
+  readonly title: string | null;
+  /** `'unknown client'` when the `download_client` row is absent. */
+  readonly clientName: string;
+  readonly updatedAt: number;
+}
+
+/** Rows read per `listByTable` page while walking a download table. */
+const ACTIVE_DOWNLOADS_PAGE = 200;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+interface RawDownload {
+  readonly id: number;
+  readonly status: string;
+  readonly percentage: number | null;
+  readonly rssItemId: number | null;
+  readonly downloadClientId: number | null;
+  readonly updatedAt: number;
+}
+
+function toRawDownload(value: unknown): RawDownload | undefined {
+  if (!isRecord(value)) return undefined;
+  const { id, status, percentage, rssItemId, downloadClientId, updatedAt } = value;
+  if (typeof id !== 'number' || typeof status !== 'string' || typeof updatedAt !== 'number') return undefined;
+  return {
+    id,
+    status,
+    percentage: typeof percentage === 'number' ? percentage : null,
+    rssItemId: typeof rssItemId === 'number' ? rssItemId : null,
+    downloadClientId: typeof downloadClientId === 'number' ? downloadClientId : null,
+    updatedAt,
+  };
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const field = value[key];
+  return typeof field === 'string' ? field : undefined;
+}
+
+/**
+ * Every torrent and NZB download whose status is neither `delivered` nor
+ * `failed`, newest `updatedAt` first, each joined to its release filename,
+ * its media item's title and its client's name. A join whose row has not
+ * replicated (log order is not row order) falls back rather than dropping
+ * the download: the page would otherwise hide work that is really running.
+ */
+export async function activeDownloads(
+  db: IDBDatabase,
+  pageSize: number = ACTIVE_DOWNLOADS_PAGE,
+): Promise<readonly ActiveDownload[]> {
+  const live: { table: ActiveDownload['table']; raw: RawDownload }[] = [];
+  for (const table of ['torrent_download', 'nzb_download'] as const) {
+    // Walks the whole table newest first, page by page, keeping the
+    // non-terminal rows as it goes. There is no cap on rows read: a quiet live
+    // download (a stalled `submitting`, an old `updatedAt`) can sit behind any
+    // number of newer terminal rows, and a fixed limit would hide it.
+    let from: { updatedAt: number; id: number } | undefined;
+    for (;;) {
+      const page = await listByTable(db, table, from === undefined ? { direction: 'prev', limit: pageSize } : { direction: 'prev', limit: pageSize, from });
+      for (const row of page) {
+        const raw = toRawDownload(row.value);
+        if (raw !== undefined && raw.status !== 'delivered' && raw.status !== 'failed') live.push({ table, raw });
+      }
+      const last = page[page.length - 1];
+      if (page.length < pageSize || last === undefined) break;
+      const lastRaw = toRawDownload(last.value);
+      // `by_table_updated` only indexes rows with an `updatedAt`, so a row
+      // listed here without a readable one cannot happen; stopping is the
+      // safe answer if it ever did, rather than looping on the same page.
+      if (lastRaw === undefined) break;
+      from = { updatedAt: lastRaw.updatedAt, id: last.id };
+    }
+  }
+
+  const rssIds = [...new Set(live.flatMap(({ raw }) => (raw.rssItemId === null ? [] : [raw.rssItemId])))];
+  const clientIds = [...new Set(live.flatMap(({ raw }) => (raw.downloadClientId === null ? [] : [raw.downloadClientId])))];
+  const [rssItems, clients] = await Promise.all([
+    getRows(db, 'rss_item', rssIds),
+    getRows(db, 'download_client', clientIds),
+  ]);
+  const mediaIds = new Set<number>();
+  for (const item of rssItems.values()) {
+    if (isRecord(item) && typeof item.mediaItemId === 'number') mediaIds.add(item.mediaItemId);
+  }
+  const media = await getRows(db, 'media_item', [...mediaIds]);
+
+  const result = live.map(({ table, raw }): ActiveDownload => {
+    const rss = raw.rssItemId === null ? undefined : rssItems.get(raw.rssItemId);
+    const mediaItemId = isRecord(rss) && typeof rss.mediaItemId === 'number' ? rss.mediaItemId : undefined;
+    const client = raw.downloadClientId === null ? undefined : clients.get(raw.downloadClientId);
+    return {
+      table,
+      id: raw.id,
+      status: raw.status,
+      percentage: raw.percentage,
+      filename: stringField(rss, 'filename') ?? 'unknown release',
+      title: mediaItemId === undefined ? null : (stringField(media.get(mediaItemId), 'title') ?? null),
+      clientName: stringField(client, 'name') ?? 'unknown client',
+      updatedAt: raw.updatedAt,
+    };
+  });
+  return result.toSorted((a, b) => b.updatedAt - a.updatedAt);
+}

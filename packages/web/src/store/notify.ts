@@ -2,16 +2,20 @@
  * The subscription registry, and the first consumer of `applyBatch`'s
  * `Changed` return value (design spec §8).
  *
- * Five registries, because the five subscription kinds key on different
+ * Six registries, because the six subscription kinds key on different
  * things: `subscribe` on one row (`table:id`), `subscribeInserts`,
  * `subscribeTable` and `subscribeTouched` on a whole table (a row that did
  * not exist when the caller subscribed has no `id` to key on yet),
- * `subscribeReset` on nothing at all. The three table-wide kinds differ in
+ * `subscribeReset` and `subscribeActivity` on nothing at all. The three table-wide kinds differ in
  * *which* changes reach them, and with what -- inserts only, against every
  * change with no ids, against every change with ids -- and
  * {@link subscribeTable}'s own doc has the defect that made the second
  * necessary; {@link subscribeTouched}'s doc has the one that made the third
  * necessary.
+ *
+ * `subscribeActivity` is the sixth: it keys on nothing because the
+ * Activities page refetches `GET /api/activity` rather than reading a row,
+ * so there is no table or id for a change to name.
  *
  * `emit` and `emitReset` are the write side, and each has two callers rather
  * than one. `store/apply.ts` emits after its own commit, for the tab that did
@@ -41,6 +45,7 @@ const insertSubscribers = new Map<string, Set<InsertListener>>();
 const tableSubscribers = new Map<string, Set<RowListener>>();
 const touchedSubscribers = new Map<string, Set<InsertListener>>();
 const resetSubscribers = new Set<RowListener>();
+const activitySubscribers = new Set<RowListener>();
 
 function rowKey(table: string, id: number): string {
   return `${table}:${String(id)}`;
@@ -216,4 +221,17 @@ export function emit(changed: Changed): void {
 /** Called after a reset's rebuild commits (spec §6). Every tab subscribes, the leader included, so there is one code path rather than a leader's and a follower's. */
 export function emitReset(): void {
   fireRow(resetSubscribers);
+}
+
+/** Fires when the host says its jobs or fetch queue changed (the `activity` event, relayed from the leader tab). */
+export function subscribeActivity(cb: RowListener): () => void {
+  activitySubscribers.add(cb);
+  return () => {
+    activitySubscribers.delete(cb);
+  };
+}
+
+/** Called from `store/sync.ts` only: on the leader when the stream delivers `activity`, on a follower when the leader relays it. */
+export function emitActivity(): void {
+  fireRow(activitySubscribers);
 }

@@ -45,7 +45,16 @@ export const DEFAULT_CONCURRENCY = 8;
  * interval below share the timer's own upper bound.
  */
 export const MAX_TIMER_MS = 60_000;
+/**
+ * How often the safety interval re-arms the timer, and also how often it prunes `done` rows.
+ * It re-arms first, so a prune that throws cannot skip the re-arm.
+ */
 export const SAFETY_INTERVAL_MS = 60_000;
+/**
+ * How long a `done` job stays: a day of `recent` history for the Activities
+ * page. `dead` rows are never pruned -- they are what an operator reads.
+ */
+export const DONE_JOB_RETENTION_MS = 86_400_000;
 
 export interface Dispatcher {
   /**
@@ -287,6 +296,11 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
     rearm();
   }
 
+  /** Deletes `done` rows older than the retention. Fires the `jobs` triggers, so the Activities page refreshes. */
+  function prune(): void {
+    raw.prepare("DELETE FROM jobs WHERE state = 'done' AND updated_at < ?").run(opts.now() - DONE_JOB_RETENTION_MS);
+  }
+
   /**
    * The crash-recovery sweep. Every `running` row here was genuinely
    * started (`runJob`'s claim, in `run-job.ts`, stamps `started_at` only
@@ -356,7 +370,7 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
       if (intervalHandle !== undefined) {
         opts.timers.clearInterval(intervalHandle);
       }
-      intervalHandle = opts.timers.setInterval(rearm, SAFETY_INTERVAL_MS);
+      intervalHandle = opts.timers.setInterval(() => { rearm(); prune(); }, SAFETY_INTERVAL_MS);
       rearm();
 
       return swept;

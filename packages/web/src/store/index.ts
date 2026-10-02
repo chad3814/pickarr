@@ -35,10 +35,10 @@ import { openStore } from './db.ts';
 import type { StoredRow } from './db.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
-  pluginRowsByMediaItems,
-  type ListByTableOptions, type PluginRowsPage,
+  pluginRowsByMediaItems, activeDownloads,
+  type ActiveDownload, type ListByTableOptions, type PluginRowsPage,
 } from './rows.ts';
-import { subscribe, subscribeInserts, subscribeReset, subscribeTable, subscribeTouched } from './notify.ts';
+import { subscribe, subscribeActivity, subscribeInserts, subscribeReset, subscribeTable, subscribeTouched } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
 import { startSync, type Lease, type OpenEventStream, type Schedule, type SyncFetch } from './sync.ts';
 
@@ -76,13 +76,13 @@ export interface CreateStoreDeps {
 }
 
 /**
- * The seven reads (`store/rows.ts`), the five subscriptions (`subscribe`,
- * `subscribeInserts`, `subscribeTable`, `subscribeTouched`, `subscribeReset`
+ * The seven reads (`store/rows.ts`), the six subscriptions (`subscribe`,
+ * `subscribeInserts`, `subscribeTable`, `subscribeTouched`, `subscribeReset`, `subscribeActivity`
  * -- `store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
  * `stop()` -- everything a consumer of the replica needs, with `db` already
  * bound so none of it takes one.
  *
- * The five subscriptions are `store/notify.ts`'s own module-level
+ * The six subscriptions are `store/notify.ts`'s own module-level
  * registries, keyed by table and id rather than by store instance --
  * unchanged here, and deliberately: nothing in this slice's design keys a
  * subscription off which replica raised it (there is exactly one replica per
@@ -122,6 +122,10 @@ export interface Store {
    */
   subscribeTouched(table: string, cb: (ids: readonly number[]) => void): () => void;
   subscribeReset(cb: () => void): () => void;
+  /** Wakes when the host reports its jobs or fetch queue changed -- the `activity` event, whichever tab holds the stream. */
+  subscribeActivity(cb: () => void): () => void;
+  /** Every download not yet `delivered` or `failed`, newest first, joined to its release, title and client. */
+  activeDownloads(): Promise<readonly ActiveDownload[]>;
   gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
   /**
    * Cancels both sync loops, releases this store's Web Lock lease if it
@@ -183,6 +187,8 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     subscribeTable,
     subscribeTouched,
     subscribeReset,
+    subscribeActivity,
+    activeDownloads: () => activeDownloads(db),
     gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
     stop(): void {
       handle.stop();

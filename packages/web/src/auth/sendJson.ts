@@ -44,13 +44,17 @@ export type SendJsonResult =
   | { readonly outcome: 'answered'; readonly status: number; readonly body: unknown };
 
 export interface SendJsonInit {
-  readonly method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** Serialised with `JSON.stringify` and sent with a JSON content type. Omitted: no body and no content type. */
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** Serialised with `JSON.stringify` and sent with a JSON content type. Omitted: no body and no content type. A `GET` never has one. */
   readonly body?: unknown;
 }
 
-/** Sends one write. See this file's docblock; in particular, this never throws. */
+/** Sends one request (a write, or the `GET` the Activities page polls). See this file's docblock; in particular, this never throws. */
 export async function sendJson(url: string, init: SendJsonInit): Promise<SendJsonResult> {
+  if (init.method === 'GET' && init.body !== undefined) {
+    // A programming error at the call site, not a runtime path: `fetch` itself would throw on this.
+    throw new Error('sendJson: a GET request cannot carry a body');
+  }
   const request: RequestInit = { method: init.method, credentials: 'same-origin' };
   if (init.body !== undefined) {
     request.headers = { 'content-type': 'application/json' };

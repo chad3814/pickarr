@@ -20,8 +20,8 @@ import {
 import { readCursors, writeCursors, readGeneration, writeGeneration, type Cursors } from '../../src/store/meta.ts';
 import { getRow } from '../../src/store/rows.ts';
 import { request } from '../../src/store/idb.ts';
-import { subscribe, subscribeReset } from '../../src/store/notify.ts';
-import { CHANNEL_NAME, serializeChanged, type ChannelMessage } from '../../src/store/leader.ts';
+import { subscribe, subscribeActivity, subscribeReset } from '../../src/store/notify.ts';
+import { CHANNEL_NAME, onMessage, serializeChanged, type ChannelMessage } from '../../src/store/leader.ts';
 
 /**
  * Everything a test starts is torn down here rather than at the end of the
@@ -184,6 +184,7 @@ interface FakeStream {
   open: () => void;
   fail: () => void;
   changed: (data: string) => void;
+  activity: () => void;
   readonly closed: boolean;
   readonly url: string;
 }
@@ -202,6 +203,7 @@ function fakeStreams(): { events: OpenEventStream; opened: FakeStream[] } {
       open: [] as (() => void)[],
       error: [] as (() => void)[],
       changed: [] as ((e: { readonly data: string }) => void)[],
+      activity: [] as (() => void)[],
     };
     let closed = false;
     const stream: FakeStream = {
@@ -213,6 +215,9 @@ function fakeStreams(): { events: OpenEventStream; opened: FakeStream[] } {
       },
       changed: (data) => {
         for (const l of listeners.changed) l({ data });
+      },
+      activity: () => {
+        for (const l of listeners.activity) l();
       },
       get closed() {
         return closed;
@@ -230,7 +235,7 @@ function fakeStreams(): { events: OpenEventStream; opened: FakeStream[] } {
       // `(() => void) | ((e) => void)` into either typed array needs this
       // same information the compiler cannot recover either.
       addEventListener(
-        type: 'open' | 'error' | 'changed',
+        type: 'open' | 'error' | 'activity' | 'changed',
         listener: (() => void) | ((e: { readonly data: string }) => void),
       ): void {
         if (type === 'changed') listeners.changed.push(listener as (e: { readonly data: string }) => void);
@@ -730,6 +735,51 @@ test('a follower relays what the leader broadcasts to its own subscribers', asyn
   leaderTab.postMessage({ type: 'reset', generation: 'gen-2' } satisfies ChannelMessage);
   await settle();
   assert.equal(resetWakes, 1, 'a follower cannot discover a reset on its own -- it does not fetch');
+});
+
+test('an activity event on the leader emits locally and relays over the channel', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const quiet = routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } });
+  const { events, opened } = fakeStreams();
+  let local = 0;
+  cleanups.push(
+    subscribeActivity(() => {
+      local += 1;
+    }),
+  );
+  const seen: ChannelMessage[] = [];
+  cleanups.push(
+    onMessage((m) => {
+      seen.push(m);
+    }),
+  );
+  start(db, stubFetch(quiet).fetch, grantedLease(), { events });
+  await settle();
+  opened[0]?.activity();
+  await settle();
+  assert.equal(local, 1, 'the leader wakes its own page');
+  assert.deepEqual(seen.filter((m) => m.type === 'activity'), [{ type: 'activity' }], 'and relays it');
+});
+
+test('a follower emits activity when the leader relays it', async () => {
+  const db = await freshDb();
+  const { lease } = manualLease(); // never granted
+  start(db, stubFetch(routes({})).fetch, lease);
+  let wakes = 0;
+  cleanups.push(
+    subscribeActivity(() => {
+      wakes += 1;
+    }),
+  );
+  const leaderTab = new BroadcastChannel(CHANNEL_NAME);
+  cleanups.push(() => {
+    leaderTab.close();
+  });
+  // eslint-disable-next-line unicorn/require-post-message-target-origin -- that argument belongs to `Window.postMessage`; `BroadcastChannel.postMessage` has no origin to name
+  leaderTab.postMessage({ type: 'activity' } satisfies ChannelMessage);
+  await settle();
+  assert.equal(wakes, 1, 'a follower holds no stream, so the relay is the only way it hears');
 });
 
 test('a create on the tail is refused, and nothing of the batch is applied or logged', async () => {

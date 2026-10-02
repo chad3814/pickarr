@@ -540,6 +540,8 @@ export const jobs = sqliteTable('jobs', {
   // ORDER BY run_at, id`. Partial on state so the index stays proportional to
   // the queue rather than to every job ever run.
   index('jobs_ready').on(t.runAt, t.id).where(sql`${t.state} = 'ready'`),
+  // The dispatcher's prune: `DELETE ... WHERE state = 'done' AND updated_at < :cutoff`.
+  index('jobs_done_updated').on(t.updatedAt).where(sql`${t.state} = 'done'`),
 ]);
 
 /**

@@ -26,6 +26,13 @@
  * is a fact about today's write paths, not a property this module can lean
  * on without checking.
  *
+ * **A second event, `activity`.** The Activities page listens for it
+ * alongside `changed`. It carries nothing -- `data:` is empty -- because the
+ * page refetches `GET /api/activity` rather than trusting an event's
+ * contents. `notifyActivity` coalesces and defers exactly as `notify` does,
+ * with its own flag, so a burst of job writes is one event per turn and
+ * never delays or swallows a `changed`.
+ *
  * **Bounded.** `maxStreams` open responses; the next is answered 503 so the
  * browser falls back to polling and `EventSource` retries later.
  */
@@ -48,6 +55,8 @@ export interface SyncEventsDeps {
 export interface SyncEvents {
   /** The trigger-called listener: marks a change and defers one publish. Safe to call inside a transaction. */
   notify(): void;
+  /** The activity triggers' and fetch queue's listener: marks a change and defers one `activity` event. Safe to call inside a transaction. */
+  notifyActivity(): void;
   /** Writes the stream headers and the initial `changed` event, or a 503 JSON body when full. */
   attach(response: ServerResponse): void;
   readonly openStreams: number;
@@ -68,6 +77,7 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
   const maxStreams = deps.maxStreams ?? DEFAULT_MAX_STREAMS;
   const streams = new Set<ServerResponse>();
   let pending = false;
+  let activityPending = false;
   let closed = false;
 
   function send(response: ServerResponse, chunk: string): void {
@@ -124,6 +134,22 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
     for (const response of streams) send(response, event);
   }
 
+  function publishActivity(): void {
+    if (closed) {
+      activityPending = false;
+      return;
+    }
+    if (deps.raw.isTransaction) {
+      // As `publish`: a job write inside a transaction is as early as a sync
+      // write, and the page's refetch must not run before the commit.
+      deps.defer(publishActivity);
+      return;
+    }
+    activityPending = false;
+    prune();
+    for (const response of streams) send(response, 'event: activity\ndata:\n\n');
+  }
+
   const heartbeat = deps.timers.setInterval(() => {
     prune();
     for (const response of streams) send(response, ': keep-alive\n\n');
@@ -134,6 +160,11 @@ export function createSyncEvents(deps: SyncEventsDeps): SyncEvents {
       if (pending || closed) return;
       pending = true;
       deps.defer(publish);
+    },
+    notifyActivity() {
+      if (activityPending || closed) return;
+      activityPending = true;
+      deps.defer(publishActivity);
     },
     attach(response) {
       prune();

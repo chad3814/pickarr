@@ -513,3 +513,103 @@ test('a valid perHost limit of 1 and a large value both construct without throwi
     createHostFetch({ fetch: unusedFetch, limits: { default: 1, perHost: { 'a.example': 1, 'b.example': 1000 } } }),
   );
 });
+
+test('snapshot shows waiting and in-flight requests by method and redacted target, and empties when they settle', async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const changes: number[] = [];
+  const fetch = createHostFetch({
+    fetch: async () => {
+      await gate;
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    limits: { default: 1 },
+    onChange: () => { changes.push(1); },
+  });
+  const first = fetch.json('https://sab.example:8080/api?mode=queue&apikey=SECRETKEY', { method: 'GET' });
+  const second = fetch.json('https://sab.example:8080/api?mode=history&apikey=SECRETKEY', { method: 'GET' });
+  await tick();
+  const [host] = fetch.snapshot();
+  assert.ok(host);
+  assert.equal(host.hostname, 'sab.example');
+  assert.equal(host.limit, 1);
+  assert.deepEqual(host.inFlight, [{ method: 'GET', target: 'https://sab.example:8080/api' }]);
+  assert.deepEqual(host.waiting, [{ method: 'GET', target: 'https://sab.example:8080/api' }]);
+  assert.ok(!JSON.stringify(fetch.snapshot()).includes('SECRETKEY'), 'the key is nowhere in the snapshot');
+  assert.ok(changes.length >= 2, 'onChange fired for each enqueue');
+  release?.();
+  await Promise.all([first, second]);
+  assert.deepEqual(fetch.snapshot(), [], 'settled requests leave the snapshot');
+});
+
+test('a passkey in the path is masked in the target', async () => {
+  let release: (() => void) | undefined;
+  const fetch = createHostFetch({
+    fetch: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Response('x');
+    },
+  });
+  const pending = fetch.text('https://tracker.example/announce/0123456789abcdef0123456789abcdef/download?id=1');
+  await tick();
+  const target = fetch.snapshot()[0]?.inFlight[0]?.target ?? '';
+  // `redactSecrets` masks this path as two runs (digits, then the rest); the
+  // exact split is its business, so pin only that the passkey is gone and the
+  // rest of the target, with no query string, survives.
+  assert.match(target, /^https:\/\/tracker\.example\/announce\/012\*{5}.*\/download$/);
+  assert.ok(!/[0-9a-f]{8}/.test(target), `no run of 8 hex characters survives: ${target}`);
+  release?.();
+  await pending;
+});
+
+test('the target drops userinfo and the fragment as well as the query, and still masks a passkey in the path', async () => {
+  let release: (() => void) | undefined;
+  const fetch = createHostFetch({
+    fetch: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Response('x');
+    },
+  });
+  const pending = fetch.text('https://admin:hunter2@qbit.local:8080/announce/0123456789abcdef0123456789abcdef/x?k=1#frag');
+  await tick();
+  const target = fetch.snapshot()[0]?.inFlight[0]?.target ?? '';
+  assert.match(target, /^https:\/\/qbit\.local:8080\/announce\/012\*{5}.*\/x$/);
+  assert.ok(!target.includes('admin'), `no username: ${target}`);
+  assert.ok(!target.includes('hunter2'), `no password: ${target}`);
+  assert.ok(!target.includes('@'), `no userinfo: ${target}`);
+  assert.ok(!target.includes('#') && !target.includes('frag'), `no fragment: ${target}`);
+  assert.ok(!/[0-9a-f]{8}/.test(target), `no run of 8 hex characters survives: ${target}`);
+  release?.();
+  await pending;
+});
+
+test('failed requests leave the snapshot; hosts sort by name and a missing method reads as GET', async () => {
+  const releases: Array<() => void> = [];
+  const changes: number[] = [];
+  const fetch = createHostFetch({
+    fetch: async () => {
+      await new Promise<void>((resolve) => { releases.push(resolve); });
+      return new Response('nope', { status: 500, statusText: 'Server Error' });
+    },
+    onChange: () => { changes.push(1); },
+  });
+  const failures = [
+    assert.rejects(fetch.text('https://b.example/y'), FetchFailedError),
+    assert.rejects(fetch.text('https://a.example/x', { method: 'POST' }), FetchFailedError),
+  ];
+  await tick();
+  assert.deepEqual(
+    fetch.snapshot().map((host) => [host.hostname, host.inFlight.map((r) => r.method)]),
+    [['a.example', ['POST']], ['b.example', ['GET']]],
+  );
+  for (const release of releases) release();
+  await Promise.all(failures);
+  assert.deepEqual(fetch.snapshot(), [], 'a failed request leaves the snapshot');
+  assert.equal(changes.length, 6, 'enqueue, start and settle each notify, for both requests');
+});
+
+test('an unparseable url rejects before anything is queued, so the snapshot stays empty', async () => {
+  const fetch = createHostFetch({ fetch: unusedFetch });
+  await assert.rejects(fetch.text('not a url'));
+  assert.deepEqual(fetch.snapshot(), []);
+});

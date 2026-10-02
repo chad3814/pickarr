@@ -81,6 +81,7 @@ const NOW = 7000;
  * loudly rather than quietly resolve.
  */
 const OK_FETCH: QueuedFetch = {
+  snapshot: () => [],
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => 'Ok.',
