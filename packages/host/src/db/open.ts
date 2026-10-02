@@ -38,6 +38,22 @@ export function setSyncChangedListener(raw: DatabaseSync, listener: (() => void)
   else listeners.set(raw, listener);
 }
 
+/** The listener each connection's `pickarr_activity_changed()` calls, if any; keyed like `listeners` above. */
+const activityListeners = new WeakMap<DatabaseSync, () => void>();
+
+/**
+ * Installs (or, with `undefined`, removes) the function the `jobs` triggers
+ * that `jobs/activity-triggers.ts` installs call on every job change. One per
+ * connection.
+ *
+ * Fires inside the writing statement, like the sync listener, so a listener
+ * must only take note.
+ */
+export function setActivityChangedListener(raw: DatabaseSync, listener: (() => void) | undefined): void {
+  if (listener === undefined) activityListeners.delete(raw);
+  else activityListeners.set(raw, listener);
+}
+
 /**
  * `{ client: raw }`, not `drizzle(raw)`. Passing the handle positionally is not
  * a supported form: it falls through to opening a *new* database, which with
@@ -64,6 +80,10 @@ function wrap(raw: DatabaseSync) {
   // which is the one place this is ever called from.
   raw.function('pickarr_sync_changed', () => {
     listeners.get(raw)?.();
+    return null;
+  });
+  raw.function('pickarr_activity_changed', () => {
+    activityListeners.get(raw)?.();
     return null;
   });
   return { raw, db: drizzle({ client: raw, relations }) };

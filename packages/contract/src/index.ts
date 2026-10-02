@@ -77,3 +77,5 @@ export type {
   XxxSiteRead,
 } from './sync.ts';
 export { assertSyncedTableName, LOOKUP_JSON_CAP_BYTES, LOOKUP_JSON_TOO_LARGE } from './sync.ts';
+export type { ActivityHost, ActivityJob, ActivityRead, ActivityRequest } from './activity.ts';
+export { ACTIVITY_RECENT_LIMIT } from './activity.ts';

@@ -1430,6 +1430,11 @@ ALTER TABLE nzb_download ADD COLUMN import_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nzb_download ADD COLUMN import_retry_at INTEGER;
 `;
 
+/** The prune's index (`jobs/dispatcher.ts`): `done` rows by age. `jobs` is not synced, so no trigger survives or needs to. */
+const MIGRATION_26 = `
+CREATE INDEX jobs_done_updated ON jobs (updated_at) WHERE state = 'done';
+`;
+
 /**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
@@ -1461,6 +1466,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 23, up: (db) => db.exec(MIGRATION_23) },
   { version: 24, up: (db) => migration24(db) },
   { version: 25, up: (db) => db.exec(MIGRATION_25) },
+  { version: 26, up: (db) => db.exec(MIGRATION_26) },
 ];
 
 /**

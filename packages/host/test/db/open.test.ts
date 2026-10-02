@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openTestDatabase, setSyncChangedListener } from '../../src/db/open.ts';
+import { openTestDatabase, setActivityChangedListener, setSyncChangedListener } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { installSyncTriggers } from '../../src/sync/log.ts';
 
@@ -32,4 +32,18 @@ test('a listener hears every row a trigger logs, inside the writing statement, a
   setSyncChangedListener(raw, undefined);
   raw.exec("INSERT INTO probe (v) VALUES ('d')");
   assert.equal(calls, 6, 'removed: silent again');
+});
+
+test('every connection carries pickarr_activity_changed, and a listener hears each call until removed', () => {
+  const { raw } = openTestDatabase();
+  raw.exec('CREATE TABLE probe (id INTEGER PRIMARY KEY)');
+  raw.exec('CREATE TRIGGER probe_act AFTER INSERT ON probe BEGIN SELECT pickarr_activity_changed(); END');
+  assert.doesNotThrow(() => raw.exec('INSERT INTO probe DEFAULT VALUES'), 'no listener: a no-op, never a missing function');
+  let calls = 0;
+  setActivityChangedListener(raw, () => { calls += 1; });
+  raw.exec('INSERT INTO probe DEFAULT VALUES; INSERT INTO probe DEFAULT VALUES');
+  assert.equal(calls, 2);
+  setActivityChangedListener(raw, undefined);
+  raw.exec('INSERT INTO probe DEFAULT VALUES');
+  assert.equal(calls, 2);
 });
