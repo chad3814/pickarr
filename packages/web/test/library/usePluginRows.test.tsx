@@ -362,7 +362,7 @@ test('a touched row for another item does not refetch', async () => {
   render(<Harness source={source} mediaItemIds={[1]} tables={['tv_release']} />);
   await waitFor(() => { assert.equal(fetches, 1); });
   // A touched id the page does not hold, whose row (none in this db) names no item of ours.
-  emit({ touched: new Map([['tv_release', [999]]]), inserted: new Map() });
+  emit({ touched: new Map([['tv_release', [999]]]), inserted: new Map(), catalog: [] });
   await settle();
   assert.equal(fetches, 1);
 });
@@ -381,7 +381,7 @@ test('one wake with several matching ids refetches once', async () => {
   };
   render(<Harness source={counting} mediaItemIds={[1]} tables={['tv_release']} />);
   await waitFor(() => { assert.equal(fetches, 1); });
-  emit({ touched: new Map([['tv_release', [50, 51]]]), inserted: new Map() });
+  emit({ touched: new Map([['tv_release', [50, 51]]]), inserted: new Map(), catalog: [] });
   await settle();
   assert.equal(fetches, 2, 'both ids are held; one refetch covers both');
 });

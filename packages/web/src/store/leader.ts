@@ -65,6 +65,7 @@ export type SerializedBucket = ReadonlyArray<readonly [string, readonly number[]
 export interface SerializedChanged {
   touched: SerializedBucket;
   inserted: SerializedBucket;
+  catalog: readonly number[];
 }
 
 /** `Changed` -> its wire shape. See {@link SerializedChanged} for why. */
@@ -72,6 +73,7 @@ export function serializeChanged(changed: Changed): SerializedChanged {
   return {
     touched: Array.from(changed.touched.entries()),
     inserted: Array.from(changed.inserted.entries()),
+    catalog: changed.catalog,
   };
 }
 
@@ -80,6 +82,7 @@ export function deserializeChanged(serialized: SerializedChanged): Changed {
   return {
     touched: new Map<string, readonly number[]>(serialized.touched),
     inserted: new Map<string, readonly number[]>(serialized.inserted),
+    catalog: serialized.catalog,
   };
 }
 

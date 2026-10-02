@@ -24,6 +24,11 @@
  *   watching for, because nothing observes an object store's absence the
  *   way it observes a row's presence.
  *
+ * The transaction spans three stores -- `rows`, `meta` and the derived
+ * `catalog` -- so a catalog record commits or aborts with the rows it was
+ * computed from. The catalog phase runs after the write loop, so its reads
+ * see the batch's own puts (design spec 2026-10-02 §1.3).
+ *
  * The cursor advance is written into this same transaction, after the ops
  * and before `done(tx)`, so a crash between them is impossible: either both
  * commit or neither does. Two transactions would let a crash between them
@@ -44,6 +49,8 @@ import type { StoredRow } from './db.ts';
 import { writeCursors, type Cursors } from './meta.ts';
 import type { SyncOp } from './wire.ts';
 import { emit } from './notify.ts';
+import { CATALOG_STORE } from './catalog.ts';
+import { affectedMediaItems, recomputeCatalog } from './catalog-apply.ts';
 
 /**
  * A batch carried two ops for one key, which this function cannot apply.
@@ -107,6 +114,8 @@ export class MalformedOpError extends Error {
 export interface Changed {
   touched: ReadonlyMap<string, readonly number[]>;
   inserted: ReadonlyMap<string, readonly number[]>;
+  /** Ids of the media items whose catalog record this batch wrote or deleted, ascending. A subscriber re-reads its filtered list rather than patching it. */
+  catalog: readonly number[];
 }
 
 function bucket(map: Map<string, number[]>, table: string): number[] {
@@ -132,7 +141,7 @@ export async function applyBatch(
     keys.add(key);
   }
 
-  const tx = db.transaction(['rows', 'meta'], 'readwrite');
+  const tx = db.transaction(['rows', 'meta', CATALOG_STORE], 'readwrite');
   const store = tx.objectStore('rows');
 
   // Read every key the batch touches before writing any of them.
@@ -157,6 +166,7 @@ export async function applyBatch(
 
   const touched = new Map<string, number[]>();
   const inserted = new Map<string, number[]>();
+  let catalogIds: number[] = [];
 
   // Everything from here to the cursor write is wrapped in one try/catch so
   // that any failure -- a refused op, or IndexedDB itself refusing a value
@@ -193,20 +203,25 @@ export async function applyBatch(
       }
       bucket(touched, op.table).push(op.id);
     }
+    // The catalog phase (design spec 2026-10-02 §1.3): reads issued here see
+    // the `put`s above, so a batch resolves its own cross-table references.
+    const affected = await affectedMediaItems(tx, held);
+    catalogIds = await recomputeCatalog(tx, affected);
     await writeCursors(tx, cursors);
   } catch (err) {
     // `abort()` is what makes a refused batch leave nothing behind: a
     // synchronous throw does not abort a transaction, so `put`s issued
     // earlier in this loop would commit anyway (measured).
     //
-    // The guard around it is insurance rather than a pinned path, and the
-    // distinction is stated because an earlier version of this comment
-    // claimed otherwise. `abort()` on an already-aborted transaction throws
-    // `InvalidStateError` (measured), which would replace the error the
-    // caller actually needs -- but the loop above is synchronous, so no error
-    // event can land in the middle of it, and no test here can construct a
-    // transaction that is already aborted on arrival. So this is cheap
-    // protection for a path the suite cannot reach, not a covered one.
+    // The guard around it is load-bearing, not insurance. `abort()` on an
+    // already-aborted transaction throws `InvalidStateError` (measured),
+    // which would replace the error the caller actually needs. The `put` loop
+    // is synchronous, but the catalog phase after it awaits requests, so an
+    // asynchronous IndexedDB failure (a `catalog.put` that aborts the
+    // transaction, say) can land mid-phase: the transaction is then already
+    // aborted, the next request rejects with `AbortError`, and this catch
+    // runs against a dead transaction. `catalog-apply.test.ts` injects
+    // exactly that failure.
     try {
       tx.abort();
     } catch {
@@ -220,7 +235,7 @@ export async function applyBatch(
   // After the commit, never inside it (spec §4's last paragraph): a
   // subscriber that reads would otherwise re-enter this transaction and see
   // its own batch half-applied.
-  const changed: Changed = { touched, inserted };
+  const changed: Changed = { touched, inserted, catalog: catalogIds };
   emit(changed);
 
   return changed;

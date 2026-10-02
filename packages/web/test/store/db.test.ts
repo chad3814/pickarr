@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb } from './harness.ts';
 import { done, request } from '../../src/store/idb.ts';
@@ -15,11 +15,11 @@ function freshDbName(): string {
 test('the store is keyed by table and id together', async () => {
   const db = await freshDb();
   const names = [...db.objectStoreNames].toSorted();
-  assert.deepEqual(names, ['meta', 'rows']);
+  assert.deepEqual(names, ['catalog', 'meta', 'rows']);
   const rows = db.transaction('rows').objectStore('rows');
   assert.deepEqual(rows.keyPath, ['table', 'id']);
   assert.deepEqual([...rows.indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated']);
+    ['by_media_item', 'by_person', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated']);
   db.close();
 });
 
@@ -73,13 +73,13 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
 
   const second = await openStore(name, 2);
   assert.equal(second.version, 2);
-  assert.deepEqual([...second.objectStoreNames].toSorted(), ['meta', 'rows']);
+  assert.deepEqual([...second.objectStoreNames].toSorted(), ['catalog', 'meta', 'rows']);
   const rows = await request(second.transaction('rows').objectStore('rows').getAll());
   assert.equal(rows.length, 0, 'the replica was discarded, not migrated');
   const cursors = await request(second.transaction('meta').objectStore('meta').getAll());
   assert.equal(cursors.length, 0, 'and the cursors went with it, so the next start bootstraps');
   assert.deepEqual([...second.transaction('rows').objectStore('rows').indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated'],
+    ['by_media_item', 'by_person', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated'],
     'indexes are rebuilt too');
   second.close();
 });
@@ -87,7 +87,7 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
 test('the per-category index exists, and holds only rows that project a pluginId', async () => {
   const db = await openStore(freshDbName());
   try {
-    assert.equal(SCHEMA_VERSION, 2, 'the bump that creates this index');
+    assert.equal(SCHEMA_VERSION, 3, 'the current schema, which still carries this index');
     const index = db.transaction('rows').objectStore('rows').index('by_table_plugin_updated');
     assert.deepEqual(
       [...index.keyPath],
@@ -168,4 +168,41 @@ test('a tab still holding the old version open steps aside instead of blocking t
     // `versionchange` handler already did this.
     firstTab.close();
   }
+});
+
+const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+afterEach(() => {
+  if (originalLocation === undefined) Reflect.deleteProperty(globalThis, 'location');
+  else Object.defineProperty(globalThis, 'location', originalLocation);
+});
+
+test('an old tab closes its connection and reloads when another tab bumps the version', async () => {
+  // The old bundle cannot speak the new schema, and a leader that merely
+  // closed would keep its Web Lock lease; the reload releases it. Node has no
+  // `location`, so one is stubbed and restored by the afterEach above.
+  let reloads = 0;
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { reload: () => { reloads += 1; } } });
+  const name = freshDbName();
+  const oldTab = await openStore(name, 1);
+  const newTab = await openStore(name, 2);
+  try {
+    assert.equal(reloads, 1, 'the old tab reloaded exactly once');
+    assert.throws(() => oldTab.transaction('rows'), { name: 'InvalidStateError' }, 'and its connection is closed');
+  } finally {
+    newTab.close();
+    oldTab.close();
+  }
+});
+
+test('schema 3 has the catalog store with its two indexes, and rows has by_person', async () => {
+  const db = await freshDb();
+  assert.ok(Array.from(db.objectStoreNames).includes('catalog'));
+  const tx = db.transaction(['catalog', 'rows'], 'readonly');
+  const catalog = tx.objectStore('catalog');
+  assert.equal(catalog.keyPath, 'id');
+  assert.deepEqual(catalog.index('by_plugin_picked_updated').keyPath, ['pluginId', 'picked', 'updatedAt', 'id']);
+  assert.deepEqual(catalog.index('by_plugin_updated').keyPath, ['pluginId', 'updatedAt', 'id']);
+  assert.equal(tx.objectStore('rows').index('by_person').keyPath, 'value.personId');
+  assert.equal(db.version, 3);
+  db.close();
 });

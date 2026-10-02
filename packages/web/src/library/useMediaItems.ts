@@ -63,7 +63,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * per that index's own doc), so this exists to decline a malformed row
  * rather than to filter by category a second time.
  */
-function isMediaItem(value: unknown): value is MediaItemSyncRead {
+export function isMediaItem(value: unknown): value is MediaItemSyncRead {
   return isRecord(value) && typeof value.pluginId === 'string';
 }
 
@@ -75,7 +75,7 @@ function isMediaItem(value: unknown): value is MediaItemSyncRead {
  * be mounted and subscribed when the store it reads from stops (sign-out, a
  * 401). Anything else is rethrown.
  */
-function isStoreClosed(err: unknown): boolean {
+export function isStoreClosed(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'name' in err && err.name === 'InvalidStateError';
 }
 

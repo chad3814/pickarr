@@ -1,28 +1,31 @@
 /**
  * One category's screen: `pluginId`'s media items, newest first, paged on
- * demand via `useMediaItems`, each row expanding into a `MediaItemCard`
- * (design spec §6, §7).
+ * demand, each row expanding into a `MediaItemCard`
+ * (design spec §6, §7). The unfiltered view pages `rows` through
+ * `useMediaItems`; a picked filter or a search term pages the derived
+ * `catalog` store through `useCatalogItems` (browse-filter-search design
+ * spec §3), with the filter and term read from the URL by `useBrowseQuery`.
  *
- * **`data-testid={`category-${pluginId}`}` on the root element carries task
- * 4's route-mapping contract forward.** `Shell.test.tsx`'s per-category
+ * **`data-testid={`category-${pluginId}`}` on the root element is the
+ * route-mapping contract.** `Shell.test.tsx`'s per-category
  * mapping tests find whichever screen renders at each plugin's own path by
  * this marker, not by its rendered prose, so this component's own text and
  * layout are free to change without touching those tests. That was the
- * point of choosing a marker: task 4 put it on the placeholder this
- * component replaced -- the placeholder and its docblock are gone, but the
- * contract is the marker, and it is kept here. The marker is on this outer
+ * point of choosing a marker. It first sat on a placeholder this component
+ * replaced; the placeholder is gone and the marker moved here. The marker is
+ * on this outer
  * element regardless of whether `store` has arrived yet, so it is present
  * the instant the route matches.
  *
  * **`store` is `undefined` until `Shell`'s own store finishes opening**
  * (`Shell.tsx`'s state starts there, same as `useCounts`'s). Nothing is
- * fetched or rendered as a list until a store exists -- `CategoryList`
- * below is the piece that only mounts once one does, so `useMediaItems`
- * itself is never called with nothing to read from.
+ * fetched or rendered as a list until a store exists -- `DefaultList` and
+ * `FilteredList` below are the pieces that only mount once one does, so
+ * `useMediaItems` and `useCatalogItems` themselves are never called with nothing to read from.
  *
  * **Plugin rows are fetched here, once per page, and handed to each card.**
  * `usePluginRows` reads the whole page's rows in one batched query as soon
- * as `useMediaItems` resolves a page of ids -- before any card expands --
+ * as the list hook resolves a page of ids -- before any card expands --
  * because a collapsed card needs its plugin's rows too (design spec §4,
  * acceptance 1), and a per-card fetch gated on expansion cannot answer for
  * one that never expands.
@@ -36,15 +39,18 @@
  * list, not one per card.
  */
 import { useMemo, type ReactElement } from 'react';
-import { useMediaItems, type MediaItemsSource } from './useMediaItems.ts';
+import { useMediaItems, type MediaItemsResult, type MediaItemsSource } from './useMediaItems.ts';
+import { useCatalogItems, type CatalogItemsSource } from './useCatalogItems.ts';
+import { useBrowseQuery, type BrowseQuery } from './useBrowseQuery.ts';
+import { BrowseControls } from './BrowseControls.tsx';
 import { MediaItemCard } from './MediaItemCard.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from './usePluginRows.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
 import type { PickSubmit } from './postPick.ts';
 
-/** Everything this screen needs from a store: `useMediaItems`'s two members, `MediaItemCard`'s own four (through `useGatheredItem`), and `usePluginRows`' one -- `subscribeInserts` is shared by two of the three. A real `Store` satisfies this by structural assignment. */
-export interface CategorySource extends MediaItemsSource, GatheredSource, PluginRowsSource {}
+/** Everything this screen needs from a store: `useMediaItems`'s two members, `useCatalogItems`' three (`getRows` is shared with `MediaItemCard`'s), `MediaItemCard`'s own four (through `useGatheredItem`), and `usePluginRows`' one -- `subscribeInserts` is shared by two of the three. A real `Store` satisfies this by structural assignment. */
+export interface CategorySource extends MediaItemsSource, CatalogItemsSource, GatheredSource, PluginRowsSource {}
 
 export interface CategoryProps {
   store: CategorySource | undefined;
@@ -63,28 +69,74 @@ export interface CategoryProps {
   submit: PickSubmit;
 }
 
+/** The sentence a filtered or searched list shows when it resolves to nothing. */
+export function emptySentence(query: BrowseQuery): string {
+  if (query.term === '') {
+    return query.filter === 'picked' ? 'No picked items yet' : 'No unpicked items';
+  }
+  const among = query.filter === 'all' ? '' : ` among ${query.filter} items`;
+  return `Nothing matches "${query.q}"${among}`;
+}
+
 export function Category({ store, pluginId, tables, submit }: CategoryProps): ReactElement {
+  const { query, controls } = useBrowseQuery();
   return (
     <section data-testid={`category-${pluginId}`}>
-      {store === undefined ? null : (
-        <CategoryList store={store} pluginId={pluginId} tables={tables} submit={submit} />
+      <BrowseControls
+        filter={controls.filter}
+        input={controls.input}
+        onFilter={controls.setFilter}
+        onInput={controls.setInput}
+      />
+      {store === undefined ? null : query.filter === 'all' && query.term === '' ? (
+        <DefaultList store={store} pluginId={pluginId} tables={tables} submit={submit} />
+      ) : (
+        <FilteredList
+          key={`${query.filter}|${query.term}`}
+          store={store}
+          pluginId={pluginId}
+          tables={tables}
+          submit={submit}
+          query={query}
+        />
       )}
     </section>
   );
 }
 
-interface CategoryListProps {
+interface ListProps {
   store: CategorySource;
   pluginId: string;
   tables: readonly string[];
   submit: PickSubmit;
 }
 
-function CategoryList({ store, pluginId, tables, submit }: CategoryListProps): ReactElement | null {
-  const { items, loadMore, done, empty } = useMediaItems(store, pluginId);
+/** The unfiltered view: pages the `rows` store directly, with no catalog read. */
+function DefaultList({ store, pluginId, tables, submit }: ListProps): ReactElement | null {
+  const result = useMediaItems(store, pluginId);
+  return <ItemList store={store} tables={tables} submit={submit} result={result} emptyMessage="Nothing here yet." />;
+}
 
-  // Stable across renders unless `items` itself changes (`useMediaItems`'s
-  // own state, replaced wholesale rather than mutated in place): a fresh
+/** A picked filter and/or a search term: pages the derived `catalog` store. */
+function FilteredList({ store, pluginId, tables, submit, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
+  const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
+  return <ItemList store={store} tables={tables} submit={submit} result={result} emptyMessage={emptySentence(query)} />;
+}
+
+interface ItemListProps {
+  store: CategorySource;
+  tables: readonly string[];
+  submit: PickSubmit;
+  result: MediaItemsResult;
+  emptyMessage: string;
+}
+
+function ItemList({ store, tables, submit, result, emptyMessage }: ItemListProps): ReactElement | null {
+  const { items, loadMore, done, empty } = result;
+
+  // Stable across renders unless `items` itself changes (the
+  // state in `useMediaItems` and `useCatalogItems` alike, replaced wholesale
+  // rather than mutated in place): a fresh
   // `.map` every render would be a new array every render, and
   // `usePluginRows` refetches whenever this reference changes.
   const mediaItemIds = useMemo(() => items.map((item) => item.id), [items]);
@@ -109,12 +161,13 @@ function CategoryList({ store, pluginId, tables, submit }: CategoryListProps): R
 
   // `items.length === 0 && !empty` is the one state `empty` cannot yet
   // distinguish from "still loading" on its own -- see `useMediaItems.ts`'s
-  // own doc on `empty`. Rendering nothing here, rather than "Nothing here
+  // own doc on `empty`, which `useCatalogItems` honours too. Rendering nothing
+  // here, rather than "Nothing here
   // yet", is what keeps that message honest: it appears only once the first
   // page has actually resolved to zero rows.
   if (items.length === 0 && !empty) return null;
 
-  if (empty) return <p>Nothing here yet.</p>;
+  if (empty) return <p>{emptyMessage}</p>;
 
   return (
     <div>

@@ -282,6 +282,7 @@ test('a Changed round-trips through serializeChanged, a real broadcast, and dese
   const changed: Changed = {
     touched: new Map([['person', [1, 2]], ['media_item', [7]]]),
     inserted: new Map([['person', [2]]]),
+    catalog: [4, 5],
   };
 
   const received = new Promise<ChannelMessage>((resolve) => {
@@ -306,19 +307,21 @@ test('a Changed round-trips through serializeChanged, a real broadcast, and dese
     Array.from(roundTripped.inserted.entries()).toSorted(),
     Array.from(changed.inserted.entries()).toSorted(),
   );
+  assert.deepEqual(roundTripped.catalog, [4, 5]);
 });
 
 test('serializeChanged carries table names and ids only -- no row value ever named', () => {
   const changed: Changed = {
     touched: new Map([['person', [1]]]),
     inserted: new Map(),
+    catalog: [3],
   };
   const serialized = serializeChanged(changed);
-  assert.deepEqual(serialized, { touched: [['person', [1]]], inserted: [] });
+  assert.deepEqual(serialized, { touched: [['person', [1]]], inserted: [], catalog: [3] });
   // The wire form round-trips through JSON with nothing beyond table names
   // and numeric ids -- a row's `value` has no field to ride along in, even
   // by accident, because `Changed` itself never carried one.
-  assert.deepEqual(JSON.parse(JSON.stringify(serialized)), { touched: [['person', [1]]], inserted: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(serialized)), { touched: [['person', [1]]], inserted: [], catalog: [3] });
 });
 
 test('a holder that throws on being granted stops claiming leadership', async () => {
@@ -342,7 +345,7 @@ test('serializeChanged round-trips an empty map and an empty id list', async () 
   // Neither edge was in the shipped suite, and both are reachable: a batch of
   // only skipped creates touches nothing, and `bucket` creates an array before
   // anything is pushed into it.
-  const empty = { touched: new Map(), inserted: new Map() };
+  const empty = { touched: new Map(), inserted: new Map(), catalog: [] };
   const backEmpty = deserializeChanged(serializeChanged(empty));
   assert.equal(backEmpty.touched.size, 0);
   assert.equal(backEmpty.inserted.size, 0);
@@ -350,6 +353,7 @@ test('serializeChanged round-trips an empty map and an empty id list', async () 
   const withEmptyList = {
     touched: new Map([['person', []]]),
     inserted: new Map<string, readonly number[]>(),
+    catalog: [],
   };
   const back = deserializeChanged(serializeChanged(withEmptyList));
   assert.deepEqual(back.touched.get('person'), []);

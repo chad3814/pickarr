@@ -995,6 +995,7 @@ export const test = base.extend<{ harness: Harness }>({
             }
           }
 
+          const feedUrl = `http://feeds.invalid/${pluginId}.xml`;
           const feed = await host.addFeed({
             pluginId,
             name: `${pluginId} feed`,
@@ -1005,7 +1006,7 @@ export const test = base.extend<{ harness: Harness }>({
             // tracker's passkey (`feeds/add.ts`'s own note on why the
             // `duplicate-url` refusal names none), which is reason enough
             // for this one to be obviously nobody's.
-            url: `http://feeds.invalid/${pluginId}.xml`,
+            url: feedUrl,
             downloadType: 'torrent',
             // Any value inside `feeds/add.ts`'s `MIN_POLL_INTERVAL_S` ..
             // `MAX_POLL_INTERVAL_S` window will do, since nothing here ever
@@ -1016,8 +1017,17 @@ export const test = base.extend<{ harness: Harness }>({
             // debugged from a browser.
             pollIntervalS: 3_600,
           });
-          if ('refusal' in feed) {
-            throw new Error(`the harness could not create a feed: ${feed.refusal}`);
+          // A second release under the same plugin finds the first call's
+          // feed (the url is unique), so a spec can seed several items.
+          const existing = raw.prepare('SELECT id FROM rss_feed WHERE url = ?').get(feedUrl);
+          const feedId =
+            'refusal' in feed
+              ? feed.refusal === 'duplicate-url' && existing !== undefined && typeof existing.id === 'number'
+                ? existing.id
+                : null
+              : feed.id;
+          if (feedId === null) {
+            throw new Error(`the harness could not create a feed: ${'refusal' in feed ? feed.refusal : ''}`);
           }
 
           const mediaItemId = seedMediaItem(pluginId, title);
@@ -1029,7 +1039,7 @@ export const test = base.extend<{ harness: Harness }>({
             INSERT INTO rss_item
               (feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state)
             VALUES (?, ?, ?, ?, ?, 'torrent', ?, ?)
-          `).run(feed.id, filename, MAGNET, at, at, mediaItemId, lookupState);
+          `).run(feedId, filename, MAGNET, at, at, mediaItemId, lookupState);
 
           return { mediaItemId, rssItemId: Number(info.lastInsertRowid) };
         },
