@@ -74,7 +74,7 @@ export function movieHeadline(title: string, releaseDate: string | null): string
   return /^[0-9]{4}$/.test(year) ? `${title} (${year})` : title;
 }
 
-function MovieCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
+function MovieCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange);
 
   // IMDb is this plugin's to supply: `imdb_id` is a `movie_detail` column,
@@ -89,7 +89,7 @@ function MovieCard({ item, rows, gathered, onExpandedChange, submit }: CardProps
       {expanded && gathered !== undefined && (
         <>
           <MediaDetails item={item} gathered={gathered} extraLinks={extraLinks} />
-          <ReleaseList releases={gathered.releases} submit={submit} />
+          <ReleaseList releases={gathered.releases} submit={submit} identify={identify} pluginId={item.pluginId} />
         </>
       )}
     </>

@@ -79,11 +79,15 @@
  */
 import { useState, type ReactElement } from 'react';
 import { DownloadTypeIcon } from './icons.tsx';
+import { IdentifyForm } from './IdentifyForm.tsx';
 import {
+  IDENTIFY_REFUSAL_MESSAGES,
   PICK_REFUSAL_MESSAGES,
+  REQUERY_LABELS,
   type GatheredDownloadView as GatheredDownload,
   type GatheredItemView,
   type GatheredReleaseView as GatheredRelease,
+  type IdentifySubmit,
   type PickSubmit,
 } from './types.ts';
 
@@ -91,6 +95,10 @@ export interface ReleaseListProps {
   releases: GatheredItemView['releases'];
   /** Submits one pick. Required, never defaulted -- see this file's docblock. */
   submit: PickSubmit;
+  /** Requeries or edits one release. Required, never defaulted, for `submit`'s reason. */
+  identify: IdentifySubmit;
+  /** The plugin whose card this list is on; the combobox suggests only that plugin's titles. */
+  pluginId: string;
 }
 
 /**
@@ -157,6 +165,8 @@ export const PICK_LABELS = { idle: 'Pick', pending: 'Picking…' } as const;
 interface ReleaseRowProps {
   release: GatheredRelease;
   submit: PickSubmit;
+  identify: IdentifySubmit;
+  pluginId: string;
 }
 
 /**
@@ -197,10 +207,26 @@ interface ReleaseRowProps {
  *
  * An accepted pick sets no message. There is nothing to say that the row
  * does not already say.
+ *
+ * **Every line also offers `Requery` and `Edit`, whether or not it has a
+ * download.** `Requery` asks the lookup service again and, like `Retry` on
+ * the unmatched card (`web/src/library/Unmatched.tsx`'s `RetryButton`), is
+ * pending from the click until this row's `updatedAt` differs from the one
+ * it had then -- one piece of state, `requeryingSince`, rather than a flag
+ * that could disagree with it. A refusal clears the wait; an acceptance does
+ * not, and no timer does either. `Edit` replaces the buttons with
+ * {@link IdentifyForm}; saving it starts the same wait, because a saved edit
+ * is also a lookup the row has yet to reflect. The line's status word
+ * (`Looking up…`, `unresolved`, `refused`) reads `lookupState`; a resolved
+ * release shows none.
  */
-function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
+function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): ReactElement {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [requeryingSince, setRequeryingSince] = useState<number | undefined>(undefined);
+  const [requeryError, setRequeryError] = useState<string | null>(null);
+  const requerying = requeryingSince !== undefined && release.row.updatedAt === requeryingSince;
 
   // `listitem` is not named from its own contents (measured: an unlabelled
   // `<li>` reads with an empty accessible name even when full of visible
@@ -215,6 +241,8 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
   // screen. Self-reference in `aria-labelledby` resolves to the element's
   // own content, so nothing here is announced that is not also rendered.
   const pickId = `release-${String(release.id)}-pick`;
+  const requeryId = `release-${String(release.id)}-requery`;
+  const editId = `release-${String(release.id)}-edit`;
   const score = scoreText(release.row);
 
   async function pick(): Promise<void> {
@@ -237,6 +265,23 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
       if (!accepted) setPending(false);
     }
   }
+
+  async function requery(): Promise<void> {
+    setRequeryingSince(release.row.updatedAt);
+    setRequeryError(null);
+    try {
+      const outcome = await identify.identify(release.id, { mode: 'requery' });
+      if ('refusal' in outcome) {
+        setRequeryingSince(undefined);
+        setRequeryError(IDENTIFY_REFUSAL_MESSAGES[outcome.refusal]);
+      }
+    } catch {
+      setRequeryingSince(undefined);
+      setRequeryError(IDENTIFY_REFUSAL_MESSAGES.offline);
+    }
+  }
+
+  const lookupState = release.row.lookupState;
 
   return (
     <li aria-labelledby={filenameId}>
@@ -261,18 +306,64 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
       {release.downloads.map((download) => (
         <span key={downloadKey(download)}> {statusText(download)}</span>
       ))}
-      {release.downloads.length === 0 && (
-        <button
-          type="button"
-          id={pickId}
-          aria-labelledby={`${pickId} ${filenameId}`}
-          disabled={pending}
-          onClick={() => {
-            void pick();
+      {(lookupState === 'pending' || lookupState === 'unresolved' || lookupState === 'refused') && (
+        <span> {lookupState === 'pending' ? 'Looking up…' : lookupState}</span>
+      )}
+      {editing ? (
+        <IdentifyForm
+          pluginId={pluginId}
+          rssItemId={release.id}
+          identify={identify}
+          onDone={() => {
+            setEditing(false);
+            setRequeryingSince(release.row.updatedAt);
           }}
-        >
-          {pending ? PICK_LABELS.pending : PICK_LABELS.idle}
-        </button>
+          onCancel={() => {
+            setEditing(false);
+          }}
+        />
+      ) : (
+        <>
+          {release.downloads.length === 0 && (
+            <button
+              type="button"
+              id={pickId}
+              aria-labelledby={`${pickId} ${filenameId}`}
+              disabled={pending}
+              onClick={() => {
+                void pick();
+              }}
+            >
+              {pending ? PICK_LABELS.pending : PICK_LABELS.idle}
+            </button>
+          )}
+          <button
+            type="button"
+            id={requeryId}
+            aria-labelledby={`${requeryId} ${filenameId}`}
+            disabled={requerying}
+            onClick={() => {
+              void requery();
+            }}
+          >
+            {requerying ? REQUERY_LABELS.pending : REQUERY_LABELS.idle}
+          </button>
+          <button
+            type="button"
+            id={editId}
+            aria-labelledby={`${editId} ${filenameId}`}
+            onClick={() => {
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        </>
+      )}
+      {requeryError !== null && (
+        <div role="alert">
+          <span>{requeryError}</span>
+        </div>
       )}
       {error !== null && (
         <div role="alert">
@@ -293,11 +384,11 @@ function ReleaseRow({ release, submit }: ReleaseRowProps): ReactElement {
   );
 }
 
-export function ReleaseList({ releases, submit }: ReleaseListProps): ReactElement {
+export function ReleaseList({ releases, submit, identify, pluginId }: ReleaseListProps): ReactElement {
   return (
     <ul aria-label="releases">
       {releases.map((release) => (
-        <ReleaseRow key={release.id} release={release} submit={submit} />
+        <ReleaseRow key={release.id} release={release} submit={submit} identify={identify} pluginId={pluginId} />
       ))}
     </ul>
   );

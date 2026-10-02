@@ -52,10 +52,21 @@
  */
 import { useCallback, useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { PluginRows } from '@pickarr/plugin-ui';
+import type { IdentifySubmit, PluginRows } from '@pickarr/plugin-ui';
 import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
 import { pluginFor } from '../plugins/registry.ts';
 import type { PickSubmit } from './postPick.ts';
+
+/**
+ * What a card's Requery and Edit call until the shell supplies a real
+ * `IdentifySubmit`. Both reject, so a click lands on `ReleaseList`'s
+ * "could not reach Pickarr" sentence rather than doing nothing; nothing here
+ * posts.
+ */
+const unwiredIdentify: IdentifySubmit = {
+  identify: () => Promise.reject(new Error('identify is not wired into this card yet')),
+  suggest: () => Promise.reject(new Error('identify is not wired into this card yet')),
+};
 
 export interface MediaItemCardProps {
   source: GatheredSource;
@@ -150,7 +161,7 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
       {plugin === undefined ? (
         <h2>{item.title}</h2>
       ) : (
-        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} />
+        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} identify={unwiredIdentify} />
       )}
     </article>
   );

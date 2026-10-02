@@ -2,13 +2,25 @@ export type { BrowserPlugin, CardProps, PluginRows } from './plugin.ts';
 export { ReleaseList } from './ReleaseList.tsx';
 export { CardHeading, useExpansion } from './expansion.tsx';
 export type { CardHeadingProps, Expansion } from './expansion.tsx';
-export { PICK_REFUSAL_MESSAGES, SESSION_EXPIRED_MESSAGE } from './types.ts';
+export {
+  IDENTIFY_REFUSAL_MESSAGES,
+  PICK_REFUSAL_MESSAGES,
+  REQUERY_LABELS,
+  SESSION_EXPIRED_MESSAGE,
+  SUGGEST_DEBOUNCE_MS,
+  SUGGEST_LIMIT,
+} from './types.ts';
+export { IdentifyForm } from './IdentifyForm.tsx';
+export type { IdentifyFormProps } from './IdentifyForm.tsx';
 export type {
   ArtworkUrlsView,
   GatheredDownloadView,
   GatheredItemView,
   GatheredReleaseView,
+  Candidate,
   GatheredRoleView,
+  IdentifyOutcome,
+  IdentifySubmit,
   PickOutcome,
   PickSubmit,
 } from './types.ts';

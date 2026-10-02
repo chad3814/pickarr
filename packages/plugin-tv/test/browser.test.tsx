@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead, TvRead } from '@pickarr/contract';
-import type { GatheredItemView, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
+import type { GatheredItemView, IdentifySubmit, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
 import { tvBrowser } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -35,6 +35,12 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  * unreached even there.
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
+
+/** Likewise required, likewise never called: these tests click no Requery or Edit. */
+const identify: IdentifySubmit = {
+  identify: () => Promise.reject(new Error('not exercised by this test')),
+  suggest: () => Promise.reject(new Error('not exercised by this test')),
+};
 
 /** A `GatheredItemView` with no releases and placeholder artwork urls -- enough to expand the card. */
 function gathered(): GatheredItemView {
@@ -78,7 +84,7 @@ function renderTvCardExpanded(item: Partial<MediaItemSyncRead>, release: TvRead 
       rows={rows}
       gathered={gathered()}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   fireEvent.click(screen.getByRole('button'));
@@ -103,7 +109,7 @@ test('the headline renders in the expander button’s accessible name, before an
       rows={rows}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(
@@ -115,7 +121,7 @@ test('the headline renders in the expander button’s accessible name, before an
 test('a card with no tv_release row falls back to the item’s own title', () => {
   const rows: PluginRows = { tv_release: [] };
   render(
-    <Card item={mediaItem({ title: 'Untagged Item' })} rows={rows} gathered={undefined} onExpandedChange={() => {}} submit={submit} />,
+    <Card item={mediaItem({ title: 'Untagged Item' })} rows={rows} gathered={undefined} onExpandedChange={() => {}} submit={submit} identify={identify} />,
   );
   assert.ok(
     screen.getByRole('button', { name: 'Untagged Item' }),
@@ -131,7 +137,7 @@ test('a malformed tv_release row (missing seriesTitle) falls back rather than th
     tv_release: [{ mediaItemId: 1, kind: 'episode', seasonNumber: 2, episodeNumber: 47 }],
   };
   render(
-    <Card item={mediaItem({ title: 'Untagged Item' })} rows={rows} gathered={undefined} onExpandedChange={() => {}} submit={submit} />,
+    <Card item={mediaItem({ title: 'Untagged Item' })} rows={rows} gathered={undefined} onExpandedChange={() => {}} submit={submit} identify={identify} />,
   );
   assert.ok(
     screen.getByRole('button', { name: 'Untagged Item' }),
@@ -158,7 +164,7 @@ test('every expand and every collapse is reported, with the state the card moved
       onExpandedChange={(expanded) => {
         reported.push(expanded);
       }}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   const button = screen.getByRole('button');
