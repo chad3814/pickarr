@@ -326,3 +326,64 @@ test('Save is disabled while empty and while a request is in flight', async () =
   fireEvent.click(save());
   assert.equal(stub.requests.length, 1, 'a second click sends nothing');
 });
+
+test('choosing an option while a newer suggest is in flight keeps the list closed when that response lands', async () => {
+  const resolvers = new Map<string, (found: readonly Candidate[]) => void>();
+  const stub = stubIdentify(
+    (term) =>
+      new Promise<readonly Candidate[]>((resolve) => {
+        resolvers.set(term, resolve);
+      }),
+  );
+  renderForm(stub.identify);
+  await type(stub, 'du', 1);
+  await act(async () => {
+    resolvers.get('du')?.(DUNE);
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    assert.equal(optionTexts().length, 4);
+  });
+
+  await type(stub, 'dune', 2);
+  fireEvent.mouseDown(screen.getByRole('option', { name: 'Dune (2021)' }));
+  assert.equal(combobox().value, 'Dune');
+  await act(async () => {
+    resolvers.get('dune')?.([{ mediaItemId: 99, title: 'Duel', year: '1971' }]);
+    await Promise.resolve();
+  });
+
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false', 'the late answer does not reopen the list');
+  assert.equal(combobox().value, 'Dune', 'and the chosen title stays');
+});
+
+test('choosing an option inside the debounce window cancels the pending lookup', async () => {
+  const stub = stubIdentify(() => Promise.resolve(DUNE));
+  renderForm(stub.identify);
+  await type(stub, 'du', 1);
+  await waitFor(() => {
+    assert.equal(optionTexts().length, 4);
+  });
+  fireEvent.change(combobox(), { target: { value: 'dune' } });
+  fireEvent.mouseDown(screen.getByRole('option', { name: 'Dune (2021)' }));
+  await new Promise((resolve) => realSetTimeout(resolve, SUGGEST_DEBOUNCE_MS * 2));
+
+  assert.equal(stub.suggestCalls.length, 1, 'the timer that was pending never asked');
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false');
+});
+
+test('Escape with the list already closed leaves the form, the text and onCancel alone', () => {
+  let cancelled = 0;
+  renderForm(stubIdentify(() => Promise.resolve([])).identify, {
+    onCancel: () => {
+      cancelled += 1;
+    },
+  });
+  fireEvent.change(combobox(), { target: { value: 'x' } });
+  fireEvent.keyDown(combobox(), { key: 'Escape' });
+  fireEvent.keyDown(combobox(), { key: 'Escape' });
+
+  assert.equal(cancelled, 0);
+  assert.equal(combobox().value, 'x');
+  assert.ok(screen.getByRole('button', { name: 'Save' }), 'the form is still rendered');
+});

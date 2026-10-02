@@ -103,6 +103,11 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
   }
 
   function choose(index: number): void {
+    // A choice settles the question: drop a lookup still waiting on its
+    // timer and ignore one already in flight, so neither reopens the list.
+    clearTimeout(debounce.current);
+    debounce.current = undefined;
+    requestSeq.current += 1;
     const candidate = options[index];
     if (candidate === undefined) {
       // The look-up option: keep the text, save it by name.
