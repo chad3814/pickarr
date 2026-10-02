@@ -1043,13 +1043,19 @@ test("the safety interval prunes done jobs older than a day and nothing else", (
   const freshDone = seed('done', now - DONE_JOB_RETENTION_MS + 60_000);
   const oldDead = seed('dead', now - 10 * DONE_JOB_RETENTION_MS);
   const oldReady = seed('ready', now - 10 * DONE_JOB_RETENTION_MS);
-  const { timers, setIntervalCalls } = createFakeTimers();
+  const { timers, setIntervalCalls, setTimeoutCalls } = createFakeTimers();
   const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
   dispatcher.start(noHandlers, () => fakeCtx);
   const safety = setIntervalCalls.find((call) => call.ms === SAFETY_INTERVAL_MS);
   assert.ok(safety, 'the safety interval is armed');
+  // A ready row earlier than every armed target, so the same tick's re-arm
+  // must set a new timeout (the tick above 'the safety interval re-derives
+  // the timeout' covers the re-arm alone; this pins it still runs beside the prune).
+  const earlier = insertReadyJob(raw, now, now - 11 * DONE_JOB_RETENTION_MS);
+  const timeoutsBefore = setTimeoutCalls.length;
   safety.fn();
+  assert.equal(setTimeoutCalls.length, timeoutsBefore + 1, 'the tick also re-armed the timeout');
   const ids = raw.prepare('SELECT id FROM jobs ORDER BY id').all().map((row) => Number(row['id']));
-  assert.deepEqual(ids, [freshDone, oldDead, oldReady], `only the day-old done row is gone; ${String(oldDone)} was it`);
+  assert.deepEqual(ids, [freshDone, oldDead, oldReady, earlier], `only the day-old done row is gone; ${String(oldDone)} was it`);
   dispatcher.stop();
 });

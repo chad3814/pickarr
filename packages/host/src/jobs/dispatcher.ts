@@ -45,7 +45,10 @@ export const DEFAULT_CONCURRENCY = 8;
  * interval below share the timer's own upper bound.
  */
 export const MAX_TIMER_MS = 60_000;
-/** How often the safety interval re-arms the timer, and also how often it prunes `done` rows. */
+/**
+ * How often the safety interval re-arms the timer, and also how often it prunes `done` rows.
+ * It re-arms first, so a prune that throws cannot skip the re-arm.
+ */
 export const SAFETY_INTERVAL_MS = 60_000;
 /**
  * How long a `done` job stays: a day of `recent` history for the Activities
@@ -293,6 +296,11 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
     rearm();
   }
 
+  /** Deletes `done` rows older than the retention. Fires the `jobs` triggers, so the Activities page refreshes. */
+  function prune(): void {
+    raw.prepare("DELETE FROM jobs WHERE state = 'done' AND updated_at < ?").run(opts.now() - DONE_JOB_RETENTION_MS);
+  }
+
   /**
    * The crash-recovery sweep. Every `running` row here was genuinely
    * started (`runJob`'s claim, in `run-job.ts`, stamps `started_at` only
@@ -301,11 +309,6 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
    * right now. Attempts are left untouched either way: the crashed attempt
    * already consumed one, in the same statement that claimed the row.
    */
-  /** Deletes `done` rows older than the retention. Fires the `jobs` triggers, so the Activities page refreshes. */
-  function prune(): void {
-    raw.prepare("DELETE FROM jobs WHERE state = 'done' AND updated_at < ?").run(opts.now() - DONE_JOB_RETENTION_MS);
-  }
-
   function sweep(): number {
     const now = opts.now();
     const rows = raw.prepare("SELECT id, attempts, max_attempts FROM jobs WHERE state = 'running'").all();
@@ -367,7 +370,7 @@ export function createDispatcher(raw: DatabaseSync, opts: DispatcherOptions): Di
       if (intervalHandle !== undefined) {
         opts.timers.clearInterval(intervalHandle);
       }
-      intervalHandle = opts.timers.setInterval(() => { prune(); rearm(); }, SAFETY_INTERVAL_MS);
+      intervalHandle = opts.timers.setInterval(() => { rearm(); prune(); }, SAFETY_INTERVAL_MS);
       rearm();
 
       return swept;
