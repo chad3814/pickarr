@@ -31,8 +31,13 @@
  * which is acceptable here because 2.0 is greenfield (one operator, an
  * empty database, a tested backfill), and is not a precedent for doing this
  * once real usage exists.
+ *
+ * Version 3 adds the derived `catalog` store (design spec 2026-10-02 §1.1)
+ * and the `by_person` index on `rows`. The bump costs every client a
+ * resync, accepted because the catalog is derived from rows that resync
+ * anyway.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * A row of the replica, keyed by `['table', 'id']`.
@@ -128,6 +133,16 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // mechanism every other `value.*` index here already relies on.
       rows.createIndex('by_table_plugin_updated', ['table', 'value.pluginId', 'value.updatedAt', 'id']);
       rows.createIndex('by_table', 'table');
+      // Who appears where, for the catalog's person-rename path
+      // (`store/catalog-apply.ts`): only `role` carries `value.personId`, so
+      // this index is self-filtering the way `by_table_plugin_updated` is.
+      rows.createIndex('by_person', 'value.personId');
+      // The derived catalog (design spec 2026-10-02 §1): one record per media
+      // item, maintained by `applyBatch`'s catalog phase, never written by a
+      // reader. `picked` is 0 | 1 because IndexedDB cannot index a boolean.
+      const catalog = db.createObjectStore('catalog', { keyPath: 'id' });
+      catalog.createIndex('by_plugin_picked_updated', ['pluginId', 'picked', 'updatedAt', 'id']);
+      catalog.createIndex('by_plugin_updated', ['pluginId', 'updatedAt', 'id']);
       db.createObjectStore('meta', { keyPath: 'key' });
     }, { once: true });
 

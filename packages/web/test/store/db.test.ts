@@ -15,11 +15,11 @@ function freshDbName(): string {
 test('the store is keyed by table and id together', async () => {
   const db = await freshDb();
   const names = [...db.objectStoreNames].toSorted();
-  assert.deepEqual(names, ['meta', 'rows']);
+  assert.deepEqual(names, ['catalog', 'meta', 'rows']);
   const rows = db.transaction('rows').objectStore('rows');
   assert.deepEqual(rows.keyPath, ['table', 'id']);
   assert.deepEqual([...rows.indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated']);
+    ['by_media_item', 'by_person', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated']);
   db.close();
 });
 
@@ -73,13 +73,13 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
 
   const second = await openStore(name, 2);
   assert.equal(second.version, 2);
-  assert.deepEqual([...second.objectStoreNames].toSorted(), ['meta', 'rows']);
+  assert.deepEqual([...second.objectStoreNames].toSorted(), ['catalog', 'meta', 'rows']);
   const rows = await request(second.transaction('rows').objectStore('rows').getAll());
   assert.equal(rows.length, 0, 'the replica was discarded, not migrated');
   const cursors = await request(second.transaction('meta').objectStore('meta').getAll());
   assert.equal(cursors.length, 0, 'and the cursors went with it, so the next start bootstraps');
   assert.deepEqual([...second.transaction('rows').objectStore('rows').indexNames].toSorted(),
-    ['by_media_item', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated'],
+    ['by_media_item', 'by_person', 'by_rss_item', 'by_table', 'by_table_plugin_updated', 'by_table_updated'],
     'indexes are rebuilt too');
   second.close();
 });
@@ -87,7 +87,7 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
 test('the per-category index exists, and holds only rows that project a pluginId', async () => {
   const db = await openStore(freshDbName());
   try {
-    assert.equal(SCHEMA_VERSION, 2, 'the bump that creates this index');
+    assert.equal(SCHEMA_VERSION, 3, 'the current schema, which still carries this index');
     const index = db.transaction('rows').objectStore('rows').index('by_table_plugin_updated');
     assert.deepEqual(
       [...index.keyPath],
@@ -168,4 +168,17 @@ test('a tab still holding the old version open steps aside instead of blocking t
     // `versionchange` handler already did this.
     firstTab.close();
   }
+});
+
+test('schema 3 has the catalog store with its two indexes, and rows has by_person', async () => {
+  const db = await freshDb();
+  assert.ok(Array.from(db.objectStoreNames).includes('catalog'));
+  const tx = db.transaction(['catalog', 'rows'], 'readonly');
+  const catalog = tx.objectStore('catalog');
+  assert.equal(catalog.keyPath, 'id');
+  assert.deepEqual(catalog.index('by_plugin_picked_updated').keyPath, ['pluginId', 'picked', 'updatedAt', 'id']);
+  assert.deepEqual(catalog.index('by_plugin_updated').keyPath, ['pluginId', 'updatedAt', 'id']);
+  assert.equal(tx.objectStore('rows').index('by_person').keyPath, 'value.personId');
+  assert.equal(db.version, 3);
+  db.close();
 });
