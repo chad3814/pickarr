@@ -36,8 +36,12 @@
  * and the `by_person` index on `rows`. The bump costs every client a
  * resync, accepted because the catalog is derived from rows that resync
  * anyway.
+ *
+ * Version 4 adds `by_table_status_updated`, so the Activities page reads
+ * live downloads by status instead of walking every download row ever
+ * recorded (the host never deletes one). Same resync cost, same reasoning.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * A row of the replica, keyed by `['table', 'id']`.
@@ -137,6 +141,13 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // (`store/catalog-apply.ts`): only `role` carries `value.personId`, so
       // this index is self-filtering the way `by_table_plugin_updated` is.
       rows.createIndex('by_person', 'value.personId');
+      // Live downloads for the Activities page (`store/rows.ts`'s
+      // `activeDownloads`): one range per `[table, status]`, so the read
+      // costs what is live rather than what was ever downloaded. Only the two
+      // download tables carry `value.status`, so this index is self-filtering
+      // the way `by_table_plugin_updated` is; a tombstone has no `value` and
+      // leaves it on its own.
+      rows.createIndex('by_table_status_updated', ['table', 'value.status', 'value.updatedAt', 'id']);
       // The derived catalog (design spec 2026-10-02 §1): one record per media
       // item, maintained by `applyBatch`'s catalog phase, never written by a
       // reader. `picked` is 0 | 1 because IndexedDB cannot index a boolean.
@@ -171,7 +182,7 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       // for the tab that was *leading* on the old bundle: it keeps its Web
       // Lock lease and never demotes, so after the bump a new tab is a
       // follower with nothing to follow until the old tab is closed. The old
-      // bundle cannot speak schema 3 in any case, so reloading to load the
+      // bundle cannot speak the newer schema in any case, so reloading to load the
       // new bundle is the only useful thing it can do, and the old
       // document's lock releases with it.
       db.addEventListener('versionchange', () => {

@@ -245,6 +245,35 @@ test('removing a feed that produced nothing says it was removed', async () => {
   db.close();
 });
 
+test('the removal sentence outlives the row the replica deletes', async () => {
+  // A deleted feed's row leaves the list on the next sync tick, about twenty
+  // milliseconds after the DELETE answers in a real browser (measured by the
+  // e2e spec's own timeline). A sentence held on the row would go with it,
+  // and the operator who clicked would never read it.
+  const db = await freshDb();
+  await seed(db, [feedOp({ id: 1, name: 'Movies HD' })]);
+  render(
+    <Feeds
+      source={sourceFor(db)}
+      submit={neverSubmitFeed}
+      removal={{
+        remove: async () => ({ outcome: 'deleted' }),
+        setDisabled: () => assert.fail('this test removes, it does not pause'),
+      }}
+    />,
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('button', { name: 'Remove Movies HD' })); });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove Movies HD' }));
+  await waitFor(() => { assert.ok(screen.getByText('Feed removed.')); });
+
+  await applyBatch(db, [{ op: 'delete', table: 'rss_feed', id: 1 }], { since: 2, before: null });
+
+  await waitFor(() => { assert.ok(!screen.queryByRole('heading', { name: 'Movies HD' }), 'the row is gone'); });
+  assert.equal(screen.getByText('Feed removed.').tagName, 'P', 'the sentence is still on the page after the row left');
+  assert.equal(screen.getByRole('status').textContent, 'Feed removed.', 'announced as a status, outside any row');
+  db.close();
+});
+
 test('removing a feed that produced releases says it was disabled, and why', async () => {
   // The sentence carries the count because "disabled" is not what the
   // operator asked for, and the number of kept releases is the reason.

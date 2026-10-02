@@ -272,6 +272,21 @@ export interface RssItemRead {
  * row -- one shape for both transports, rather than a field that is present
  * or absent depending on which table answered.
  */
+/**
+ * Every status a download row may hold -- the host's vocabulary, exported
+ * so a reader that wants "everything except X" derives it from this list
+ * rather than restating it. The host's `clients/rows.ts` imports it from
+ * here and the browser's `store/rows.ts` derives its live set from it, so
+ * a seventh status reaches both from one edit. `DownloadRead.status` stays
+ * `string` on purpose (its own doc): a plugin must not be pinned to today's
+ * members.
+ */
+export type DownloadStatus =
+  'submitting' | 'submitted' | 'downloading' | 'completed' | 'delivered' | 'failed';
+
+export const DOWNLOAD_STATUSES: readonly DownloadStatus[] =
+  ['submitting', 'submitted', 'downloading', 'completed', 'delivered', 'failed'];
+
 export interface DownloadRead {
   id: number;
   rssItemId: number;

@@ -37,6 +37,7 @@
 import { request } from './idb.ts';
 import type { StoredRow } from './db.ts';
 import type { PluginRows } from '@pickarr/plugin-ui';
+import { DOWNLOAD_STATUSES, type DownloadStatus } from '@pickarr/contract';
 
 /**
  * Options for {@link listByTable}. `from` is the full key
@@ -516,8 +517,25 @@ export interface ActiveDownload {
   readonly updatedAt: number;
 }
 
-/** Rows read per `listByTable` page while walking a download table. */
-const ACTIVE_DOWNLOADS_PAGE = 200;
+/**
+ * The statuses a download can hold while it is still someone's concern:
+ * the host's vocabulary (`@pickarr/contract`'s `DOWNLOAD_STATUSES`) minus
+ * its two terminal members. Derived rather than listed so a seventh status
+ * is live here the day the host adds it, which matches what the old
+ * `!== 'delivered' && !== 'failed'` filter did without being a list that
+ * drifts. `rows.test.ts` pins both the four members and the two left out.
+ */
+export const ACTIVE_DOWNLOAD_STATUSES: readonly DownloadStatus[] =
+  DOWNLOAD_STATUSES.filter((status) => status !== 'delivered' && status !== 'failed');
+
+const DOWNLOAD_TABLES = ['torrent_download', 'nzb_download'] as const;
+
+/** Every row of `table` whose `value.status` is `status`, newest first, off `by_table_status_updated`. */
+function listByTableStatus(db: IDBDatabase, table: string, status: string): Promise<StoredRow[]> {
+  const index = rowsStore(db).index('by_table_status_updated');
+  const range = IDBKeyRange.bound([table, status, -Infinity, -Infinity], [table, status, Infinity, Infinity]);
+  return drain(index.openCursor(range, 'prev'), Number.POSITIVE_INFINITY);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -553,39 +571,34 @@ function stringField(value: unknown, key: string): string | undefined {
 }
 
 /**
- * Every torrent and NZB download whose status is neither `delivered` nor
- * `failed`, newest `updatedAt` first, each joined to its release filename,
- * its media item's title and its client's name. A join whose row has not
- * replicated (log order is not row order) falls back rather than dropping
- * the download: the page would otherwise hide work that is really running.
+ * Every torrent and NZB download whose status is not terminal (see
+ * {@link ACTIVE_DOWNLOAD_STATUSES}), newest `updatedAt` first, each joined
+ * to its release filename, its media item's title and its client's name. A
+ * join whose row has not replicated (log order is not row order) falls back
+ * rather than dropping the download: the page would otherwise hide work that
+ * is really running.
+ *
+ * Reads one index range per `[table, status]` -- eight in all -- and merges
+ * them, so the cost is proportional to what is live, not to every download
+ * ever recorded (the host never deletes a download row, so the table only
+ * grows). The earlier version walked each whole table newest first; on an
+ * old install that was every row, on every change to either table.
  */
-export async function activeDownloads(
-  db: IDBDatabase,
-  pageSize: number = ACTIVE_DOWNLOADS_PAGE,
-): Promise<readonly ActiveDownload[]> {
+export async function activeDownloads(db: IDBDatabase): Promise<readonly ActiveDownload[]> {
+  const pages = await Promise.all(
+    DOWNLOAD_TABLES.flatMap((table) =>
+      ACTIVE_DOWNLOAD_STATUSES.map(async (status) => ({ table, rows: await listByTableStatus(db, table, status) }))),
+  );
   const live: { table: ActiveDownload['table']; raw: RawDownload }[] = [];
-  for (const table of ['torrent_download', 'nzb_download'] as const) {
-    // Walks the whole table newest first, page by page, keeping the
-    // non-terminal rows as it goes. There is no cap on rows read: a quiet live
-    // download (a stalled `submitting`, an old `updatedAt`) can sit behind any
-    // number of newer terminal rows, and a fixed limit would hide it.
-    let from: { updatedAt: number; id: number } | undefined;
-    for (;;) {
-      const page = await listByTable(db, table, from === undefined ? { direction: 'prev', limit: pageSize } : { direction: 'prev', limit: pageSize, from });
-      for (const row of page) {
-        const raw = toRawDownload(row.value);
-        if (raw !== undefined && raw.status !== 'delivered' && raw.status !== 'failed') live.push({ table, raw });
-      }
-      const last = page[page.length - 1];
-      if (page.length < pageSize || last === undefined) break;
-      const lastRaw = toRawDownload(last.value);
-      // `by_table_updated` only indexes rows with an `updatedAt`, so a row
-      // listed here without a readable one cannot happen; stopping is the
-      // safe answer if it ever did, rather than looping on the same page.
-      if (lastRaw === undefined) break;
-      from = { updatedAt: lastRaw.updatedAt, id: last.id };
+  for (const { table, rows } of pages) {
+    for (const row of rows) {
+      const raw = toRawDownload(row.value);
+      if (raw !== undefined) live.push({ table, raw });
     }
   }
+  // Newest first across all eight ranges; ties by table name then id, so the
+  // order is total and a re-render under equal timestamps does not shuffle.
+  live.sort((a, b) => b.raw.updatedAt - a.raw.updatedAt || a.table.localeCompare(b.table) || b.raw.id - a.raw.id);
 
   const rssIds = [...new Set(live.flatMap(({ raw }) => (raw.rssItemId === null ? [] : [raw.rssItemId])))];
   const clientIds = [...new Set(live.flatMap(({ raw }) => (raw.downloadClientId === null ? [] : [raw.downloadClientId])))];
