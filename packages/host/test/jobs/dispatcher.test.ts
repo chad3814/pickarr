@@ -5,7 +5,7 @@ import type { JobHandler, PluginContext } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createRunner } from '../../src/jobs/runner.ts';
-import { createDispatcher, DEFAULT_CONCURRENCY, MAX_TIMER_MS, SAFETY_INTERVAL_MS } from '../../src/jobs/dispatcher.ts';
+import { createDispatcher, DEFAULT_CONCURRENCY, DONE_JOB_RETENTION_MS, MAX_TIMER_MS, SAFETY_INTERVAL_MS } from '../../src/jobs/dispatcher.ts';
 import type { Dispatcher, Timers } from '../../src/jobs/dispatcher.ts';
 
 /** One `setTimeout`/`setInterval` call, as the fake `Timers` below records it. */
@@ -1030,4 +1030,26 @@ test('the sweep replaces a stale rejection message rather than letting it explai
 
   hang.resolve();
   await dispatcher.idle();
+});
+
+test("the safety interval prunes done jobs older than a day and nothing else", () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const now = 10 * DONE_JOB_RETENTION_MS;
+  const seed = (state: string, updatedAt: number): number => Number(raw.prepare(`
+    INSERT INTO jobs (plugin_id, kind, payload_json, attempts, max_attempts, run_at, state, last_error, created_at, updated_at)
+    VALUES ('t', 'noop', '{}', 1, 3, ?, ?, NULL, ?, ?)`).run(updatedAt, state, updatedAt, updatedAt).lastInsertRowid);
+  const oldDone = seed('done', now - DONE_JOB_RETENTION_MS - 1);
+  const freshDone = seed('done', now - DONE_JOB_RETENTION_MS + 60_000);
+  const oldDead = seed('dead', now - 10 * DONE_JOB_RETENTION_MS);
+  const oldReady = seed('ready', now - 10 * DONE_JOB_RETENTION_MS);
+  const { timers, setIntervalCalls } = createFakeTimers();
+  const dispatcher = createDispatcher(raw, { now: () => now, timers, log: noopLog, sleep: noopSleep, abortSignal: realAbortSignal });
+  dispatcher.start(noHandlers, () => fakeCtx);
+  const safety = setIntervalCalls.find((call) => call.ms === SAFETY_INTERVAL_MS);
+  assert.ok(safety, 'the safety interval is armed');
+  safety.fn();
+  const ids = raw.prepare('SELECT id FROM jobs ORDER BY id').all().map((row) => Number(row['id']));
+  assert.deepEqual(ids, [freshDone, oldDead, oldReady], `only the day-old done row is gone; ${String(oldDone)} was it`);
+  dispatcher.stop();
 });
