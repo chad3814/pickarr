@@ -18,6 +18,32 @@ import { redactUrl } from '../clients/redact.ts';
  */
 export interface QueuedFetch extends HostFetch {
   text(url: string, init?: RequestInit): Promise<string>;
+  /**
+   * What each hostname's queue holds right now, by method and redacted
+   * target -- the Activities page's view of this layer. Only hostnames with
+   * something waiting or in flight appear, sorted by hostname.
+   */
+  snapshot(): readonly ActivityHost[];
+}
+
+// Mirrors @pickarr/contract's ActivityHost/ActivityRequest; Task 3 switches the import.
+export interface ActivityRequest {
+  readonly method: string;
+  readonly target: string;
+}
+
+export interface ActivityHost {
+  readonly hostname: string;
+  readonly limit: number;
+  readonly inFlight: readonly ActivityRequest[];
+  readonly waiting: readonly ActivityRequest[];
+}
+
+/** `redactUrl`'s output with the query string gone: what a response body may say about a request. Computed once; the raw url is never kept. */
+function targetOf(url: string): string {
+  const redacted = redactUrl(url);
+  const query = redacted.indexOf('?');
+  return query === -1 ? redacted : redacted.slice(0, query);
 }
 
 /**
@@ -173,7 +199,13 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * time out without waiting the full thirty seconds.
  */
 export function createHostFetch(
-  deps: { fetch: typeof globalThis.fetch; limits?: FetchLimits; timeouts?: FetchTimeouts },
+  deps: {
+    fetch: typeof globalThis.fetch;
+    limits?: FetchLimits;
+    timeouts?: FetchTimeouts;
+    /** Called when a request is enqueued, starts or settles; `main.ts` wires the event hub. */
+    onChange?: () => void;
+  },
 ): QueuedFetch {
   assertValidLimits(deps.limits);
   assertValidTimeouts(deps.timeouts);
@@ -187,20 +219,31 @@ export function createHostFetch(
   // One `BoundedQueue` per hostname, built lazily on that hostname's first
   // request so a hostname never mentioned in `deps.limits` never gets an
   // entry it doesn't need.
-  const queues = new Map<string, BoundedQueue>();
+  interface HostState {
+    queue: BoundedQueue;
+    limit: number;
+    waiting: Set<ActivityRequest>;
+    inFlight: Set<ActivityRequest>;
+  }
+  const hosts = new Map<string, HostState>();
 
-  function queueFor(hostname: string): BoundedQueue {
-    const existing = queues.get(hostname);
+  function hostFor(hostname: string): HostState {
+    const existing = hosts.get(hostname);
     if (existing) return existing;
 
     const limit = deps.limits?.perHost?.[hostname] ?? deps.limits?.default ?? 1;
-    const created = createBoundedQueue(limit);
-    queues.set(hostname, created);
+    const created: HostState = {
+      queue: createBoundedQueue(limit),
+      limit,
+      waiting: new Set(),
+      inFlight: new Set(),
+    };
+    hosts.set(hostname, created);
     return created;
   }
 
   function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
-    return queueFor(hostname).run(task);
+    return hostFor(hostname).queue.run(task);
   }
 
   /**
@@ -270,6 +313,10 @@ export function createHostFetch(
     read: (res: Response) => Promise<T>,
   ): Promise<T> {
     const hostname = new URL(url).hostname;
+    const state = hostFor(hostname);
+    const record: ActivityRequest = { method: init?.method ?? 'GET', target: targetOf(url) };
+    state.waiting.add(record);
+    deps.onChange?.();
     const timeoutMs = timeoutFor(hostname);
     const callerSignal = init?.signal ?? undefined;
     // Aborted in the `finally` below, which is what detaches the listener:
@@ -278,6 +325,9 @@ export function createHostFetch(
     const settled = new AbortController();
     try {
       return await enqueue(hostname, () => {
+        state.waiting.delete(record);
+        state.inFlight.add(record);
+        deps.onChange?.();
         if (callerSignal?.aborted === true) {
           return Promise.reject(new Error(
             `fetch ${redactUrl(url)} abandoned: the caller aborted while it waited for a slot`,
@@ -303,6 +353,9 @@ export function createHostFetch(
       });
     } finally {
       settled.abort();
+      state.waiting.delete(record);
+      state.inFlight.delete(record);
+      deps.onChange?.();
     }
   }
 
@@ -324,6 +377,18 @@ export function createHostFetch(
 
     text(url: string, init?: RequestInit): Promise<string> {
       return fetched(url, init, (res) => res.text());
+    },
+
+    snapshot(): readonly ActivityHost[] {
+      return [...hosts.entries()]
+        .filter(([, state]) => state.waiting.size > 0 || state.inFlight.size > 0)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([hostname, state]) => ({
+          hostname,
+          limit: state.limit,
+          inFlight: [...state.inFlight],
+          waiting: [...state.waiting],
+        }));
     },
   };
 }
