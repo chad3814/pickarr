@@ -77,7 +77,9 @@ test('typing is debounced before it reaches the URL', async () => {
   fireEvent.click(screen.getByText('type-dune'));
   assert.equal(text('search'), '');
   assert.equal(text('input'), 'dune');
-  assert.ok(delays.includes(SEARCH_DEBOUNCE_MS), 'asked setTimeout for the debounce');
+  // Literals, not the constant: the constant is the code under test.
+  assert.equal(SEARCH_DEBOUNCE_MS, 150);
+  assert.ok(delays.includes(150), 'asked setTimeout for 150 ms');
   await waitFor(() => {
     assert.equal(text('search'), '?q=dune');
   });
