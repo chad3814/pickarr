@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { GatheredItemView, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
+import type { GatheredItemView, IdentifySubmit, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
 import { movieBrowser, movieHeadline } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -33,6 +33,12 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
 
+/** Likewise required, likewise never called: these tests click no Requery or Edit. */
+const identify: IdentifySubmit = {
+  identify: () => Promise.reject(new Error('not exercised by this test')),
+  suggest: () => Promise.reject(new Error('not exercised by this test')),
+};
+
 function gathered(): GatheredItemView {
   return {
     releases: [],
@@ -59,7 +65,7 @@ function renderMovieCardExpandedWithRows(rows: PluginRows): void {
       rows={rows}
       gathered={gathered()}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   fireEvent.click(screen.getByRole('button'));
@@ -126,7 +132,7 @@ test('a film with a release date is titled with its year, in the film-library co
       rows={{}}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(screen.getByRole('button', { name: 'The Room (2003)' }));
@@ -139,7 +145,7 @@ test('a film with no release date is titled exactly as before, not with empty pa
       rows={{}}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(
@@ -184,7 +190,7 @@ test('every expand and every collapse is reported, with the state the card moved
       onExpandedChange={(expanded) => {
         reported.push(expanded);
       }}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   const button = screen.getByRole('button');

@@ -1,6 +1,6 @@
 import type { ComponentType } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { GatheredItemView, PickSubmit } from './types.ts';
+import type { GatheredItemView, IdentifySubmit, PickSubmit } from './types.ts';
 
 /**
  * Replica rows for one media item, keyed by table name.
@@ -60,6 +60,8 @@ export interface CardProps {
    */
   readonly onExpandedChange: (expanded: boolean) => void;
   readonly submit: PickSubmit;
+  /** Requery and manual edit for this card's releases; handed to `ReleaseList`. */
+  readonly identify: IdentifySubmit;
 }
 
 export interface BrowserPlugin {

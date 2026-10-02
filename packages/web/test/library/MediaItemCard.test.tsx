@@ -438,7 +438,7 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
   fireEvent.click(screen.getByRole('button', { name: 'The Thing' }));
 
   const row = await screen.findByRole('listitem', { name: 'the.thing.mkv' });
-  fireEvent.click(within(row).getByRole('button'));
+  fireEvent.click(within(row).getByRole('button', { name: /^Pick/ }));
 
   await waitFor(() => {
     assert.deepEqual(asked, [31], 'the release the operator pressed, through the submit the card was given');

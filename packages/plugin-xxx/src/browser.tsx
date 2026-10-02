@@ -58,7 +58,7 @@ export function siteNameOf(rows: PluginRows): string | undefined {
   return undefined;
 }
 
-function XxxCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
+function XxxCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange);
   const site = siteNameOf(rows);
 
@@ -85,7 +85,7 @@ function XxxCard({ item, rows, gathered, onExpandedChange, submit }: CardProps):
       {expanded && gathered !== undefined && (
         <>
           <MediaDetails item={item} gathered={gathered} />
-          <ReleaseList releases={gathered.releases} submit={submit} />
+          <ReleaseList releases={gathered.releases} submit={submit} identify={identify} pluginId={item.pluginId} />
         </>
       )}
     </>

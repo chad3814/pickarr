@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
-import type { PickSubmit } from '@pickarr/plugin-ui';
+import type { IdentifySubmit, PickSubmit } from '@pickarr/plugin-ui';
 import { xxxBrowser, siteNameOf } from '../src/browser.tsx';
 
 afterEach(cleanup);
@@ -33,6 +33,12 @@ function mediaItem(over: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
  */
 const submit: PickSubmit = () => Promise.reject(new Error('not exercised by this test'));
 
+/** Likewise required, likewise never called: these tests click no Requery or Edit. */
+const identify: IdentifySubmit = {
+  identify: () => Promise.reject(new Error('not exercised by this test')),
+  suggest: () => Promise.reject(new Error('not exercised by this test')),
+};
+
 /** One `xxx_scene` replica row, shaped as `XxxRead` reaches a client. */
 function sceneRows(siteName: string | null): Record<string, readonly unknown[]> {
   return { xxx_scene: [{ mediaItemId: 1, siteName, siteRef: null }] };
@@ -45,7 +51,7 @@ test('a scene with no site row is titled by its title alone', () => {
       rows={{}}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(
@@ -67,7 +73,7 @@ test('a scene’s site is shown, and is part of what the control announces', () 
       rows={sceneRows('Example Studio')}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(screen.getByRole('button', { name: 'Scene Title Example Studio' }));
@@ -87,7 +93,7 @@ test('the site is set apart from the title, not appended to it', () => {
       rows={sceneRows('Example Studio')}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   const small = screen.getByRole('button').querySelector('small');
@@ -106,7 +112,7 @@ test('a scene whose site is unknown renders no trailing element at all', () => {
       rows={sceneRows(null)}
       gathered={undefined}
       onExpandedChange={() => {}}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   assert.ok(
@@ -158,7 +164,7 @@ test('every expand and every collapse is reported, with the state the card moved
       onExpandedChange={(expanded) => {
         reported.push(expanded);
       }}
-      submit={submit}
+      submit={submit} identify={identify}
     />,
   );
   const button = screen.getByRole('button');

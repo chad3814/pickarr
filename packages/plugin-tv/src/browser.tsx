@@ -152,7 +152,7 @@ function tvdbExtraLinks(item: MediaItemSyncRead, release: TvRead | undefined): r
  * finding 1 -- the TVDb link `tvdbExtraLinks` supplies through the same
  * `extraLinks` seam `plugin-movie` uses for IMDb.
  */
-function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): ReactElement {
+function TvCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange);
   const release = tvRelease(rows);
   // An item with no `tv_release` row, or one that failed `isTvRelease`,
@@ -167,7 +167,7 @@ function TvCard({ item, rows, gathered, onExpandedChange, submit }: CardProps): 
       {expanded && gathered !== undefined && (
         <>
           <MediaDetails item={item} gathered={gathered} extraLinks={extraLinks} />
-          <ReleaseList releases={gathered.releases} submit={submit} />
+          <ReleaseList releases={gathered.releases} submit={submit} identify={identify} pluginId={item.pluginId} />
         </>
       )}
     </>

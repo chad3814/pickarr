@@ -18,6 +18,8 @@
  * re-exports these rather than holding a second declaration.
  */
 import type {
+  IdentifyReleaseRefusalCode,
+  IdentifyRequest,
   NzbDownloadSyncRead,
   PersonSyncRead,
   RequestPickRefusalCode,
@@ -126,3 +128,52 @@ export const PICK_REFUSAL_MESSAGES: Record<RequestPickRefusalCode | 'offline' | 
   unrecognised:
     'Pickarr refused this pick, but did not say why. The host may be a different version than this page expects — reload and try again.',
 };
+
+/**
+ * What an identify submission resolves to. `accepted` answers `requery` and
+ * `name` (the lookup runs afterwards and arrives through the replica);
+ * `linked` answers `media-item` (the release is already relinked).
+ */
+export type IdentifyOutcome =
+  | { accepted: true }
+  | { outcome: 'linked'; mediaItemId: number }
+  | { refusal: IdentifyReleaseRefusalCode | 'offline' | 'expired' | 'unrecognised' };
+
+/** One library title the combobox can offer. `year` is `null` when the title has none. */
+export interface Candidate {
+  mediaItemId: number;
+  title: string;
+  year: string | null;
+}
+
+/**
+ * The seam a card's release list identifies a release through: `identify`
+ * posts one request for one release, `suggest` lists library titles of one
+ * plugin matching a typed term. Web supplies both; this package does no I/O.
+ */
+export interface IdentifySubmit {
+  identify(rssItemId: number, request: IdentifyRequest): Promise<IdentifyOutcome>;
+  suggest(pluginId: string, term: string): Promise<readonly Candidate[]>;
+}
+
+/** A fixed sentence per non-accepted identify outcome -- never the server's own words. */
+export const IDENTIFY_REFUSAL_MESSAGES: Record<IdentifyReleaseRefusalCode | 'offline' | 'expired' | 'unrecognised', string> = {
+  'unknown-release': 'Pickarr no longer has that release on file. Reload the page and try again.',
+  'plugin-not-registered': 'No plugin in this Pickarr handles that kind of media, so nothing can identify this release.',
+  'unknown-media-item': 'That title is no longer in the library. Pick another or look the release up by name.',
+  'wrong-plugin': 'That title belongs to a different category than this release’s feed.',
+  'already-linked': 'This release already belongs to that title.',
+  offline: 'Could not reach Pickarr. Check your connection and try again.',
+  expired: SESSION_EXPIRED_MESSAGE,
+  unrecognised:
+    'Pickarr refused the change, but did not say why. The host may be a different version than this page expects — reload and try again.',
+};
+
+/** The two strings the Requery button renders. */
+export const REQUERY_LABELS = { idle: 'Requery', pending: 'Requerying…' } as const;
+
+/** How long the combobox waits after a keystroke before asking `suggest`. */
+export const SUGGEST_DEBOUNCE_MS = 150;
+
+/** The most library titles the combobox lists. */
+export const SUGGEST_LIMIT = 8;
