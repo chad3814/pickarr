@@ -1,0 +1,54 @@
+/*
+ * `components`'s third member: the `/activities` page (`activity/Activities.tsx`).
+ *
+ * Keyed on structure, never a class -- `settings.css`'s rule, for its
+ * reason: no 2.0 component sets one, so a class selector here would be the
+ * only thing in the codebase that did. Every rule is scoped under the page's
+ * own `section[aria-labelledby='activities-heading']`, so none can reach the
+ * other screens.
+ *
+ * The rule that matters most is the last: a dead job's `lastError` is
+ * rendered whole in a `<pre>`, and a `<pre>` does not wrap by default. Without
+ * `pre-wrap` and `overflow-wrap: anywhere` a long error is a horizontal
+ * scrollbar, or a line that pushes the page wider than the viewport, and the
+ * error is the one thing an operator opened the page to read.
+ */
+
+section[aria-labelledby='activities-heading'] > section {
+  margin-top: var(--space-6);
+}
+
+section[aria-labelledby='activities-heading'] ul {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-2) 0 0;
+}
+
+section[aria-labelledby='activities-heading'] li {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-line);
+}
+
+/* A job's or download's facts sit on one wrapping line, spaced rather than glued. */
+section[aria-labelledby='activities-heading'] li > span + span {
+  margin-left: var(--space-3);
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+/* A host block's heading line has no margin of its own; its request lists sit nested one level in. */
+section[aria-labelledby='activities-heading'] li > p {
+  margin: 0;
+}
+
+section[aria-labelledby='activities-heading'] li > ul > li {
+  color: var(--color-text-dim);
+  font-size: var(--text-meta);
+}
+
+section[aria-labelledby='activities-heading'] pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-meta);
+}

@@ -411,7 +411,7 @@ test('the nav links to each category, and marks the current one', async () => {
  * three strings against the plugin packages); the hrefs are the ids, which
  * is `Shell.tsx`'s route table read from the other side.
  */
-test('the nav has exactly one link per registered plugin, plus Unmatched and Settings', async () => {
+test('the nav has exactly one link per registered plugin, plus Unmatched, Activities and Settings', async () => {
   const { deps, sched } = testDeps();
   render(
     <MemoryRouter initialEntries={['/tv']}>
@@ -436,6 +436,7 @@ test('the nav has exactly one link per registered plugin, plus Unmatched and Set
     ['Movies 0', '/movie'],
     ['XXX 0', '/xxx'],
     ['Unmatched', '/unmatched'],
+    ['Activities', '/activities'],
     ['Settings', '/settings'],
   ]);
 
@@ -573,6 +574,26 @@ test('the /unmatched route renders Unmatched, not a category', async () => {
   assert.ok(!screen.queryByTestId('category-tv'), 'not the tv category');
   assert.ok(!screen.queryByTestId('category-movie'), 'not the movie category');
   assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx category');
+
+  await waitFor(() => {
+    assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
+  });
+});
+
+test('the /activities route renders the Activities page, and the nav links to it', async () => {
+  const { deps, sched } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/activities']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+
+  const link = screen.getByRole<HTMLAnchorElement>('link', { name: 'Activities' });
+  assert.equal(link.getAttribute('href'), '/activities');
+  await waitFor(() => {
+    assert.ok(screen.getByTestId('activities'), '/activities renders the page');
+  });
+  assert.ok(!screen.queryByTestId('settings'), 'not the settings screen');
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');

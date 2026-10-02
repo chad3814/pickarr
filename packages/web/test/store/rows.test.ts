@@ -5,7 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
-  pluginRowsByMediaItems,
+  pluginRowsByMediaItems, activeDownloads,
   type PluginRowsPage,
 } from '../../src/store/rows.ts';
 import { done } from '../../src/store/idb.ts';
@@ -465,5 +465,25 @@ test('the count comes from the index, not from a filtered scan', async () => {
   await done(tx);
 
   assert.equal(await countByPlugin(db, 'media_item', 'tv'), 1, 'the row the index omits is not counted');
+  db.close();
+});
+
+test('activeDownloads lists every non-terminal download with its filename, title and client, and copes with missing joins', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [
+    { op: 'upsert', table: 'download_client', id: 1, value: { id: 1, name: 'Seedbox', type: 'torrent', implementation: 'qbittorrent', url: '', username: null, category: '', consecutiveFailures: 0, unreachableSince: null, createdAt: 1, updatedAt: 1 } },
+    { op: 'upsert', table: 'media_item', id: 5, value: { id: 5, pluginId: 'tv', title: 'A Show', createdAt: 1, updatedAt: 1, provider: null, providerRef: null, releaseDate: null, description: null } },
+    { op: 'upsert', table: 'rss_item', id: 7, value: { id: 7, feedId: 1, filename: 'a.mkv', createdAt: 1, updatedAt: 1, downloadType: 'torrent', mediaItemId: 5, rankingScore: null, lookupState: 'resolved', lookupStateDetail: null, lookupJson: null, videoResolution: null, deliveredAt: null } },
+    { op: 'upsert', table: 'torrent_download', id: 11, value: { id: 11, rssItemId: 7, downloadClientId: 1, infohash: null, clientRef: 'r', status: 'downloading', attempts: 1, createdAt: 1, updatedAt: 9, percentage: 42, absentSince: null, deliveredAt: null, reclaimedAt: null } },
+    { op: 'upsert', table: 'torrent_download', id: 12, value: { id: 12, rssItemId: 7, downloadClientId: 1, infohash: null, clientRef: 'd', status: 'delivered', attempts: 1, createdAt: 1, updatedAt: 9, percentage: 100, absentSince: null, deliveredAt: 9, reclaimedAt: null } },
+    { op: 'upsert', table: 'torrent_download', id: 14, value: { id: 14, rssItemId: 7, downloadClientId: 1, infohash: null, clientRef: 'f', status: 'failed', attempts: 3, createdAt: 1, updatedAt: 9, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null } },
+    { op: 'upsert', table: 'nzb_download', id: 13, value: { id: 13, rssItemId: 99, downloadClientId: 2, clientRef: null, status: 'submitting', attempts: 0, createdAt: 1, updatedAt: 3, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null } },
+  ], { since: 1, before: null });
+  const rows = await activeDownloads(db);
+  assert.deepEqual(rows.map((r) => [r.table, r.id, r.status, r.filename, r.title, r.clientName, r.percentage]), [
+    ['torrent_download', 11, 'downloading', 'a.mkv', 'A Show', 'Seedbox', 42],
+    ['nzb_download', 13, 'submitting', 'unknown release', null, 'unknown client', null],
+  ]);
+  assert.deepEqual(rows.map((r) => r.updatedAt), [9, 3], 'newest first');
   db.close();
 });
