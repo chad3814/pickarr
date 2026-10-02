@@ -1,18 +1,19 @@
 /**
- * The two browser adapters `sync.ts` needs and deliberately does not supply
- * itself (design spec §5; this task's brief): a real `fetch` and a real
- * idle-priority scheduler. `webLocksLease` (`leader.ts`) is the third and
- * already exists -- nothing here wraps it, because it needs no wrapping (its
- * own doc comment, this task's brief).
+ * The browser adapters `sync.ts` needs and deliberately does not supply
+ * itself (design spec §5, §3; this task's brief): a real `fetch`, a real
+ * idle-priority scheduler, and a real `EventSource` factory. `webLocksLease`
+ * (`leader.ts`) is the fourth and already exists -- nothing here wraps it,
+ * because it needs no wrapping (its own doc comment, this task's brief).
  *
  * `sync.ts`'s own header explains why these live in a separate module: "No
  * `globalThis.fetch`, no bare `setTimeout`, no `requestIdleCallback`" is a
  * rule for the *loops*, not for the whole package. Something has to touch
  * these globals for the app to work in a real tab, and this file is that
- * something -- task 6 wires its two exports into `CreateStoreDeps` alongside
- * `webLocksLease` and `Date.now`.
+ * something -- task 6 wires `realFetch` and `idleScheduler` into
+ * `CreateStoreDeps` alongside `webLocksLease` and `Date.now`; task 3 (this
+ * one) adds `realEventStream` beside them.
  */
-import type { Schedule, SyncFetch } from './sync.ts';
+import type { OpenEventStream, Schedule, SyncFetch } from './sync.ts';
 
 /**
  * `fetch`, unqualified, is the same function as `window.fetch` in a browser
@@ -41,6 +42,18 @@ import type { Schedule, SyncFetch } from './sync.ts';
 export const realFetch: SyncFetch = (url, signal) => fetch(url, { signal, credentials: 'same-origin' });
 
 /**
+ * A browser `EventSource` on the sync events url, or nothing where the
+ * environment has none -- this test runner and an old browser both lack it,
+ * and either way `sync.ts`'s tail falls back to its
+ * `TAIL_INTERVAL_POLLING_MS` cadence (that module's own doc on
+ * `OpenEventStream`). `EventSource`, unqualified, is the same global as
+ * `window.EventSource` in a browser tab, for the reason `realFetch`'s own
+ * doc gives for `fetch`.
+ */
+export const realEventStream: OpenEventStream = (url) =>
+  (typeof EventSource === 'undefined' ? undefined : new EventSource(url));
+
+/**
  * Once {@link idleScheduler}'s floor has elapsed, how much longer it will
  * wait for a genuinely idle moment before running anyway. Independent of
  * `delayMs`, and small on purpose: this is a ceiling on the *idle* phase
@@ -59,7 +72,8 @@ const IDLE_CEILING_MS = 50;
  *
  * **`delayMs` is a floor, not a ceiling, because {@link Schedule}'s contract
  * says so** ("after *at least* `delayMs`") **and three things in `sync.ts`
- * measurably depend on that floor holding**: `TAIL_INTERVAL_MS` is a fixed
+ * measurably depend on that floor holding**: the tail's cadence
+ * (`TAIL_INTERVAL_STREAMING_MS`/`TAIL_INTERVAL_POLLING_MS`) is a fixed
  * *rate*, not a fixed delay, so a tail scheduled early polls early, forever;
  * `BACKOFF_BASE_MS`/`BACKOFF_CEILING_MS`'s 1s/2s/4s ladder only slows
  * anything down if each step actually waits its length; and `REFUSAL_LIMIT`'s

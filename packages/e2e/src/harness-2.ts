@@ -115,13 +115,16 @@ import {
   createHost,
   createHostFetch,
   createReadServer,
+  createSyncEvents,
   createSyncRegistry,
   ensureClaimToken,
   ensureSyncGeneration,
   migrateHost,
   openDatabase,
+  setSyncChangedListener,
   type Host,
   type ReadServer,
+  type SyncEvents,
 } from '@pickarr/host';
 import { lookupTableMigration } from '@pickarr/openmetadata';
 import { TV_MIGRATIONS, TV_SYNCED } from '@pickarr/plugin-tv';
@@ -582,6 +585,8 @@ interface Booted {
   qbittorrent: FakeClient;
   /** The file {@link Harness.seedTvRelease}'s `withPoster` points a `poster` row at. */
   posterPath: string;
+  /** The hub `GET /api/sync/events` attaches to -- closed in teardown before the listener drains. */
+  events: SyncEvents;
 }
 
 /**
@@ -615,6 +620,30 @@ async function boot(): Promise<Booted> {
   await writeFile(posterPath, POSTER_PNG);
 
   const generation = ensureSyncGeneration(raw, Date.now());
+
+  // The host's end of `GET /api/sync/events`, built and wired exactly as
+  // `main.ts` builds it: a real `setInterval` for the heartbeat, `setImmediate`
+  // to coalesce a batch of trigger calls into one publish, and
+  // `setSyncChangedListener` so this database's own sync triggers reach it.
+  //
+  // `unref()`, on `main.ts`'s own reasoning: a spec that forgets to close
+  // this (or throws before its `finally` does) must not be left holding a
+  // real 25s interval that keeps a Playwright worker process alive past the
+  // run, the way it did before this was added.
+  const events = createSyncEvents({
+    raw,
+    generation,
+    timers: {
+      setInterval: (fn, ms) => {
+        const timer = setInterval(fn, ms);
+        timer.unref();
+        return timer;
+      },
+      clearInterval,
+    },
+    defer: (fn) => { setImmediate(fn); },
+  });
+  setSyncChangedListener(raw, () => { events.notify(); });
 
   const hostFetch = createHostFetch({ fetch: globalThis.fetch });
 
@@ -720,6 +749,7 @@ async function boot(): Promise<Booted> {
     saveDestination: (pluginId, input) => host.saveDestination(pluginId, input),
     registry,
     generation,
+    events,
     host: '127.0.0.1',
     port: 0,
     webRoot: webDist,
@@ -743,7 +773,7 @@ async function boot(): Promise<Booted> {
     log: dropLine,
   });
 
-  return { raw, dir, server, host, qbittorrent, posterPath };
+  return { raw, dir, server, host, qbittorrent, posterPath, events };
 }
 
 /**
@@ -788,7 +818,7 @@ async function boot(): Promise<Booted> {
  */
 export const test = base.extend<{ harness: Harness }>({
   harness: async ({ context }, use) => {
-    const { raw, dir, server, host, qbittorrent, posterPath } = await boot();
+    const { raw, dir, server, host, qbittorrent, posterPath, events } = await boot();
     try {
       const claimToken = ensureClaimToken(raw, Date.now());
       // How many feeds {@link Harness.seedUnmatchedRelease} has created in
@@ -1004,6 +1034,13 @@ export const test = base.extend<{ harness: Harness }>({
       // do, and why `context.close()` rather than `page.close()`.
       await context.close();
       await server.close();
+      // Not what lets `server.close()` drain, on `createShutdown`'s own
+      // reasoning (`main.ts`): `ReadServer.close` already calls
+      // `closeAllConnections()`, which drops every open connection --
+      // including an `EventSource`'s -- synchronously. `events.close()`'s
+      // own job here is stopping the heartbeat interval and clearing the
+      // stream registry.
+      events.close();
       // After the read server rather than before it: the only thing that
       // ever dials this fake is an adapter call made while serving
       // `POST /api/picks`, so once that server is closed there is nothing

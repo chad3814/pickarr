@@ -5,7 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import { getRow } from '../../src/store/rows.ts';
 import type { Changed } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { subscribe, subscribeInserts, subscribeTable, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTable, subscribeTouched, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
 
 /**
  * A `Changed` naming one touched row, optionally inserted -- most tests here
@@ -283,6 +283,16 @@ test('unsubscribing twice does not detach subscribers that arrived in between', 
   second();
   third();
   db.close();
+});
+
+test('subscribeTouched fires once per batch with every id the batch wrote to that table, inserted or not', () => {
+  const heard: (readonly number[])[] = [];
+  const off = subscribeTouched('tv_release', (ids) => { heard.push(ids); });
+  emit({ touched: new Map([['tv_release', [1, 2, 3]], ['other', [9]]]), inserted: new Map([['tv_release', [3]]]) });
+  assert.deepEqual(heard, [[1, 2, 3]]);
+  off();
+  emit({ touched: new Map([['tv_release', [4]]]), inserted: new Map() });
+  assert.deepEqual(heard, [[1, 2, 3]], 'unsubscribed');
 });
 
 test('the same holds for subscribeInserts, which shares the registry helper', async () => {

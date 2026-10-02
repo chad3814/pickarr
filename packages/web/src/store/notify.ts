@@ -2,13 +2,16 @@
  * The subscription registry, and the first consumer of `applyBatch`'s
  * `Changed` return value (design spec §8).
  *
- * Four registries, because the four subscription kinds key on different
- * things: `subscribe` on one row (`table:id`), `subscribeInserts` and
- * `subscribeTable` on a whole table (a row that did not exist when the
- * caller subscribed has no `id` to key on yet), `subscribeReset` on nothing
- * at all. The two table-wide kinds differ in *which* changes reach them --
- * inserts only, against every change -- and {@link subscribeTable}'s own
- * doc has the defect that made the second necessary.
+ * Five registries, because the five subscription kinds key on different
+ * things: `subscribe` on one row (`table:id`), `subscribeInserts`,
+ * `subscribeTable` and `subscribeTouched` on a whole table (a row that did
+ * not exist when the caller subscribed has no `id` to key on yet),
+ * `subscribeReset` on nothing at all. The three table-wide kinds differ in
+ * *which* changes reach them, and with what -- inserts only, against every
+ * change with no ids, against every change with ids -- and
+ * {@link subscribeTable}'s own doc has the defect that made the second
+ * necessary; {@link subscribeTouched}'s doc has the one that made the third
+ * necessary.
  *
  * `emit` and `emitReset` are the write side, and each has two callers rather
  * than one. `store/apply.ts` emits after its own commit, for the tab that did
@@ -36,6 +39,7 @@ type InsertListener = (ids: readonly number[]) => void;
 const rowSubscribers = new Map<string, Set<RowListener>>();
 const insertSubscribers = new Map<string, Set<InsertListener>>();
 const tableSubscribers = new Map<string, Set<RowListener>>();
+const touchedSubscribers = new Map<string, Set<InsertListener>>();
 const resetSubscribers = new Set<RowListener>();
 
 function rowKey(table: string, id: number): string {
@@ -167,6 +171,17 @@ export function subscribeTable(table: string, cb: RowListener): () => void {
   return add(tableSubscribers, table, cb);
 }
 
+/**
+ * Fires once per batch with every id the batch wrote to `table` -- inserts,
+ * updates and deletes alike (`Changed.touched`). The channel `usePluginRows`
+ * needed and #105 asked for: a reader that knows which ids it holds can
+ * tell an update or a delete of its own rows from a stranger's, which
+ * `subscribeInserts` cannot say and `subscribeTable` says without ids.
+ */
+export function subscribeTouched(table: string, cb: InsertListener): () => void {
+  return add(touchedSubscribers, table, cb);
+}
+
 /** Fires after a generation-mismatch reset commits (spec §6, §8). */
 export function subscribeReset(cb: RowListener): () => void {
   resetSubscribers.add(cb);
@@ -191,6 +206,7 @@ export function emit(changed: Changed): void {
     // times over. `changed.touched` only carries a table when that table
     // changed, so an empty `ids` cannot reach here.
     fireRow(tableSubscribers.get(table));
+    fireInsert(touchedSubscribers.get(table), ids);
   }
   for (const [table, ids] of changed.inserted) {
     fireInsert(insertSubscribers.get(table), ids);

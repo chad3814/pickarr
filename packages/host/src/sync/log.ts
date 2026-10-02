@@ -105,13 +105,19 @@ import { readHostState, writeHostState } from '../db/host-state.ts';
  * real caller of `installSyncTriggers` has already passed that gate. This
  * function itself still does nothing to enforce any of it, and remains
  * unsafe against a name that reaches it by some other route.
+ *
+ * Each body ends by calling `pickarr_sync_changed()`, the function
+ * `db/open.ts` registers on every connection, so the host hears about the
+ * write in-process (`sync/events.ts`). It is a trigger, reinstalled every
+ * boot, not a migration.
  */
 export function syncTriggerSql(table: string): string {
   const [ins, upd, del] = syncedTriggerNames(table);
   const log = (rowId: string, op: string) =>
     `DELETE FROM sync_log WHERE table_name = '${table}' AND row_id = ${rowId};
      INSERT INTO sync_log (table_name, row_id, op, at)
-       VALUES ('${table}', ${rowId}, '${op}', CAST(unixepoch('subsec') * 1000 AS INTEGER));`;
+       VALUES ('${table}', ${rowId}, '${op}', CAST(unixepoch('subsec') * 1000 AS INTEGER));
+     SELECT pickarr_sync_changed();`;
   return `
     DROP TRIGGER IF EXISTS ${ins};
     CREATE TRIGGER ${ins} AFTER INSERT ON ${table} BEGIN ${log('NEW.id', 'upsert')} END;

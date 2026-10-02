@@ -1,3 +1,4 @@
+import type { ServerResponse } from 'node:http';
 import type { ArtworkResponse } from './artwork-route.ts';
 import type { StaticResponse } from './static-route.ts';
 
@@ -27,7 +28,10 @@ export type Answer =
   | { kind: 'json'; status: number; body: unknown }
   | { kind: 'empty'; status: number }
   | { kind: 'artwork'; artwork: ArtworkResponse }
-  | { kind: 'static'; file: StaticResponse };
+  | { kind: 'static'; file: StaticResponse }
+  // A response the route keeps open: `attach` writes the headers and owns
+  // the socket from then on. Only `/api/sync/events`.
+  | { kind: 'stream'; attach: (response: ServerResponse) => void };
 
 export function json(status: number, body: unknown): Answer {
   return { kind: 'json', status, body };

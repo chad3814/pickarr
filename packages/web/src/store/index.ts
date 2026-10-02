@@ -36,12 +36,11 @@ import type { StoredRow } from './db.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
   pluginRowsByMediaItems,
-  type ListByTableOptions,
+  type ListByTableOptions, type PluginRowsPage,
 } from './rows.ts';
-import type { PluginRows } from '@pickarr/plugin-ui';
-import { subscribe, subscribeInserts, subscribeReset, subscribeTable } from './notify.ts';
+import { subscribe, subscribeInserts, subscribeReset, subscribeTable, subscribeTouched } from './notify.ts';
 import { gatherMediaItem, type GatheredItem } from './gather.ts';
-import { startSync, type Lease, type Schedule, type SyncFetch } from './sync.ts';
+import { startSync, type Lease, type OpenEventStream, type Schedule, type SyncFetch } from './sync.ts';
 
 /**
  * What `createStore` needs, and nothing it does not: the replica's name, and
@@ -72,15 +71,18 @@ export interface CreateStoreDeps {
    * leaves this unset, which is the existing 60-second default unchanged.
    */
   fetchDeadlineMs?: number;
+  /** Opens the leader's event stream. Absent means "poll at `sync.ts`'s `TAIL_INTERVAL_POLLING_MS` forever" -- see `SyncDeps.events`'s own doc. */
+  events?: OpenEventStream;
 }
 
 /**
- * The seven reads (`store/rows.ts`), the three subscriptions
- * (`store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
+ * The seven reads (`store/rows.ts`), the five subscriptions (`subscribe`,
+ * `subscribeInserts`, `subscribeTable`, `subscribeTouched`, `subscribeReset`
+ * -- `store/notify.ts`), the host-owned gatherer (`store/gather.ts`), and
  * `stop()` -- everything a consumer of the replica needs, with `db` already
  * bound so none of it takes one.
  *
- * The three subscriptions are `store/notify.ts`'s own module-level
+ * The five subscriptions are `store/notify.ts`'s own module-level
  * registries, keyed by table and id rather than by store instance --
  * unchanged here, and deliberately: nothing in this slice's design keys a
  * subscription off which replica raised it (there is exactly one replica per
@@ -98,7 +100,7 @@ export interface Store {
    * `gatherMediaItem` (a collapsed card needs its rows too, and this is the
    * only shape that can answer for a whole page of them at once).
    */
-  pluginRowsByMediaItems(mediaItemIds: readonly number[], tables: readonly string[]): Promise<ReadonlyMap<number, PluginRows>>;
+  pluginRowsByMediaItems(mediaItemIds: readonly number[], tables: readonly string[]): Promise<PluginRowsPage>;
   listByTable(table: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
   listByTablePlugin(table: string, pluginId: string, opts: ListByTableOptions): Promise<readonly StoredRow[]>;
   countByPlugin(table: string, pluginId: string): Promise<number>;
@@ -111,6 +113,14 @@ export interface Store {
    * the two.
    */
   subscribeTable(table: string, cb: () => void): () => void;
+  /**
+   * Wakes once per batch with every id the batch wrote to `table` -- insert,
+   * update or delete alike. What `usePluginRows` (#105) needs: a reader that
+   * already knows which ids it holds can tell its own row changing from a
+   * stranger's, which `subscribeInserts` cannot say and `subscribeTable`
+   * says without ids. See `store/notify.ts`'s own doc.
+   */
+  subscribeTouched(table: string, cb: (ids: readonly number[]) => void): () => void;
   subscribeReset(cb: () => void): () => void;
   gatherMediaItem(mediaItemId: number): Promise<GatheredItem | undefined>;
   /**
@@ -153,8 +163,10 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     // Omitted entirely rather than set to `undefined` when absent:
     // `exactOptionalPropertyTypes` treats an explicit `undefined` differently
     // from an absent key, and `SyncDeps.fetchDeadlineMs` is typed `number`,
-    // not `number | undefined`.
+    // not `number | undefined`. `SyncDeps.events` is the same shape of
+    // optional field, for the same reason.
     ...(deps.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: deps.fetchDeadlineMs }),
+    ...(deps.events === undefined ? {} : { events: deps.events }),
   });
 
   return {
@@ -169,6 +181,7 @@ export async function createStore(deps: CreateStoreDeps): Promise<Store> {
     subscribe,
     subscribeInserts,
     subscribeTable,
+    subscribeTouched,
     subscribeReset,
     gatherMediaItem: (mediaItemId) => gatherMediaItem(db, mediaItemId),
     stop(): void {

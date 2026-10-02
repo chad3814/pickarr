@@ -178,8 +178,8 @@ test('createStore wires a replica end to end: bootstrap, a tail page, a retiring
   // declared table, empty, because a caller supplies `mediaItemIds` and
   // this function does not re-derive which of them exist.
   const pluginRows = await store.pluginRowsByMediaItems([7, 999], ['role']);
-  assert.equal(pluginRows.get(7)?.role?.length, 1, "the role row item 7 owns is partitioned into its own map entry");
-  assert.deepEqual(pluginRows.get(999), { role: [] }, 'an id with no rows still gets every declared table, empty');
+  assert.equal(pluginRows.rows.get(7)?.role?.length, 1, "the role row item 7 owns is partitioned into its own map entry");
+  assert.deepEqual(pluginRows.rows.get(999), { role: [] }, 'an id with no rows still gets every declared table, empty');
 
   // The cursors in `meta` match the last page each loop served: the tail's
   // last page carried cursor 20, and the backfill's last page carried a null

@@ -19,12 +19,13 @@
  * does for one table across many ids -- see that function's own doc for
  * the measured transaction count.
  *
- * **It subscribes to inserts on each declared table, because replication
- * does not promise to deliver a plugin row in the same batch as its media
- * item.** The host writes both atomically -- each lookup plugin's own
- * `apply.ts` does -- and that is not the guarantee that matters: `/api/sync`
- * is a `sync_log` walk applied to the replica in batches, and
- * `@pickarr/contract`'s `TvSeasonRead` doc states outright that ordering is
+ * **It subscribes to every change on each declared table, because
+ * replication does not promise to deliver a plugin row in the same batch as
+ * its media item, and a row already on screen can still change under it.**
+ * The host writes a new row and its media item atomically -- each lookup
+ * plugin's own `apply.ts` does -- and that is not the only guarantee that
+ * matters: `/api/sync` is a `sync_log` walk applied to the replica in
+ * batches, and `@pickarr/contract`'s `TvSeasonRead` doc states outright that ordering is
  * not preserved across it -- a client can hold a season whose `seriesId`
  * names a series it has not received yet, with the referent arriving
  * "elsewhere in the same walk". So a `tv_release` can reach the replica in
@@ -40,31 +41,36 @@
  * most likely time to meet a plugin's card was the one time it silently did
  * not work.
  *
- * **Inserts are the right channel for a row arriving late.** `inserted` is a
- * *subset* of `touched`, not its complement -- `store/apply.ts`'s `Changed`
- * doc is "which rows a batch touched, and which of those it inserted" --
- * and membership is decided in `applyBatch` by
- * `existing === undefined || existing.value === undefined`, which the
- * comment beside it glosses as `"Inserted" means *became visible to a
- * reader*, not "had no record"`. So `inserted` covers a row arriving for the
- * first time *and* an upsert reviving a tombstone (a tombstone is a record,
- * and is invisible to every read), while an upsert over a row that already
- * carried a value lands in `touched` alone. A plugin row landing late is the
- * first case.
+ * **It subscribes to `touched`, not `inserted`, and knows which ids are its
+ * own (#105).** `store/notify.ts`'s `subscribeTouched` fires once per batch
+ * with every id the batch wrote to a table -- an insert, an update or a
+ * delete alike (`store/apply.ts`'s `Changed.touched`). This hook keeps,
+ * alongside `rows`, the id set `pluginRowsByMediaItems` last reported
+ * holding for each declared table (`PluginRowsPage.heldIds`). On a wake, for
+ * each id:
  *
- * **Filtered to this page, because an insert subscription is table-wide.**
- * A `subscribeInserts('tv_release', …)` wake carries ids and nothing else,
- * so this hook reads the inserted rows and refetches only when one names a
- * media item in `mediaItemIds`. Without the filter, one insert anywhere
- * would refetch the page for every mounted browse screen. `getRows` is the
- * batched member, so the filter costs **one** transaction per wake however
- * many ids the batch carried -- the identical trade `useGatheredItem`'s own
+ * - if this page holds that id, it refetches outright: the row was updated
+ *   or deleted, and a tombstone carries no `value` -- holding the id is
+ *   the whole test, so nothing needs to be read first;
+ * - otherwise it reads the row (`getRows`, the batched member) and
+ *   refetches only if `mediaItemOf` names one of `mediaItemIds`: the row is
+ *   new to this page, the same filter an insert always needed.
+ *
+ * **Why one channel is enough, and does not double-wake.** `inserted` is a
+ * *subset* of `touched` -- `store/apply.ts`'s `Changed` doc is "which rows a
+ * batch touched, and which of those it inserted" -- so every wake the old
+ * `subscribeInserts` channel produced still arrives here over `touched`, and
+ * dropping that subscription (rather than keeping both) is what keeps a
+ * late-arriving row from refetching the page twice.
+ *
+ * **Filtered to this page either way, because the channel is table-wide.**
+ * A wake carries ids and nothing else, so an unheld id still needs a read
+ * before this hook knows whether it belongs to `mediaItemIds`. Without that
+ * filter, one touched row anywhere would refetch the page for every mounted
+ * browse screen. The filter costs **one** transaction per wake however many
+ * ids the batch carried -- the identical trade `useGatheredItem`'s own
  * `regatherIfOurs` measured at 4 transactions before and 1 after, and the
  * reason a per-id `getRow` must not come back here.
- *
- * **What it does not wake for: an update to a plugin row already on
- * screen.** That op lands in `touched` and not in `inserted`, and this hook
- * watches only `inserted`.
  *
  * **It is reachable by the one shipped plugin that declares a table, and an
  * earlier version of this paragraph said it was not.** That version's reason
@@ -86,25 +92,24 @@
  * statement is an `UPDATE`, so the trigger fires and an op is produced
  * whether or not a single column's value changed.
  *
- * **What the operator sees, and only in the narrower case where the answer
- * itself moved.** Most re-applies write the same values back and the missed
- * wake costs nothing visible. Where the new answer differs -- a series title
- * since corrected, a season number that was null and is now known -- the
- * replica is still correct: the host's `AFTER UPDATE` trigger
- * (`sync/log.ts`) logs a changed row exactly as an inserted one, so the new
- * value reaches this tab and is stored. What does not happen is this screen
- * re-reading it, so the headline stays as it first rendered until the list
- * remounts or the page is reloaded.
+ * **What the operator sees, including in the narrower case where the answer
+ * itself moved.** Most re-applies write the same values back, so most
+ * updates are invisible regardless. Where the new answer differs -- a
+ * series title since corrected, a season number that was null and is now
+ * known -- the host's `AFTER UPDATE` trigger (`sync/log.ts`) logs a changed
+ * row exactly as an inserted one, the new value reaches this tab and is
+ * stored, and the held-id rule above now re-reads this screen too: the
+ * headline updates without a remount.
  *
- * **Why it is not guarded here.** Closing it needs a table-wide *update*
- * notification, and `store/notify.ts` offers none: `subscribe` fires on
- * every change to one row but takes an id, and this hook has no ids to give
- * -- `@pickarr/plugin-ui`'s `PluginRows` is
+ * **Why the held-id rule needed `PluginRowsPage` rather than `PluginRows`
+ * itself.** `@pickarr/plugin-ui`'s `PluginRows` is
  * `Readonly<Record<string, readonly unknown[]>>`, row values without their
- * keys, and deliberately so, because the sync op carries the key and the
- * plugin read shapes omit it. So this is a change to the store's
- * subscription surface rather than to this hook, and it is filed as an issue
- * rather than done here.
+ * keys, and deliberately so: the sync op carries the key and the plugin
+ * read shapes omit it, so `PluginRows` itself has nothing to subscribe a
+ * per-row id against the way `useGatheredItem` does. `heldIds` carries that
+ * key one step further, beside `pluginRowsByMediaItems`' values rather than
+ * inside them, which is what lets this hook ask "do I hold this id" without
+ * either plugin read shape gaining a field it does not otherwise need.
  *
  * A second thing it does not wake for, and this one has no caller at all: a
  * declared table whose read shape carries no `mediaItemId`. The filter would
@@ -130,17 +135,18 @@ import type { Store } from '../store/index.ts';
  * The three `Store` members this hook needs, narrower than `Store` itself so
  * a test can bind it to a bare database directly.
  *
- * It was one until the insert subscription landed, and the two it gained are
- * not obviously implied by the first: `subscribeInserts`' callback is handed
- * ids and no parent information, and a plugin row's `id` is its own,
- * unrelated to the `mediaItemId` it belongs to. Reading the rows is what
- * answers whether a wake is this page's. Exactly the pair -- and exactly the
- * reasoning -- `useGatheredItem.ts`'s `GatheredSource` states for the same
- * channel.
+ * `subscribeTouched` rather than `subscribeInserts` (#105): its callback is
+ * handed ids and no parent information, and a plugin row's `id` is its own,
+ * unrelated to the `mediaItemId` it belongs to, so `getRows` is still needed
+ * for an id this page does not already hold. Reading the rows is what
+ * answers whether *that* wake is this page's; the held-id set answers it
+ * for the rest without a read at all. Exactly the same pair -- and exactly
+ * the reasoning -- `useGatheredItem.ts`'s `GatheredSource` states for the
+ * channel it watches.
  */
 export interface PluginRowsSource {
   pluginRowsByMediaItems: Store['pluginRowsByMediaItems'];
-  subscribeInserts: Store['subscribeInserts'];
+  subscribeTouched: Store['subscribeTouched'];
   getRows: Store['getRows'];
 }
 
@@ -213,9 +219,11 @@ function mediaItemOf(value: unknown): number | undefined {
 
 /**
  * `mediaItemIds`' plugin rows, re-fetched in one batched read whenever
- * `mediaItemIds` or `tables` changes, **and whenever a row is inserted into
- * one of `tables` under an id this page holds** (see this module's doc for
- * why that second trigger exists and what it costs). Answers `new Map()` --
+ * `mediaItemIds` or `tables` changes, **and whenever a row in one of
+ * `tables` is inserted, updated or deleted, and either this page already
+ * holds its id or the row itself names one of `mediaItemIds`** (see this
+ * module's doc for why that second trigger exists and what it costs).
+ * Answers `new Map()` --
  * read by a caller through {@link emptyPluginRows}, never directly -- while
  * `mediaItemIds` or `tables` is empty, or before the first batch has
  * resolved.
@@ -246,12 +254,21 @@ export function usePluginRows(
     // effect's own dependency, so it cannot change underneath a subscription
     // this effect installed.
     const ours = new Set(mediaItemIds);
+    // Every row id the last fetch reported holding, per table -- what tells
+    // an update or a delete of our own rows apart from a stranger's (#105).
+    // A `const Map` whose contents `safeFetch` replaces on every resolution,
+    // rather than a reassigned `let`, so `refetchIfOurs` below closes over
+    // one stable reference for the life of this effect.
+    const held = new Map<string, ReadonlySet<number>>();
 
     function safeFetch(): void {
       source
         .pluginRowsByMediaItems(mediaItemIds, tables)
         .then((result) => {
-          if (!cancelled) setRows(result);
+          if (cancelled) return;
+          held.clear();
+          for (const [table, ids] of result.heldIds) held.set(table, ids);
+          setRows(result.rows);
         })
         .catch((err: unknown) => {
           if (isStoreClosed(err)) return;
@@ -261,15 +278,21 @@ export function usePluginRows(
 
     safeFetch();
 
-    /** Refetches the page if any of `ids` is a row under one of this page's media items. */
     async function refetchIfOurs(table: string, ids: readonly number[]): Promise<void> {
+      const mine = held.get(table);
+      if (mine !== undefined && ids.some((id) => mine.has(id))) {
+        // A row this page shows was updated or deleted. A tombstone carries
+        // no value, and none is needed: holding the id is the whole test.
+        safeFetch();
+        return;
+      }
       const values = await source.getRows(table, ids);
       if (cancelled) return;
-      const mine = [...values.values()].some((value) => {
+      const arrived = [...values.values()].some((value) => {
         const mediaItemId = mediaItemOf(value);
         return mediaItemId !== undefined && ours.has(mediaItemId);
       });
-      if (mine) safeFetch();
+      if (arrived) safeFetch();
     }
 
     function safeRefetchIfOurs(table: string): (ids: readonly number[]) => void {
@@ -281,7 +304,7 @@ export function usePluginRows(
       };
     }
 
-    const unsubscribes = tables.map((table) => source.subscribeInserts(table, safeRefetchIfOurs(table)));
+    const unsubscribes = tables.map((table) => source.subscribeTouched(table, safeRefetchIfOurs(table)));
     return () => {
       cancelled = true;
       // Every one of them, on unmount and on any dependency change. Task 6's

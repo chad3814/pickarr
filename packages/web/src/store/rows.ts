@@ -270,6 +270,24 @@ export async function byRssItem(db: IDBDatabase, rssItemId: number): Promise<rea
 }
 
 /**
+ * {@link pluginRowsByMediaItems}' answer: the rows themselves, and the ids
+ * behind them.
+ *
+ * `heldIds` exists for `usePluginRows` (#105): the sync protocol puts a
+ * row's key on the op rather than in the value, and `PluginRows` carries
+ * values without their keys on purpose (see that type's own doc) -- so a
+ * caller that wants to know *which* rows a page holds, to tell its own
+ * update or delete from a stranger's, cannot get that from `rows` alone.
+ * This carries the key the one step further, beside the values rather than
+ * inside them.
+ */
+export interface PluginRowsPage {
+  readonly rows: ReadonlyMap<number, PluginRows>;
+  /** Every row id the page holds, per table -- what `usePluginRows` matches a touched id against. */
+  readonly heldIds: ReadonlyMap<string, ReadonlySet<number>>;
+}
+
+/**
  * Every row `tables` names, for every id in `mediaItemIds`, grouped first
  * by media item and then by table -- one transaction regardless of how
  * many ids or tables, the way {@link getRows} already batches N keyed
@@ -305,7 +323,7 @@ export async function pluginRowsByMediaItems(
   db: IDBDatabase,
   mediaItemIds: readonly number[],
   tables: readonly string[],
-): Promise<ReadonlyMap<number, PluginRows>> {
+): Promise<PluginRowsPage> {
   const index = rowsStore(db).index('by_media_item');
   const held = await Promise.all(
     mediaItemIds.map(async (mediaItemId) => ({
@@ -314,15 +332,18 @@ export async function pluginRowsByMediaItems(
     })),
   );
   const result = new Map<number, PluginRows>();
+  const heldIds = new Map<string, Set<number>>();
+  for (const table of tables) heldIds.set(table, new Set());
   for (const { mediaItemId, rows } of held) {
     const pluginRows: Record<string, unknown[]> = {};
     for (const table of tables) pluginRows[table] = [];
     for (const row of rows) {
       pluginRows[row.table]?.push(row.value);
+      heldIds.get(row.table)?.add(row.id);
     }
     result.set(mediaItemId, pluginRows);
   }
-  return result;
+  return { rows: result, heldIds };
 }
 
 /**

@@ -5,7 +5,11 @@ import { eventually } from './syncTestKit.ts';
 import {
   startSync,
   webLocksLease,
+  TAIL_INTERVAL_POLLING_MS,
+  TAIL_INTERVAL_STREAMING_MS,
+  EVENTS_URL,
   type Lease,
+  type OpenEventStream,
   type Schedule,
   type SyncDeps,
   type SyncFetch,
@@ -176,6 +180,70 @@ function routes(table: Readonly<Record<string, unknown>>): (url: string) => Sync
   };
 }
 
+interface FakeStream {
+  open: () => void;
+  fail: () => void;
+  changed: (data: string) => void;
+  readonly closed: boolean;
+  readonly url: string;
+}
+
+/**
+ * The event-stream seam, driven by hand -- the stream equivalent of
+ * `manualScheduler` above. Every stream `events` opens is recorded in
+ * `opened`, in open order, so a test can reach the leader's own stream
+ * (`opened[0]`) and fire `open`/`fail`/`changed` on it directly, the way a
+ * real `EventSource` would fire them from the network.
+ */
+function fakeStreams(): { events: OpenEventStream; opened: FakeStream[] } {
+  const opened: FakeStream[] = [];
+  const events: OpenEventStream = (url) => {
+    const listeners = {
+      open: [] as (() => void)[],
+      error: [] as (() => void)[],
+      changed: [] as ((e: { readonly data: string }) => void)[],
+    };
+    let closed = false;
+    const stream: FakeStream = {
+      open: () => {
+        for (const l of listeners.open) l();
+      },
+      fail: () => {
+        for (const l of listeners.error) l();
+      },
+      changed: (data) => {
+        for (const l of listeners.changed) l({ data });
+      },
+      get closed() {
+        return closed;
+      },
+      url,
+    };
+    opened.push(stream);
+    return {
+      // The two casts below are this fixture's documented exception
+      // (task 3's brief): `SyncEventStream.addEventListener`'s overload ties
+      // `listener`'s type to `type`, and a single function body implementing
+      // both branches has no way to let the compiler re-derive that link --
+      // the union is already erased by the time either branch runs. Narrowing
+      // instead of casting was tried and fails to compile (TS2345): pushing a
+      // `(() => void) | ((e) => void)` into either typed array needs this
+      // same information the compiler cannot recover either.
+      addEventListener(
+        type: 'open' | 'error' | 'changed',
+        listener: (() => void) | ((e: { readonly data: string }) => void),
+      ): void {
+        if (type === 'changed') listeners.changed.push(listener as (e: { readonly data: string }) => void);
+        else listeners[type].push(listener as () => void);
+      },
+      close(): void {
+        closed = true;
+      },
+    };
+  };
+  return { events, opened };
+}
+
 /**
  * A lease granted the moment it is asked for. `hold` must now return a
  * release function (`Lease`'s own doc in `sync.ts`); this fixture's is a
@@ -234,11 +302,12 @@ function start(
   db: IDBDatabase,
   fetch: SyncFetch,
   locks: Lease,
-  overrides: Partial<Pick<SyncDeps, 'now' | 'fetchDeadlineMs'>> = {},
+  overrides: Partial<Pick<SyncDeps, 'now' | 'fetchDeadlineMs' | 'events'>> = {},
 ): { sched: ManualScheduler; handle: SyncHandle } {
   const sched = manualScheduler();
   const handle = startSync({
     ...(overrides.fetchDeadlineMs === undefined ? {} : { fetchDeadlineMs: overrides.fetchDeadlineMs }),
+    ...(overrides.events === undefined ? {} : { events: overrides.events }),
     db,
     fetch,
     schedule: sched.schedule,
@@ -752,7 +821,7 @@ test('a failed response is not read for its body, and the loop backs off and rec
   assert.ok(messages[0]?.includes('answered 503'), `expected the status in the report, got: ${String(messages[0])}`);
 
   await sched.drive('tail');
-  assert.equal(sched.pendingFor('tail')?.delayMs, 3000, 'a success clears the ladder and the tail returns to its interval');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'a success clears the ladder and the tail returns to its interval');
 });
 
 test('a rejected fetch is contained, reported and retried', async () => {
@@ -1039,6 +1108,29 @@ test('a transient failure still backs off and retries', async () => {
   assert.ok(sched.pendingFor('tail'), 'a 503 is retried');
 });
 
+test('a nudge while the tail is backing off does not cancel the backoff or restart a stopped loop', async () => {
+  // Review item 1: `onChanged` must not undo `reportFailure`'s backoff by
+  // scheduling an immediate retry, and must not re-arm a loop that has
+  // stopped asking on purpose after REFUSAL_LIMIT.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch((): SyncResponse => ({ ok: false, status: 503, json: () => Promise.resolve({}) }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+
+  await sched.drive('tail'); // 503: reportFailure arms a backoff tick
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 1000, 'first failure backs off at the base delay');
+
+  const before = fetch.urls.length;
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+
+  assert.equal(sched.pendingFor('tail')?.delayMs, 1000, 'the nudge must not cancel the pending backoff tick');
+  assert.equal(fetch.urls.length, before, 'and must not start a new request either');
+});
+
 test('a request that outlives the deadline is aborted rather than stalling both loops', async () => {
   // Ruling 21's gap, closed. The two bootstrap fetches run inside the mutex,
   // so before this an unanswered request stalled *both* loops indefinitely --
@@ -1062,4 +1154,199 @@ test('a request that outlives the deadline is aborted rather than stalling both 
   // The loop recovered into its backoff rather than sitting in the mutex.
   assert.ok(sched.pendingFor('tail'), 'so the loop is retrying rather than stalled');
   db.close();
+});
+
+test('the leader opens one event stream at the events url; a follower opens none', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const quiet = routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } });
+  const { events, opened } = fakeStreams();
+  start(db, stubFetch(quiet).fetch, grantedLease(), { events });
+  await settle();
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]?.url, EVENTS_URL);
+
+  const { events: followerEvents, opened: followerOpened } = fakeStreams();
+  const { lease } = manualLease(); // never granted
+  start(db, stubFetch(quiet).fetch, lease, { events: followerEvents });
+  await settle();
+  assert.equal(followerOpened.length, 0, 'a follower hears the leader over the channel, not the host');
+});
+
+test('a changed event whose cursor is ahead fetches the tail at once; one that is not does nothing', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  await sched.drive('tail');                        // the bootstrap's first tail fetch
+  const before = fetch.urls.length;
+  opened[0]?.changed(JSON.stringify({ cursor: 10, generation: 'gen-1' }));
+  await settle();
+  assert.notEqual(sched.pendingFor('tail')?.delayMs, 0, 'an equal cursor schedules nothing new');
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'an advanced cursor schedules the tail now');
+  await sched.drive('tail');
+  assert.equal(fetch.urls.length, before + 1);
+});
+
+test('a nudge that lands mid-fetch folds into the running tick instead of starting a second one', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const tailPage = deferred<SyncResponse>();
+  const fetch = stubFetch((url: string) => (url === '/api/sync?since=10' ? tailPage.promise : ok({ ops: [], cursor: 10, generation: 'gen-1' })));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+
+  await sched.drive('tail'); // the fetch is now in flight, parked on tailPage
+  const before = fetch.urls.length;
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  assert.equal(fetch.urls.length, before, 'a nudge mid-fetch starts no second, overlapping request');
+  assert.equal(sched.pendingFor('tail'), undefined, 'and schedules nothing new while the tick is still running -- there would be nothing for schedule to cancel anyway');
+
+  tailPage.resolve(ok({ ops: [], cursor: 10, generation: 'gen-1' }));
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'the nudge is honoured once the in-flight tick completes, instead of being dropped');
+
+  // Control: with no nudge landing this time, the next tick returns to the ordinary cadence.
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'no nudge landed this time, so the cadence is unaffected');
+});
+
+test('a pending nudge is forgotten when the tab stops leading', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const tailPage = deferred<SyncResponse>();
+  let fetchCount = 0;
+  const fetch = stubFetch((url: string) => {
+    if (url !== '/api/sync?since=10') throw new Error(`unrouted: ${url}`);
+    fetchCount += 1;
+    return fetchCount === 1 ? tailPage.promise : ok({ ops: [], cursor: 10, generation: 'gen-1' });
+  });
+  const { lease, grant, release } = manualLease();
+  const { sched } = start(db, fetch.fetch, lease, { events });
+
+  grant();
+  await settle();
+  await sched.drive('tail'); // fetch #1 is now in flight, parked on tailPage
+
+  // A nudge lands while that fetch is still running, setting `nudged` --
+  // then the tab is demoted before the fetch ever answers.
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  release();
+  await settle();
+
+  // The orphaned tick finishes after the demotion; `mayFetch()` is false by
+  // then, so it is a no-op (`runOnce`'s own `'handled'` branch), not a
+  // second chance for the stale nudge to take hold.
+  tailPage.resolve(ok({ ops: [], cursor: 10, generation: 'gen-1' }));
+  await settle();
+
+  // Promoted again. A fresh tail tick runs and completes normally -- no new
+  // nudge this time.
+  grant();
+  await settle();
+  await sched.drive('tail'); // fetch #2, answered immediately
+
+  assert.equal(
+    sched.pendingFor('tail')?.delayMs,
+    TAIL_INTERVAL_POLLING_MS,
+    'the nudge the previous lease heard must not force an immediate re-poll under this one',
+  );
+});
+
+test('a changed event with a different generation runs the tail now, and the tail resets', async () => {
+  // The nudge only schedules; `runOnce`'s own generation check does the reset.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({
+    '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-2' },
+    '/api/sync/bootstrap': { since: 0, before: 1, generation: 'gen-2' },
+  }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  opened[0]?.changed(JSON.stringify({ cursor: 10, generation: 'gen-2' }));
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0);
+  await sched.drive('tail');
+  await eventually(async () => {
+    const tx = db.transaction('meta', 'readonly');
+    assert.equal(await readGeneration(tx), 'gen-2');
+  }, 'the reset to land');
+});
+
+test('an error shortens an already-scheduled 30 s tick to the 3 s polling cadence at once', async () => {
+  // Review item 4: a tick armed while the stream looked open must not wait
+  // out its full 30 s before falling back, once the stream has actually
+  // errored.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  opened[0]?.open();
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_STREAMING_MS, 'armed at the streaming cadence');
+  opened[0]?.fail();
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'the error reschedules it at the polling cadence immediately, not up to 30 s later');
+});
+
+test('the tail polls every 30 s while the stream is open and every 3 s while it is down', async () => {
+  // Review Focus 1: a stream that opens but never delivers still leaves the tab correct.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } }));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'no stream yet: polling cadence');
+  opened[0]?.open();
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_STREAMING_MS, 'stream open: the poll is a safety net');
+  opened[0]?.fail();
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'stream down: back to polling');
+});
+
+test('malformed event data and an event before bootstrap are ignored without throwing', async () => {
+  // Review Focus 2 and 3.
+  const db = await freshDb();                        // no meta seeded: bootstrap not yet done
+  const { events, opened } = fakeStreams();
+  const fetch = stubFetch(routes({ '/api/sync/bootstrap': { since: 0, before: null, generation: 'gen-1' } }));
+  const messages = captureErrors();
+  start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  for (const data of ['not json', '{}', '{"cursor":"x","generation":"gen-1"}', JSON.stringify({ cursor: 5, generation: 'gen-1' })]) {
+    assert.doesNotThrow(() => opened[0]?.changed(data));
+  }
+  await settle();
+  assert.equal(messages.filter((m) => m.includes('Unhandled')).length, 0);
+});
+
+test('stop closes the stream, and so does losing the lease', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const quiet = routes({ '/api/sync?since=10': { ops: [], cursor: 10, generation: 'gen-1' } });
+  const { events, opened } = fakeStreams();
+  const { handle } = start(db, stubFetch(quiet).fetch, grantedLease(), { events });
+  await settle();
+  handle.stop();
+  assert.equal(opened[0]?.closed, true);
+
+  const { events: events2, opened: opened2 } = fakeStreams();
+  const { lease, grant, release } = manualLease();
+  start(db, stubFetch(quiet).fetch, lease, { events: events2 });
+  grant(); await settle();
+  assert.equal(opened2.length, 1);
+  release(); await settle();
+  assert.equal(opened2[0]?.closed, true, 'a demoted tab stops listening to the host');
 });

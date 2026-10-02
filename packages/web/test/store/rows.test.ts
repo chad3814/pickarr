@@ -6,6 +6,7 @@ import type { SyncOp } from '../../src/store/wire.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
   pluginRowsByMediaItems,
+  type PluginRowsPage,
 } from '../../src/store/rows.ts';
 import { done } from '../../src/store/idb.ts';
 import type { StoredRow } from '../../src/store/db.ts';
@@ -105,9 +106,10 @@ test('pluginRowsByMediaItems partitions each item its own rows, from the tables 
 
   const result = await pluginRowsByMediaItems(db, [7, 8], ['tv_release']);
 
-  assert.equal(result.get(7)?.tv_release?.length, 1, "item 7's named table is carried");
-  assert.ok(!('movie_detail' in (result.get(7) ?? {})), 'an unnamed table is not, even though it belongs to the same item');
-  assert.equal(result.get(8)?.tv_release?.length, 1, "item 8's rows are not mixed into item 7's entry");
+  assert.equal(result.rows.get(7)?.tv_release?.length, 1, "item 7's named table is carried");
+  assert.ok(!('movie_detail' in (result.rows.get(7) ?? {})), 'an unnamed table is not, even though it belongs to the same item');
+  assert.equal(result.rows.get(8)?.tv_release?.length, 1, "item 8's rows are not mixed into item 7's entry");
+  assert.deepEqual(result.heldIds.get('tv_release'), new Set([1, 3]), 'every row id held under the named table, across both items, and nothing else');
   db.close();
 });
 
@@ -117,7 +119,7 @@ test('pluginRowsByMediaItems: a named table with no rows is an empty array, not 
 
   const result = await pluginRowsByMediaItems(db, [7], ['tv_release']);
 
-  assert.deepEqual(result.get(7), { tv_release: [] }, 'the key exists and is empty');
+  assert.deepEqual(result.rows.get(7), { tv_release: [] }, 'the key exists and is empty');
   db.close();
 });
 
@@ -126,7 +128,7 @@ test('pluginRowsByMediaItems answers every declared table for an id the replica 
 
   const result = await pluginRowsByMediaItems(db, [999], ['tv_release']);
 
-  assert.deepEqual(result.get(999), { tv_release: [] }, 'an id with no media item at all still gets a full entry');
+  assert.deepEqual(result.rows.get(999), { tv_release: [] }, 'an id with no media item at all still gets a full entry');
   db.close();
 });
 
@@ -156,7 +158,7 @@ test('pluginRowsByMediaItems opens one transaction for a page of ids, not one pe
     return original(storeNames, mode, options);
   };
 
-  let result: ReadonlyMap<number, unknown>;
+  let result: PluginRowsPage;
   try {
     result = await pluginRowsByMediaItems(db, ids, ['tv_release']);
   } finally {
@@ -164,7 +166,7 @@ test('pluginRowsByMediaItems opens one transaction for a page of ids, not one pe
   }
 
   assert.equal(transactions, 1, 'one transaction served all 50 ids');
-  assert.equal(result.size, 50, 'every id still got its own entry');
+  assert.equal(result.rows.size, 50, 'every id still got its own entry');
   db.close();
 });
 
