@@ -105,7 +105,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { test as base } from '@playwright/test';
 import type { MediaPlugin, Migration, PluginContext, SyncedTable } from '@pickarr/contract';
 import {
@@ -227,6 +227,11 @@ const PLUGIN_SCHEMA: Record<Category, {
  * minus a log line this harness drops anyway (`dropLine`).
  */
 function stubPlugin(id: Category): MediaPlugin {
+  // The one table per category whose rows reference `media_item` with a
+  // foreign key, which the host's `reassignRelease` must be able to clear
+  // before it drops an item. Only `tv_release` and `xxx_scene` are ever
+  // seeded here; `movie_detail` is listed because the schema has it.
+  const ownedTable = { tv: 'tv_release', movie: 'movie_detail', xxx: 'xxx_scene' }[id];
   return {
     id,
     mediaType: id,
@@ -240,6 +245,17 @@ function stubPlugin(id: Category): MediaPlugin {
     async onDownloadedFile() {},
     async onDownloadRequest(rssItemId: number, ctx: PluginContext) {
       await ctx.downloads.submit({ rssItemId });
+    },
+    async onMediaItemDropped(mediaItemId: number, ctx: PluginContext) {
+      // The same delete the real plugin's `dropRows` makes, over the table
+      // this category's seeds write to.
+      if (!(ctx.db instanceof DatabaseSync)) throw new TypeError('stubPlugin: ctx.db is not a DatabaseSync');
+      ctx.db.prepare(`DELETE FROM ${ownedTable} WHERE media_item_id = ?`).run(mediaItemId);
+    },
+    async onLookupRequest(rssItemId: number, _hint: { name: string } | undefined, ctx: PluginContext) {
+      // Enough for the browser to show `Looking up…`; no lookup service is
+      // asked in an e2e run.
+      await ctx.media.setLookupState(rssItemId, 'pending', null, null);
     },
   };
 }

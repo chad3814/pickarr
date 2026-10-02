@@ -226,4 +226,30 @@ export interface MediaPlugin {
   onNewRssItems(ids: readonly number[], ctx: PluginContext): Promise<void>;
   onDownloadedFile(file: DownloadedFile, ctx: PluginContext): Promise<void>;
   onDownloadRequest(rssItemId: number, ctx: PluginContext): Promise<void>;
+
+  /**
+   * Asked, inside the host's `reassignRelease` savepoint, to delete this
+   * plugin's own rows for a media item the host is about to drop because
+   * its last release moved elsewhere. Required because a plugin's tables
+   * (`tv_release`, `movie_detail`, `xxx_scene`) reference `media_item` with
+   * foreign keys and no cascade: the host cannot delete the item until they
+   * are gone, and only the plugin knows which tables hold them.
+   *
+   * After this resolves the host deletes the item's roles and then the item
+   * itself, writing its tombstone. The item still exists while this runs.
+   * A throw rolls the whole move back, so the release is never left pointing
+   * somewhere while its old item is half-deleted.
+   */
+  onMediaItemDropped(mediaItemId: number, ctx: PluginContext): Promise<void>;
+
+  /**
+   * Asked to look a release up again, optionally under a corrected name
+   * (`hint`) in place of its filename. Required because only the plugin
+   * knows how its lookup is queued and which of its tables record it.
+   *
+   * May be asked about a release that is already matched, and must never
+   * unlink it: a matched release stays linked until a resolved answer moves
+   * it through `MediaWriter.reassignRelease`.
+   */
+  onLookupRequest(rssItemId: number, hint: { name: string } | undefined, ctx: PluginContext): Promise<void>;
 }

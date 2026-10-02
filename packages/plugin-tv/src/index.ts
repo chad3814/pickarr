@@ -1,7 +1,7 @@
 import type { MediaPlugin } from '@pickarr/contract';
 import type { LookupPluginDeps } from '@pickarr/openmetadata';
 import { createLookupPlugin } from '@pickarr/openmetadata';
-import { applyTv, checkTv } from './apply.ts';
+import { applyTv, checkTv, dropTvRows } from './apply.ts';
 import { expectsTv } from './expects.ts';
 import { TV_MIGRATIONS } from './migrations.ts';
 import { TV_SYNCED } from './sync.ts';
@@ -24,6 +24,7 @@ export function createTvPlugin(deps: LookupPluginDeps): MediaPlugin {
     category: 'tv',
     migrations: TV_MIGRATIONS,
     check: checkTv,
+    dropRows: dropTvRows,
     apply: applyTv,
     synced: TV_SYNCED,
     tokens: TV_TOKENS,
@@ -31,7 +32,7 @@ export function createTvPlugin(deps: LookupPluginDeps): MediaPlugin {
   }, deps);
 }
 
-export { applyTv, checkTv } from './apply.ts';
+export { applyTv, checkTv, dropTvRows } from './apply.ts';
 export { expectsTv } from './expects.ts';
 export { TV_MIGRATIONS } from './migrations.ts';
 export { TV_SYNCED } from './sync.ts';

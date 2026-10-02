@@ -1,0 +1,101 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { DatabaseSync } from 'node:sqlite';
+import type { ArtworkStore } from '../../src/artwork/store.ts';
+import { openTestDatabase } from '../../src/db/open.ts';
+import { migrateHost } from '../../src/db/migrate.ts';
+import { createMediaWriter } from '../../src/media/writer.ts';
+import { reassignRelease, type ReassignDeps } from '../../src/media/reassign.ts';
+import { insertFeed } from './support.ts';
+
+const NOW = 1_700_000_000_000;
+
+/** No test here attaches artwork, so a drop never has a file to remove. */
+const unusedArtwork: ArtworkStore = {
+  put: async () => { throw new Error('artwork.put: not used by this test'); },
+  putPerson: async () => { throw new Error('artwork.putPerson: not used by this test'); },
+  remove: async () => { throw new Error('artwork.remove: not used by this test'); },
+};
+
+function seedItem(raw: DatabaseSync, id: number, pluginId = 'tv'): void {
+  raw.prepare('INSERT INTO media_item (id, plugin_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, pluginId, `Title ${String(id)}`, 1, 1);
+}
+function seedRelease(raw: DatabaseSync, id: number, feedId: number, mediaItemId: number | null): void {
+  raw.prepare(`INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, media_item_id, lookup_state, lookup_json)
+    VALUES (?, ?, ?, '', 1, 1, 'torrent', ?, 'unresolved', '{"old":"answer"}')`).run(id, feedId, `f${String(id)}.mkv`, mediaItemId);
+}
+function seedRole(raw: DatabaseSync, mediaItemId: number): void {
+  raw.prepare("INSERT INTO person (id, name, provider_ref, created_at, updated_at) VALUES (1, 'Someone', 'p1', 1, 1) ON CONFLICT DO NOTHING").run();
+  raw.prepare("INSERT INTO role (media_item_id, person_id, role, created_at) VALUES (?, 1, 'actor', 1)").run(mediaItemId);
+}
+function item(raw: DatabaseSync, id: number): Record<string, unknown> | undefined {
+  return raw.prepare('SELECT * FROM media_item WHERE id = ?').get(id);
+}
+function release(raw: DatabaseSync, id: number): Record<string, unknown> | undefined {
+  return raw.prepare('SELECT * FROM rss_item WHERE id = ?').get(id);
+}
+
+function fixture(dropRows: ReassignDeps['dropRows'] = async () => {}) {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const writer = createMediaWriter(db, () => NOW, unusedArtwork, { dropRows });
+  const deps: ReassignDeps = { raw, relink: writer.relinkRssItem, drop: writer.dropMediaItem, now: () => NOW, dropRows };
+  const feedId = insertFeed(raw, 'http://feed.invalid/a');
+  return { raw, deps, feedId, writer };
+}
+
+test('moving a release relinks it, marks it resolved, clears its stored answer, and bumps the target', async () => {
+  const { raw, deps, feedId } = fixture();
+  seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1); seedRelease(raw, 11, feedId, 1);
+  await reassignRelease(deps, 10, 2);
+  const moved = release(raw, 10);
+  assert.equal(moved?.['media_item_id'], 2);
+  assert.equal(moved?.['lookup_state'], 'resolved');
+  assert.equal(moved?.['lookup_state_detail'], null);
+  assert.equal(moved?.['lookup_json'], null);
+  assert.equal(item(raw, 2)?.['updated_at'], NOW, 'the target is bumped so its card re-gathers');
+  assert.ok(item(raw, 1), 'the previous item still has release 11 and stays');
+  assert.equal(item(raw, 1)?.['updated_at'], NOW, 'and is bumped so its card re-gathers without release 10');
+});
+
+test('an orphaned previous item is dropped: plugin rows first, then roles, then the item with a tombstone', async () => {
+  const order: string[] = [];
+  const { raw, deps, feedId } = fixture(async (pluginId, id) => {
+    order.push(`dropRows:${pluginId}:${String(id)}`);
+    assert.ok(item(raw, id), 'the item still exists when the plugin is asked, so its FK rows can be found');
+  });
+  seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1); seedRole(raw, 1);
+  await reassignRelease(deps, 10, 2);
+  assert.deepEqual(order, ['dropRows:tv:1']);
+  assert.equal(item(raw, 1), undefined);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM role WHERE media_item_id = 1').get()?.['n'], 0);
+  assert.equal(raw.prepare('SELECT media_item_id FROM deleted_media_item WHERE media_item_id = 1').get()?.['media_item_id'], 1);
+});
+
+test('a throwing plugin hook rolls the whole move back, relink included', async () => {
+  const { raw, deps, feedId } = fixture(async () => { throw new Error('plugin refused'); });
+  seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1);
+  await assert.rejects(reassignRelease(deps, 10, 2), /plugin refused/);
+  assert.equal(release(raw, 10)?.['media_item_id'], 1);
+  assert.equal(release(raw, 10)?.['lookup_json'], '{"old":"answer"}');
+  assert.ok(item(raw, 1));
+});
+
+test('a release with no previous item is linked and nothing is dropped; the same item twice is a bump', async () => {
+  const calls: number[] = [];
+  const { raw, deps, feedId } = fixture(async (_p, id) => { calls.push(id); });
+  seedItem(raw, 2); seedRelease(raw, 10, feedId, null);
+  await reassignRelease(deps, 10, 2);
+  assert.equal(release(raw, 10)?.['media_item_id'], 2);
+  await reassignRelease(deps, 10, 2);
+  assert.deepEqual(calls, []);
+  assert.ok(item(raw, 2));
+});
+
+test('the writer exposes reassignRelease and it reaches the same rule', async () => {
+  const { raw, feedId, writer } = fixture();
+  seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1);
+  await writer.reassignRelease(10, 2);
+  assert.equal(release(raw, 10)?.['media_item_id'], 2);
+  assert.equal(item(raw, 1), undefined, 'orphan dropped through the writer path too');
+});

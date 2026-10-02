@@ -52,6 +52,8 @@ function makePlugin(id: string): MediaPlugin {
     onNewRssItems: unusedEntryPoint('onNewRssItems'),
     onDownloadedFile: unusedEntryPoint('onDownloadedFile'),
     onDownloadRequest: unusedEntryPoint('onDownloadRequest'),
+    onMediaItemDropped: unusedEntryPoint('onMediaItemDropped'),
+    onLookupRequest: unusedEntryPoint('onLookupRequest'),
   };
 }
 

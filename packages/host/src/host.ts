@@ -528,8 +528,8 @@ export function createHost(deps: {
   let started = false;
 
   // One instance shared by every plugin, because `MediaWriter` is
-  // plugin-agnostic: ten of its eleven methods take no plugin id at all, and
-  // the eleventh — `createMediaItem`, through `MediaItemInit.pluginId` —
+  // plugin-agnostic: thirteen of its fourteen methods take no plugin id at all, and
+  // the fourteenth — `createMediaItem`, through `MediaItemInit.pluginId` —
   // stores the id it is handed without checking it against the plugin doing
   // the writing. So there is nothing per-plugin here to close over, and equally
   // nothing that stops `ctx.media.setLookupState(anyRssItemId, …)` or
@@ -538,7 +538,13 @@ export function createHost(deps: {
   // keeps a plugin on its own side of them is convention and explicit
   // wiring, not enforcement.
   const artwork = createArtworkStore(deps.artworkDir, hostLog);
-  const media = createMediaWriter(deps.db, deps.now, artwork);
+  const media = createMediaWriter(deps.db, deps.now, artwork, {
+    dropRows: async (pluginId, mediaItemId) => {
+      const plugin = plugins.get(pluginId);
+      if (plugin === undefined) throw new PluginNotRegisteredError(pluginId);
+      await plugin.onMediaItemDropped(mediaItemId, ctxFor(pluginId));
+    },
+  });
 
   function ctxFor(pluginId: string): PluginContext {
     return {

@@ -6,6 +6,7 @@
  * upsert keyed on the media item, so a retried job re-writes rather than
  * duplicating.
  */
+import type { DatabaseSync } from 'node:sqlite';
 import type { DetailValue, Media } from '@pickarr/openmetadata';
 import type { ApplyArgs } from '@pickarr/openmetadata';
 
@@ -75,4 +76,9 @@ export async function applyMovie(args: ApplyArgs): Promise<void> {
     now,
     now,
   );
+}
+
+/** Deletes the film row for a media item the host is dropping (`MediaPlugin.onMediaItemDropped`). */
+export function dropMovieRows(mediaItemId: number, raw: DatabaseSync): void {
+  raw.prepare('DELETE FROM movie_detail WHERE media_item_id = ?').run(mediaItemId);
 }

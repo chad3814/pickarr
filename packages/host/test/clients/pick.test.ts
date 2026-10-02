@@ -125,6 +125,8 @@ function pickingPlugin(id: string): MediaPlugin {
     onDownloadRequest: async (rssItemId, ctx) => {
       await ctx.downloads.submit({ rssItemId });
     },
+    onMediaItemDropped: unusedEntryPoint('onMediaItemDropped'),
+    onLookupRequest: unusedEntryPoint('onLookupRequest'),
   };
 }
 

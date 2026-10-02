@@ -838,6 +838,7 @@ function fakeContext(jobs: JobQueue): PluginContext {
       updateMediaItem: unusedMediaCall('updateMediaItem'),
       claimProviderRef: unusedMediaCall('claimProviderRef'),
       relinkRssItem: unusedMediaCall('relinkRssItem'),
+      reassignRelease: unusedMediaCall('reassignRelease'),
       dropMediaItem: unusedMediaCall('dropMediaItem'),
       attachPoster: unusedMediaCall('attachPoster'),
       attachBackground: unusedMediaCall('attachBackground'),

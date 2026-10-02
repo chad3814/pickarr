@@ -88,7 +88,7 @@ export interface ProviderClaim {
  * **Nothing here is scoped to the calling plugin -- do not infer symmetry
  * with `MediaReader`.** Unlike the reader, which the host builds once *per
  * plugin* around that plugin's id, there is one writer shared by every
- * plugin context and it closes over no plugin id at all: ten of its eleven
+ * plugin context and it closes over no plugin id at all: thirteen of its fourteen
  * methods are handed none, and `createMediaItem` stores the `pluginId` in
  * `MediaItemInit` without checking it against the plugin doing the writing.
  * So every method acts on the bare row id it is given, whoever wrote that
@@ -149,6 +149,21 @@ export interface MediaWriter {
    * to.
    */
   relinkRssItem(rssItemId: number, mediaItemId: number | null): Promise<void>;
+
+  /**
+   * Relink, then drop the previous item if nothing else points at it; the
+   * host's one move primitive, which the engine's resolved path uses instead
+   * of `relinkRssItem` so a re-lookup of a matched release cleans up after
+   * itself.
+   *
+   * One savepoint covers the whole move: the release is marked `resolved`
+   * with its stored answer cleared, both items are bumped so their cards
+   * re-gather, and an orphaned previous item has its plugin rows
+   * (`MediaPlugin.onMediaItemDropped`), roles and row removed. A throw
+   * anywhere rolls all of it back. A null or identical previous link is a
+   * relink plus a bump, with no drop. Throws if `rssItemId` does not exist.
+   */
+  reassignRelease(rssItemId: number, mediaItemId: number): Promise<void>;
 
   /** Deletes a media item that lost a provider-ref claim. */
   dropMediaItem(mediaItemId: number): Promise<void>;

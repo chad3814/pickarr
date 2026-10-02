@@ -285,6 +285,10 @@ export function createRecordingMedia(): RecordingMedia {
       record('relinkRssItem', rssItemId, mediaItemId);
       links.set(rssItemId, mediaItemId);
     },
+    async reassignRelease(rssItemId: number, mediaItemId: number): Promise<void> {
+      record('reassignRelease', rssItemId, mediaItemId);
+      links.set(rssItemId, mediaItemId);
+    },
     async dropMediaItem(mediaItemId: number): Promise<void> {
       record('dropMediaItem', mediaItemId);
       items.delete(mediaItemId);
@@ -424,7 +428,7 @@ export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number 
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = OFF');
   raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER)');
-  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT)");
+  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, media_item_id INTEGER, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT)");
   raw.exec('CREATE TABLE media_item (id INTEGER PRIMARY KEY)');
   raw.exec(`CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL,

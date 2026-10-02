@@ -1,7 +1,7 @@
 import type { MediaPlugin } from '@pickarr/contract';
 import type { LookupPluginDeps } from '@pickarr/openmetadata';
 import { createLookupPlugin } from '@pickarr/openmetadata';
-import { applyMovie, checkMovie } from './apply.ts';
+import { applyMovie, checkMovie, dropMovieRows } from './apply.ts';
 import { MOVIE_MIGRATIONS } from './migrations.ts';
 import { MOVIE_SYNCED } from './sync.ts';
 import { MOVIE_TOKENS } from './tokens.ts';
@@ -23,6 +23,7 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
     category: 'movies',
     migrations: MOVIE_MIGRATIONS,
     check: checkMovie,
+    dropRows: dropMovieRows,
     apply: applyMovie,
     synced: MOVIE_SYNCED,
     tokens: MOVIE_TOKENS,
@@ -31,7 +32,7 @@ export function createMoviePlugin(deps: LookupPluginDeps): MediaPlugin {
   }, deps);
 }
 
-export { applyMovie, checkMovie } from './apply.ts';
+export { applyMovie, checkMovie, dropMovieRows } from './apply.ts';
 export { MOVIE_MIGRATIONS } from './migrations.ts';
 export { MOVIE_SYNCED } from './sync.ts';
 export { MOVIE_TOKENS } from './tokens.ts';

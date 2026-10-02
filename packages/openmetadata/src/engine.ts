@@ -195,7 +195,11 @@ async function applyResolved(
     // nothing dangling.
     await ctx.media.dropMediaItem(claim.dropped);
   }
-  await ctx.media.relinkRssItem(target.rssItemId, claim.kept);
+  // The move primitive, not a bare relink: it relinks and, when this release
+  // was the last one on a different media item, drops that item and its
+  // plugin rows too. For a first link (no previous item) it is a relink
+  // plus a bump, so no branch is needed here.
+  await ctx.media.reassignRelease(target.rssItemId, claim.kept);
 
   await deps.db.update(deps.table)
     .set({
@@ -214,7 +218,7 @@ async function applyResolved(
   await deps.apply({ media, mediaItemId: claim.kept, raw: deps.raw, ctx, now: deps.now });
   const people = await attachPeople(media, claim.kept, ctx);
   // `null` for the answer, and by the time this runs there is nothing left
-  // to clear: `relinkRssItem` above already cleared `lookup_json` in the
+  // to clear: `reassignRelease` above (through `relinkRssItem`) already cleared `lookup_json` in the
   // same statement that set `media_item_id`, because a stored answer is
   // only reachable while a release is unmatched. Passing `null` anyway is
   // not ceremony -- `setLookupState`'s fourth argument is required exactly
@@ -417,6 +421,15 @@ export interface LookupPluginSpec {
    * comment.
    */
   check(media: Media): void;
+  /**
+   * Deletes this plugin's own rows for `mediaItemId`. The host calls it
+   * (through `MediaPlugin.onMediaItemDropped`) just before it deletes a media
+   * item whose last release moved elsewhere. Needed because plugin tables
+   * reference `media_item` with foreign keys and no cascade, so the item
+   * cannot be deleted while they remain. Rows shared across items (a tv
+   * series, a site) stay. Synchronous and idempotent.
+   */
+  dropRows(mediaItemId: number, raw: DatabaseSync): void;
   /** The plugin's own rows for one resolved answer. Must be idempotent. */
   apply(args: ApplyArgs): Promise<void>;
   /**
@@ -541,16 +554,34 @@ function readRssItems(raw: DatabaseSync, ids: readonly number[]): { id: number; 
   });
 }
 
-function readLookupPayload(payload: unknown): number[] {
+function readLookupPayload(payload: unknown): { ids: number[]; names: ReadonlyMap<number, string> } {
   if (typeof payload !== 'object' || payload === null || !('rssItemIds' in payload)) {
     throw new TypeError('openmetadata: a lookup payload must carry rssItemIds');
   }
-  const ids: unknown = payload.rssItemIds;
-  if (!Array.isArray(ids)) throw new TypeError('openmetadata: rssItemIds is not an array');
-  return ids.map((id: unknown) => {
+  const rawIds: unknown = payload.rssItemIds;
+  if (!Array.isArray(rawIds)) throw new TypeError('openmetadata: rssItemIds is not an array');
+  const ids = rawIds.map((id: unknown) => {
     if (typeof id !== 'number') throw new TypeError('openmetadata: rssItemIds holds a non-number');
     return id;
   });
+  return { ids, names: readNames('names' in payload ? payload.names : undefined) };
+}
+
+/** `names` maps rss item ids (as strings) to the corrected name to look up in place of the filename. */
+function readNames(value: unknown): ReadonlyMap<number, string> {
+  const names = new Map<number, string>();
+  if (value === undefined) return names;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('openmetadata: names must map rss item ids to strings');
+  }
+  for (const [key, name] of Object.entries(value)) {
+    const id = Number(key);
+    if (!Number.isInteger(id) || typeof name !== 'string') {
+      throw new TypeError('openmetadata: names must map rss item ids to strings');
+    }
+    names.set(id, name);
+  }
+  return names;
 }
 
 function readPollPayload(payload: unknown): { lookupId: string; rssItemId: number; polls: number } {
@@ -715,9 +746,12 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
 
   const lookup: JobHandler = async (job, ctx, signal) => {
     const { raw, db } = ownTables(ctx);
-    const items = readRssItems(raw, readLookupPayload(job.payload));
-    const answers = await logged(ctx, deps.baseUrl, () =>
-      clientFor(ctx, signal).batch(spec.category, items.map((item) => item.filename)));
+    const { ids, names } = readLookupPayload(job.payload);
+    const items = readRssItems(raw, ids);
+    // A corrected name replaces the filename only in what is asked of the
+    // service; the target below keeps the real filename for logs.
+    const posted = items.map((item) => names.get(item.id) ?? item.filename);
+    const answers = await logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).batch(spec.category, posted));
 
     for (const [index, item] of items.entries()) {
       const envelope = answers[index];
@@ -884,6 +918,38 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
         alreadyPlaced,
         placed,
       });
+    },
+
+    async onMediaItemDropped(mediaItemId, ctx) {
+      spec.dropRows(mediaItemId, asDatabase(ctx.db));
+    },
+
+    /**
+     * A lookup never unlinks: a release that is already matched stays linked
+     * to its item until a resolved answer moves it through
+     * `MediaWriter.reassignRelease`. The lookup row is upserted with
+     * do-nothing so a release that never had one gets one and one that did
+     * keeps its history.
+     */
+    async onLookupRequest(rssItemId, hint, ctx) {
+      const { db } = ownTables(ctx);
+      const at = deps.now();
+      await ctx.media.setLookupState(rssItemId, 'pending', null, null);
+      await db.insert(table).values([{
+        rssItemId,
+        mediaItemId: null,
+        lookupJobId: null,
+        lookupId: null,
+        providerRef: null,
+        confidence: null,
+        createdAt: at,
+        updatedAt: at,
+      }]).onConflictDoNothing();
+      const payload = hint === undefined
+        ? { rssItemIds: [rssItemId] }
+        : { rssItemIds: [rssItemId], names: { [String(rssItemId)]: hint.name } };
+      const jobId = await ctx.jobs.enqueue({ kind: LOOKUP_JOB, payload });
+      await db.update(table).set({ lookupJobId: jobId, updatedAt: at }).where(eq(table.rssItemId, rssItemId));
     },
 
     async onDownloadRequest(rssItemId, ctx) {

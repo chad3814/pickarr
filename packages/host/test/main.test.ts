@@ -137,6 +137,8 @@ const ownerPlugin: MediaPlugin = {
   onNewRssItems: async () => { throw new Error('onNewRssItems: not used by this test'); },
   onDownloadedFile: async () => { throw new Error('onDownloadedFile: not used by this test'); },
   onDownloadRequest: async () => { throw new Error('onDownloadRequest: not used by this test'); },
+  onMediaItemDropped: async () => { throw new Error('onMediaItemDropped: not used by this test'); },
+  onLookupRequest: async () => { throw new Error('onLookupRequest: not used by this test'); },
 };
 
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */

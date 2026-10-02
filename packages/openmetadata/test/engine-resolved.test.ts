@@ -189,7 +189,7 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   const methods = harness.media.calls.map((call) => call.method);
   assert.deepEqual(
     methods.slice(1, 5),
-    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'relinkRssItem'],
+    ['createMediaItem', 'claimProviderRef', 'dropMediaItem', 'reassignRelease'],
   );
   assert.equal(harness.media.items.has(1), false, 'the row that lost is gone');
   assert.deepEqual(harness.media.calls[4]?.args, [rssItemId, 99]);
@@ -197,9 +197,27 @@ test('a lost claim drops our row, links the winner, and applies against it', asy
   assert.equal(stateRow(harness)?.['media_item_id'], 99);
 });
 
+test('a resolved answer for a release already linked elsewhere moves it through reassignRelease', async () => {
+  const { harness, deps, rssItemId } = fixture();
+  harness.raw.prepare('UPDATE rss_item SET media_item_id = 77 WHERE id = ?').run(rssItemId);
+
+  await applyEnvelope(
+    resolvedEnvelope({ lookupId: 'lookup-8', media: movieMedia() }),
+    { rssItemId, filename: 'dune.mkv', polls: 0 },
+    deps,
+  );
+
+  const moves = harness.media.calls.filter((call) => call.method === 'reassignRelease');
+  assert.deepEqual(moves.map((call) => call.args), [[rssItemId, 1]]);
+  assert.ok(
+    !harness.media.calls.some((call) => call.method === 'relinkRssItem'),
+    'the engine never relinks directly, so the host\'s cleanup cannot be skipped',
+  );
+});
+
 test('the release is linked before the plugin applies, so a throwing apply strands no answer', async () => {
   // **The call-site half of a two-part guarantee, and the half nothing
-  // pinned.** `MediaWriter.relinkRssItem` clears `lookup_json` in the same
+  // pinned.** `MediaWriter.relinkRssItem` (which `reassignRelease` calls) clears `lookup_json` in the same
   // statement that sets `media_item_id`, because a stored lookup answer is
   // only reachable while a release is unmatched. That fix is worth nothing
   // unless the link really does happen before the steps that can fail:
@@ -228,7 +246,7 @@ test('the release is linked before the plugin applies, so a throwing apply stran
   );
 
   const methods = harness.media.calls.map((call) => call.method);
-  assert.ok(methods.includes('relinkRssItem'), 'the link happened before the plugin could fail');
+  assert.ok(methods.includes('reassignRelease'), 'the link happened before the plugin could fail');
   assert.ok(
     !methods.includes('setLookupState'),
     'and the lookup state did not -- which is exactly why the clear cannot be left to it',

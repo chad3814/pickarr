@@ -18,6 +18,8 @@ function fakePlugin(id: string, synced: readonly SyncedTable<unknown>[]): MediaP
     onNewRssItems: async () => {},
     onDownloadedFile: async () => {},
     onDownloadRequest: async () => {},
+    onMediaItemDropped: async () => {},
+    onLookupRequest: async () => {},
   };
 }
 
