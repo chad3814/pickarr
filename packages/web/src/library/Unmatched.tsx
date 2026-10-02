@@ -95,7 +95,8 @@
  * composes, so `styles/library.css`'s `article`, `article h2 button` and
  * `article h2 button small` rules reach this screen with nothing added for
  * it. The trailing label is the feed's name, resolved through
- * {@link useFeedNames}; the body -- behind the same disclosure a browse
+ * {@link useFeedNames}, which also names the feed's plugin so the Actions
+ * pair's Edit form can search that plugin's titles; the body -- behind the same disclosure a browse
  * card uses -- is why the lookup did not match and what the service
  * actually answered, both of which the host has been sending and nothing
  * has been showing.
@@ -103,10 +104,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { RETRY_REFUSAL_MESSAGES, type RetrySubmit } from './postRetry.ts';
-import { CardHeading, useExpansion } from '@pickarr/plugin-ui';
+import { CardHeading, IdentifyForm, useExpansion, type IdentifySubmit } from '@pickarr/plugin-ui';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
-import { useFeedNames } from './useFeedNames.ts';
+import { useFeedNames, type FeedIdentity } from './useFeedNames.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
 
 /**
@@ -139,6 +140,12 @@ export interface UnmatchedProps {
    * which hangs rather than failing, with nothing pointing at the cause.
    */
   retry: RetrySubmit;
+  /**
+   * The seam the Edit form identifies a release through, handed to
+   * `IdentifyForm` and never called here. Required for the same reason
+   * `retry` is.
+   */
+  identify: IdentifySubmit;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -453,10 +460,8 @@ function makeRefresh(
  * what it is given, and the map's job is to say what the replica holds,
  * which for a feed named `''` is `''`.
  */
-function feedLabel(feedNames: ReadonlyMap<number, string>, feedId: number | undefined): string | undefined {
-  if (feedId === undefined) return undefined;
-  const name = feedNames.get(feedId);
-  return name === undefined || name === '' ? undefined : name;
+function feedLabel(feed: FeedIdentity | undefined): string | undefined {
+  return feed === undefined || feed.name === '' ? undefined : feed.name;
 }
 
 /**
@@ -578,7 +583,23 @@ function RetryButton({ row, submit }: { row: UnmatchedRow; submit: RetrySubmit }
   );
 }
 
-function UnmatchedDetail({ row, submit }: { row: UnmatchedRow; submit: RetrySubmit }): ReactElement {
+function UnmatchedDetail(
+  { row, feed, submit, identify }: {
+    row: UnmatchedRow;
+    feed: FeedIdentity | undefined;
+    submit: RetrySubmit;
+    identify: IdentifySubmit;
+  },
+): ReactElement {
+  // Whether the Edit form is open in place of the Retry and Edit buttons.
+  const [editing, setEditing] = useState(false);
+  // The `updatedAt` this release had when Edit was saved, or `undefined`
+  // when it has not been. Edit stays disabled while the row still has that
+  // `updatedAt`: the host accepted a lookup (or relinked) and the row has
+  // not moved yet, the same wait `RetryButton` holds for its own click.
+  const [awaitingSince, setAwaitingSince] = useState<number | undefined>(undefined);
+  const awaiting = awaitingSince !== undefined && row.updatedAt === awaitingSince;
+
   return (
     <dl>
       {/*
@@ -634,7 +655,42 @@ function UnmatchedDetail({ row, submit }: { row: UnmatchedRow; submit: RetrySubm
         simply repeat the button.
       */}
       <dt>Actions</dt>
-      <dd><RetryButton row={row} submit={submit} /></dd>
+      <dd>
+        {editing && feed !== undefined ? (
+          <IdentifyForm
+            pluginId={feed.pluginId}
+            rssItemId={row.id}
+            identify={identify}
+            onDone={() => {
+              setAwaitingSince(row.updatedAt);
+              setEditing(false);
+            }}
+            onCancel={() => {
+              setEditing(false);
+            }}
+          />
+        ) : (
+          <>
+            <RetryButton row={row} submit={submit} />
+            {/*
+              Only once the feed row is known: the form searches the titles
+              of the *feed's* plugin, and a release can land before the feed
+              that produced it replicates (see {@link feedLabel}).
+            */}
+            {feed !== undefined && (
+              <button
+                type="button"
+                disabled={awaiting}
+                onClick={() => {
+                  setEditing(true);
+                }}
+              >
+                Edit
+              </button>
+            )}
+          </>
+        )}
+      </dd>
     </dl>
   );
 }
@@ -654,8 +710,14 @@ function UnmatchedDetail({ row, submit }: { row: UnmatchedRow; submit: RetrySubm
  * `<small>` at all only for the absent one.
  */
 function UnmatchedCard(
-  { row, feedName, submit }: { row: UnmatchedRow; feedName: string | undefined; submit: RetrySubmit },
+  { row, feed, submit, identify }: {
+    row: UnmatchedRow;
+    feed: FeedIdentity | undefined;
+    submit: RetrySubmit;
+    identify: IdentifySubmit;
+  },
 ): ReactElement {
+  const feedName = feedLabel(feed);
   const { expanded, toggle } = useExpansion(REPORTS_NOTHING);
 
   return (
@@ -666,12 +728,12 @@ function UnmatchedCard(
         expanded={expanded}
         onToggle={toggle}
       />
-      {expanded && <UnmatchedDetail row={row} submit={submit} />}
+      {expanded && <UnmatchedDetail row={row} feed={feed} submit={submit} identify={identify} />}
     </article>
   );
 }
 
-export function Unmatched({ source, retry }: UnmatchedProps): ReactElement {
+export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
@@ -837,9 +899,10 @@ export function Unmatched({ source, retry }: UnmatchedProps): ReactElement {
             {rows.map((row) => (
               <UnmatchedCard
                 submit={retry}
+                identify={identify}
                 key={row.id}
                 row={row}
-                feedName={feedLabel(feedNames, row.feedId)}
+                feed={row.feedId === undefined ? undefined : feedNames.get(row.feedId)}
               />
             ))}
             {/*

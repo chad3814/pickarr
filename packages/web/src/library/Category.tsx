@@ -47,6 +47,7 @@ import { MediaItemCard } from './MediaItemCard.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from './usePluginRows.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
+import type { IdentifySubmit } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
 /** Everything this screen needs from a store: `useMediaItems`'s two members, `useCatalogItems`' three (`getRows` is shared with `MediaItemCard`'s), `MediaItemCard`'s own four (through `useGatheredItem`), and `usePluginRows`' one -- `subscribeInserts` is shared by two of the three. A real `Store` satisfies this by structural assignment. */
@@ -67,6 +68,14 @@ export interface CategoryProps {
   tables: readonly string[];
   /** Submits one pick, forwarded to each card's `ReleaseList` and never called here. A prop rather than a member of `CategorySource`: a store is the replica, and posting to `/api/picks` is not something a replica does. */
   submit: PickSubmit;
+  /**
+   * Identifies a release (Requery and Edit), forwarded to each card and
+   * never called here, for the reason `submit` is a prop. `undefined`
+   * exactly when `store` is: the shell builds it from the store, so the two
+   * arrive together, and neither is needed for the marker and controls this
+   * renders before then.
+   */
+  identify: IdentifySubmit | undefined;
 }
 
 /** The sentence a filtered or searched list shows when it resolves to nothing. */
@@ -78,7 +87,7 @@ export function emptySentence(query: BrowseQuery): string {
   return `Nothing matches "${query.q}"${among}`;
 }
 
-export function Category({ store, pluginId, tables, submit }: CategoryProps): ReactElement {
+export function Category({ store, pluginId, tables, submit, identify }: CategoryProps): ReactElement {
   const { query, controls } = useBrowseQuery();
   return (
     <section data-testid={`category-${pluginId}`}>
@@ -88,8 +97,8 @@ export function Category({ store, pluginId, tables, submit }: CategoryProps): Re
         onFilter={controls.setFilter}
         onInput={controls.setInput}
       />
-      {store === undefined ? null : query.filter === 'all' && query.term === '' ? (
-        <DefaultList store={store} pluginId={pluginId} tables={tables} submit={submit} />
+      {store === undefined || identify === undefined ? null : query.filter === 'all' && query.term === '' ? (
+        <DefaultList store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} />
       ) : (
         <FilteredList
           key={`${query.filter}|${query.term}`}
@@ -97,6 +106,7 @@ export function Category({ store, pluginId, tables, submit }: CategoryProps): Re
           pluginId={pluginId}
           tables={tables}
           submit={submit}
+          identify={identify}
           query={query}
         />
       )}
@@ -109,29 +119,31 @@ interface ListProps {
   pluginId: string;
   tables: readonly string[];
   submit: PickSubmit;
+  identify: IdentifySubmit;
 }
 
 /** The unfiltered view: pages the `rows` store directly, with no catalog read. */
-function DefaultList({ store, pluginId, tables, submit }: ListProps): ReactElement | null {
+function DefaultList({ store, pluginId, tables, submit, identify }: ListProps): ReactElement | null {
   const result = useMediaItems(store, pluginId);
-  return <ItemList store={store} tables={tables} submit={submit} result={result} emptyMessage="Nothing here yet." />;
+  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={result} emptyMessage="Nothing here yet." />;
 }
 
 /** A picked filter and/or a search term: pages the derived `catalog` store. */
-function FilteredList({ store, pluginId, tables, submit, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
+function FilteredList({ store, pluginId, tables, submit, identify, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
   const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
-  return <ItemList store={store} tables={tables} submit={submit} result={result} emptyMessage={emptySentence(query)} />;
+  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={result} emptyMessage={emptySentence(query)} />;
 }
 
 interface ItemListProps {
   store: CategorySource;
   tables: readonly string[];
   submit: PickSubmit;
+  identify: IdentifySubmit;
   result: MediaItemsResult;
   emptyMessage: string;
 }
 
-function ItemList({ store, tables, submit, result, emptyMessage }: ItemListProps): ReactElement | null {
+function ItemList({ store, tables, submit, identify, result, emptyMessage }: ItemListProps): ReactElement | null {
   const { items, loadMore, done, empty } = result;
 
   // Stable across renders unless `items` itself changes (the
@@ -178,6 +190,7 @@ function ItemList({ store, tables, submit, result, emptyMessage }: ItemListProps
           item={item}
           rows={pluginRows.get(item.id) ?? emptyRows}
           submit={submit}
+          identify={identify}
         />
       ))}
       {!done && (

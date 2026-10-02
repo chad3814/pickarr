@@ -51,7 +51,7 @@
  * placeholders this file carried while those screens were being built are
  * gone.
  */
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
 import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts';
 import { realFetch, idleScheduler, realEventStream } from '../store/adapters.ts';
@@ -59,6 +59,7 @@ import { webLocksLease, type SyncFetch } from '../store/sync.ts';
 import { signOut, isUnauthenticated } from '../auth/session.ts';
 import { subscribeSessionExpired } from '../auth/sessionExpired.ts';
 import { Unmatched } from '../library/Unmatched.tsx';
+import { identifySubmit } from '../library/suggestCandidates.ts';
 import { postRetry } from '../library/postRetry.ts';
 import { useCounts, type Counts } from './useCounts.ts';
 import { Category as CategoryScreen } from '../library/Category.tsx';
@@ -218,6 +219,12 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
 
   const counts = useCounts(store);
 
+  // Built once per store and handed to both screens that identify a release.
+  // `undefined` exactly while `store` is. `Category` takes it as it takes
+  // `store` (it renders its marker and controls without either); `Unmatched`
+  // renders nothing until both exist.
+  const identify = useMemo(() => (store === undefined ? undefined : identifySubmit(store)), [store]);
+
   function handleSignOut(): void {
     store?.stop();
     signOut().catch(() => {
@@ -281,7 +288,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
             key={plugin.id}
             path={plugin.id}
             element={
-              <CategoryScreen store={store} pluginId={plugin.id} tables={plugin.tables} submit={postPick} />
+              <CategoryScreen store={store} pluginId={plugin.id} tables={plugin.tables} submit={postPick} identify={identify} />
             }
           />
         ))}
@@ -295,7 +302,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           renders Unmatched, not a category" now asserts this route's rendered
           content through `Unmatched`'s own `data-testid`.
         */}
-        <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} retry={postRetry} />} />
+        <Route path="unmatched" element={store === undefined || identify === undefined ? null : <Unmatched source={store} retry={postRetry} identify={identify} />} />
         {/*
           `fetchActivity` is the page's one real network call, wired here like
           the settings screen's submits below. A 401 on it is `sendJson`'s

@@ -57,17 +57,6 @@ import { useGatheredItem, type GatheredSource } from './useGatheredItem.ts';
 import { pluginFor } from '../plugins/registry.ts';
 import type { PickSubmit } from './postPick.ts';
 
-/**
- * What a card's Requery and Edit call until the shell supplies a real
- * `IdentifySubmit`. Both reject, so a click lands on `ReleaseList`'s
- * "could not reach Pickarr" sentence rather than doing nothing; nothing here
- * posts.
- */
-const unwiredIdentify: IdentifySubmit = {
-  identify: () => Promise.reject(new Error('identify is not wired into this card yet')),
-  suggest: () => Promise.reject(new Error('identify is not wired into this card yet')),
-};
-
 export interface MediaItemCardProps {
   source: GatheredSource;
   item: MediaItemSyncRead;
@@ -89,9 +78,15 @@ export interface MediaItemCardProps {
    * that forgets it gets a real `fetch` under jsdom.
    */
   submit: PickSubmit;
+  /**
+   * The seam the plugin's card identifies a release through (Requery and
+   * Edit), handed to it and never called here. Required for the reason
+   * `submit` is.
+   */
+  identify: IdentifySubmit;
 }
 
-export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps): ReactElement {
+export function MediaItemCard({ source, item, rows, submit, identify }: MediaItemCardProps): ReactElement {
   /**
    * The plugin card's own expanded state, mirrored here because that is
    * what decides whether to gather. The plugin owns the state and reports
@@ -161,7 +156,7 @@ export function MediaItemCard({ source, item, rows, submit }: MediaItemCardProps
       {plugin === undefined ? (
         <h2>{item.title}</h2>
       ) : (
-        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} identify={unwiredIdentify} />
+        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} identify={identify} />
       )}
     </article>
   );

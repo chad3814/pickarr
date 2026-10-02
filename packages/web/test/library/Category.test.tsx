@@ -15,6 +15,7 @@ import { MemoryRouter } from 'react-router';
 import type { ReactElement } from 'react';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
 import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
+import type { IdentifySubmit } from '@pickarr/plugin-ui';
 import type { PickSubmit } from '../../src/library/postPick.ts';
 
 /**
@@ -139,6 +140,16 @@ function renderAt(ui: ReactElement, entry = '/tv'): void {
 /** A `submit` that accepts. No test in this file presses a Pick button; `MediaItemCard.test.tsx` is where that wire is driven. */
 const acceptsPick: PickSubmit = () => Promise.resolve({ accepted: true });
 
+/** An `identify` for tests that are not about identifying: a call fails the test. */
+const throwsOnUse: IdentifySubmit = {
+  identify: () => {
+    assert.fail('this test must not identify');
+  },
+  suggest: () => {
+    assert.fail('this test must not suggest');
+  },
+};
+
 function titlesShown(): string[] {
   return screen.getAllByRole('heading').map((heading) => heading.textContent ?? '');
 }
@@ -149,7 +160,7 @@ test('the category screen carries the route-mapping marker on its root element',
   // alone, so it is a contract this component inherited rather than
   // decoration it is free to drop.
   const db = await freshDb();
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
   assert.ok(screen.getByTestId('category-tv'), 'the marker names this category');
 
   await waitFor(() => {
@@ -165,7 +176,7 @@ test('a category lists its items newest first, each as its own card', async () =
     mediaItem({ id: 1, pluginId: 'tv', title: 'Older Show', updatedAt: 10 }),
     mediaItem({ id: 2, pluginId: 'tv', title: 'Newer Show', updatedAt: 20 }),
   ]);
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Newer Show', 'Older Show'], 'newest first');
@@ -209,7 +220,7 @@ test('scrolling to the sentinel loads the next page, and the button is still the
       mediaItem({ id: index + 1, pluginId: 'tv', title: `Show ${String(index + 1)}`, updatedAt: index + 1 }));
     await seed(db, ops);
 
-    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
     await waitFor(() => { assert.equal(titlesShown().length, PAGE_SIZE, 'the first page'); });
 
     // Sized from `PAGE_SIZE` rather than a literal, deliberately: this test
@@ -238,7 +249,7 @@ test('scrolling to the sentinel loads the next page, and the button is still the
 
 test('an empty category says so rather than rendering nothing', async () => {
   const db = await freshDb();
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/nothing here yet/i));
@@ -252,7 +263,7 @@ test('a category with no store yet renders only its marker, not "nothing here ye
   // `store` is `undefined` until `Shell`'s own store finishes opening
   // (`Shell.tsx`'s state, `Category.tsx`'s own doc). This must not be
   // mistaken for a confirmed-empty replica.
-  renderAt(<Category store={undefined} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={undefined} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
   assert.ok(screen.getByTestId('category-tv'), 'the marker renders even with no store yet');
   assert.ok(!screen.queryByText(/nothing here yet/i), 'not yet knowable whether the category is empty');
 });
@@ -260,7 +271,7 @@ test('a category with no store yet renders only its marker, not "nothing here ye
 test('expanding a card gathers through the same store the list read from', async () => {
   const db = await freshDb();
   await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'The Show', updatedAt: 10 })]);
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['The Show']);
@@ -297,7 +308,7 @@ test("a category fetches its page's plugin rows once, batched by every item's id
       return pluginRowsByMediaItems(db, mediaItemIds, tables);
     },
   };
-  renderAt(<Category store={source} pluginId="tv" tables={[TV_RELEASE_TABLE]} submit={acceptsPick} />);
+  renderAt(<Category store={source} pluginId="tv" tables={[TV_RELEASE_TABLE]} submit={acceptsPick} identify={throwsOnUse} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Newer Show', 'Older Show']);
@@ -334,7 +345,7 @@ test("a plugin row that replicates in a later batch than its media item still re
   const tables = [TV_RELEASE_TABLE];
   await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: "Dio's World(3)", updatedAt: 10 })]);
 
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={tables} submit={acceptsPick} />);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={tables} submit={acceptsPick} identify={throwsOnUse} />);
 
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ["Dio's World(3)"], 'no tv_release yet, so the card reads the media item title');
@@ -373,7 +384,7 @@ test('no fetch is issued while a category renders', async () => {
   try {
     const db = await freshDb();
     await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'Local Show', updatedAt: 10 })]);
-    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
     await waitFor(() => {
       assert.deepEqual(titlesShown(), ['Local Show']);
     });
@@ -418,7 +429,7 @@ test('the default route reads no catalog', async () => {
       return listCatalog(db, query, opts);
     },
   };
-  renderAt(<Category store={source} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />);
+  renderAt(<Category store={source} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Gamma Show', 'Beta Show', 'Alpha Show']);
   });
@@ -429,7 +440,7 @@ test('the default route reads no catalog', async () => {
 test('filter=picked lists only picked items, from the catalog', async () => {
   const db = await freshDb();
   await seedPickedAndNot(db);
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />, '/tv?filter=picked');
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?filter=picked');
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Gamma Show', 'Alpha Show']);
   });
@@ -440,7 +451,7 @@ test('filter=picked lists only picked items, from the catalog', async () => {
 test('a search term narrows the list', async () => {
   const db = await freshDb();
   await seedPickedAndNot(db);
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />, '/tv?q=beta');
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?q=beta');
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Beta Show']);
   });
@@ -462,7 +473,7 @@ test('each empty filtered view says what it is empty of', async () => {
       // eslint-disable-next-line no-await-in-loop -- as above
       await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'Alpha Show', updatedAt: 10 })]);
     }
-    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />, entry);
+    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, entry);
     // eslint-disable-next-line no-await-in-loop -- as above
     await waitFor(() => {
       assert.ok(screen.getByText(sentence), sentence);
@@ -479,7 +490,7 @@ test('Load more pages a filtered list', async () => {
     ops.push(mediaItem({ id, pluginId: 'tv', title: `Show ${String(id)}`, updatedAt: id }));
   }
   await seed(db, ops);
-  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} />, '/tv?filter=unpicked');
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?filter=unpicked');
   await waitFor(() => {
     assert.equal(titlesShown().length, PAGE_SIZE);
   });
@@ -489,3 +500,54 @@ test('Load more pages a filtered list', async () => {
   });
   db.close();
 });
+
+for (const entry of ['/tv', '/tv?q=show']) {
+  test(`the identify a category is handed reaches an expanded card's Requery (${entry})`, async () => {
+    // Both list paths forward it: the unfiltered `DefaultList` and the
+    // searched `FilteredList` each build their own `ItemList`.
+    const db = await freshDb();
+    await seed(db, [
+      mediaItem({ id: 1, pluginId: 'tv', title: 'The Show', updatedAt: 10 }),
+      {
+        op: 'upsert',
+        table: 'rss_item',
+        id: 31,
+        value: {
+          id: 31,
+          feedId: 1,
+          filename: 'the.show.mkv',
+          createdAt: 10,
+          updatedAt: 10,
+          downloadType: 'torrent',
+          mediaItemId: 1,
+          rankingScore: null,
+          lookupState: 'resolved',
+          lookupStateDetail: null,
+          videoResolution: null,
+          lookupJson: null,
+          deliveredAt: null,
+        },
+      },
+    ]);
+    const requeried: [number, string][] = [];
+    const identify: IdentifySubmit = {
+      identify: (rssItemId, request) => {
+        requeried.push([rssItemId, request.mode]);
+        return Promise.resolve({ accepted: true });
+      },
+      suggest: () => Promise.resolve([]),
+    };
+    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={identify} />, entry);
+
+    await waitFor(() => {
+      assert.deepEqual(titlesShown(), ['The Show']);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'The Show' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Requery/ }));
+
+    await waitFor(() => {
+      assert.deepEqual(requeried, [[31, 'requery']]);
+    });
+    db.close();
+  });
+}

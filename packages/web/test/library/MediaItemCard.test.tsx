@@ -11,7 +11,7 @@ import { MediaItemCard } from '../../src/library/MediaItemCard.tsx';
 import type { PickSubmit } from '../../src/library/postPick.ts';
 import type { GatheredSource } from '../../src/library/useGatheredItem.ts';
 import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
-import type { PluginRows } from '@pickarr/plugin-ui';
+import type { IdentifySubmit, PluginRows } from '@pickarr/plugin-ui';
 
 /**
  * What `library/Category.tsx` hands a card whose plugin declared no tables.
@@ -183,6 +183,16 @@ const quietInserts = {
  */
 const acceptsPick: PickSubmit = () => Promise.resolve({ accepted: true });
 
+/** An `identify` for cards in this file that are not about identifying: a call fails the test. */
+const throwsOnUse: IdentifySubmit = {
+  identify: () => {
+    assert.fail('this test must not identify');
+  },
+  suggest: () => {
+    assert.fail('this test must not suggest');
+  },
+};
+
 /** A `GatheredSource` returning one bare gathered item, for tests that do not care what expanding shows. */
 const stubSource: GatheredSource = {
   ...quietInserts,
@@ -193,7 +203,7 @@ const stubSource: GatheredSource = {
 test('a card shows its title as a real heading', () => {
   // CLAUDE.md's longest hazard: the accessible name must come from a visible
   // heading, not an aria-label, or a query passes against an unstyled block.
-  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
   const heading = screen.getByRole('heading', { name: 'The Thing' });
   assert.equal(heading.textContent, 'The Thing');
 });
@@ -208,7 +218,7 @@ test('a card gathers nothing until it is opened, and opening it gathers once', a
     },
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
   assert.equal(gathers, 0, 'an unopened card costs nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
@@ -255,7 +265,7 @@ test('closing a card tears its subscriptions down, and reopening gathers again b
       };
     },
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
   assert.equal(liveSubscriptions, 0, 'a card nobody has opened watches nothing');
 
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
@@ -304,6 +314,7 @@ test("a TV item's card is the tv plugin's, and its headline names the series and
         seriesRef: '184871',
       })}
       submit={acceptsPick}
+      identify={throwsOnUse}
     />,
   );
 
@@ -330,7 +341,7 @@ test('an item whose plugin this build does not carry still shows its title', () 
   // would take the whole paged list down; rendering nothing would leave a
   // poster with no name under it.
   const item: MediaItemSyncRead = { ...summary({ id: 7, title: 'The Thing' }), pluginId: 'book' };
-  render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
 
   assert.ok(screen.getByRole('heading', { name: 'The Thing' }), 'the row is still identifiable');
   assert.ok(!screen.queryByRole('button'), 'with no expander, because there is no card body to expand into');
@@ -358,7 +369,7 @@ test('a release shows its resolution and its download status', async () => {
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.2160p.mkv/ });
@@ -381,7 +392,7 @@ test('a release with no download row shows no status rather than a blank one', a
       }),
     subscribe: () => () => {},
   };
-  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} />);
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} />);
   fireEvent.click(screen.getByRole('button', { name: /The Thing/ }));
 
   const release = await screen.findByRole('listitem', { name: /the.thing.1080p.mkv/ });
@@ -433,6 +444,7 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
         asked.push(rssItemId);
         return Promise.resolve({ accepted: true });
       }}
+      identify={throwsOnUse}
     />,
   );
   fireEvent.click(screen.getByRole('button', { name: 'The Thing' }));
@@ -442,5 +454,47 @@ test('the submit a card is handed is the one its Pick button calls', async () =>
 
   await waitFor(() => {
     assert.deepEqual(asked, [31], 'the release the operator pressed, through the submit the card was given');
+  });
+});
+
+test('the identify a card is handed is the one its Requery and Edit use', async () => {
+  // The same reasoning as the `submit` test above: `Shell` builds it and
+  // `Category` forwards it, so only pressing the buttons shows the card
+  // passed it on to the plugin's `Card` -- and with the item's own plugin id.
+  const requeried: [number, string][] = [];
+  const suggested: [string, string][] = [];
+  const identify: IdentifySubmit = {
+    identify: (rssItemId, request) => {
+      requeried.push([rssItemId, request.mode]);
+      return Promise.resolve({ accepted: true });
+    },
+    suggest: (pluginId, term) => {
+      suggested.push([pluginId, term]);
+      return Promise.resolve([]);
+    },
+  };
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) =>
+      gathered({
+        id,
+        title: 'The Thing',
+        releases: [{ id: 31, row: rssItem({ id: 31, filename: 'the.thing.mkv', lookupState: 'resolved' }) }],
+      }),
+    subscribe: () => () => {},
+  };
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={identify} />);
+  fireEvent.click(screen.getByRole('button', { name: 'The Thing' }));
+
+  const row = await screen.findByRole('listitem', { name: 'the.thing.mkv' });
+  fireEvent.click(within(row).getByRole('button', { name: /^Requery/ }));
+  await waitFor(() => {
+    assert.deepEqual(requeried, [[31, 'requery']]);
+  });
+
+  fireEvent.click(within(row).getByRole('button', { name: /^Edit/ }));
+  fireEvent.change(within(row).getByRole('combobox', { name: 'Title' }), { target: { value: 'Thing' } });
+  await waitFor(() => {
+    assert.deepEqual(suggested, [[summary({ id: 7, title: 'The Thing' }).pluginId, 'Thing']]);
   });
 });
