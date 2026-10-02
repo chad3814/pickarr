@@ -8,9 +8,14 @@ import { request } from '../../src/store/idb.ts';
 import { readCursors } from '../../src/store/meta.ts';
 import { buildHaystack, type CatalogRecord } from '../../src/store/catalog.ts';
 
-// Measured on fake-indexeddb with the 500-op batch below: three runs gave
-// 75, 76 and 74 ms (median 75). The budget is 3x the median, rounded up.
-const CATALOG_BATCH_BUDGET_MS = 225;
+// Measured on fake-indexeddb with the 500-op batch below, in isolation:
+// three runs gave 75, 76 and 74 ms (median 75) before `by_table_status_updated`
+// existed, and 78, 82 and 80 ms with it. The budget is 10x that median, not
+// 3x: `npm run check` runs test files concurrently, and a 3x budget tripped
+// at 313 ms under that load with no change to the path it measures. Ten
+// times still catches the regression this exists for -- a recompute that
+// goes quadratic -- while a loaded machine does not.
+const CATALOG_BATCH_BUDGET_MS = 750;
 
 const CURSORS = { since: 1, before: null } as const;
 async function record(db: IDBDatabase, id: number): Promise<CatalogRecord | undefined> {

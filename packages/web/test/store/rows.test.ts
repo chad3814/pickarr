@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DOWNLOAD_STATUSES } from '@pickarr/contract';
 import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import {
   getRow, getRows, byMediaItem, byRssItem, listByTable, listByTablePlugin, countByPlugin,
-  pluginRowsByMediaItems, activeDownloads,
+  pluginRowsByMediaItems, activeDownloads, ACTIVE_DOWNLOAD_STATUSES,
   type PluginRowsPage,
 } from '../../src/store/rows.ts';
 import { done } from '../../src/store/idb.ts';
@@ -499,7 +500,40 @@ test('activeDownloads finds a quiet live download behind more terminal rows than
   const ops: SyncOp[] = [download(1, 'submitting', 1)];
   for (let id = 2; id <= 12; id += 1) ops.push(download(id, id % 2 === 0 ? 'delivered' : 'failed', id * 10));
   await applyBatch(db, ops, { since: 1, before: null });
-  const rows = await activeDownloads(db, 3);
-  assert.deepEqual(rows.map((r) => [r.id, r.status]), [[1, 'submitting']], 'the oldest row is live and 11 newer terminal rows span four pages of three');
+  const rows = await activeDownloads(db);
+  assert.deepEqual(rows.map((r) => [r.id, r.status]), [[1, 'submitting']], 'the oldest row is live behind 11 newer terminal rows');
   db.close();
+});
+
+test('activeDownloads reads every live status of both tables off the status index, newest first across tables', async () => {
+  const db = await freshDb();
+  const download = (table: 'torrent_download' | 'nzb_download', id: number, status: string, updatedAt: number): SyncOp => ({
+    op: 'upsert',
+    table,
+    id,
+    value: { id, rssItemId: 1, downloadClientId: 1, clientRef: null, status, attempts: 1, createdAt: 1, updatedAt, percentage: null, absentSince: null, deliveredAt: null, reclaimedAt: null },
+  });
+  await applyBatch(db, [
+    download('torrent_download', 1, 'submitting', 10),
+    download('nzb_download', 2, 'submitted', 20),
+    download('torrent_download', 3, 'downloading', 30),
+    download('nzb_download', 4, 'completed', 40),
+    download('torrent_download', 5, 'delivered', 50),
+    download('nzb_download', 6, 'failed', 60),
+    download('torrent_download', 7, 'completed', 40),
+  ], { since: 1, before: null });
+  const rows = await activeDownloads(db);
+  assert.deepEqual(rows.map((r) => [r.table, r.id, r.status]), [
+    ['nzb_download', 4, 'completed'],
+    ['torrent_download', 7, 'completed'],
+    ['torrent_download', 3, 'downloading'],
+    ['nzb_download', 2, 'submitted'],
+    ['torrent_download', 1, 'submitting'],
+  ], 'four live statuses across two tables, newest first, ties by table then id');
+  db.close();
+});
+
+test('the live statuses are the host vocabulary minus its two terminal ones', () => {
+  assert.deepEqual([...ACTIVE_DOWNLOAD_STATUSES], ['submitting', 'submitted', 'downloading', 'completed']);
+  assert.deepEqual([...DOWNLOAD_STATUSES].filter((s) => !ACTIVE_DOWNLOAD_STATUSES.includes(s)), ['delivered', 'failed']);
 });

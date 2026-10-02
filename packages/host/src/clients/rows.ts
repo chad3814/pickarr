@@ -41,19 +41,18 @@
  * transition, and would defeat every guard above.
  */
 import type { DatabaseSync } from 'node:sqlite';
+import { DOWNLOAD_STATUSES, type DownloadStatus } from '@pickarr/contract';
 import { doublingDelayMs } from '../jobs/backoff.ts';
 
-export type DownloadStatus =
-  'submitting' | 'submitted' | 'downloading' | 'completed' | 'delivered' | 'failed';
-
 /**
- * Every status a download row may hold. Exported so a caller that wants
- * "everything except X" can derive it from this list rather than restate it
- * -- `reconcile.ts`'s absence sweep does exactly that, and a restated list
- * is a list that drifts the day a seventh status is added.
+ * The vocabulary lives in `@pickarr/contract` (`media.ts`) so the browser's
+ * replica reads derive from the same list; re-exported here because this
+ * module is where the host's own callers already look for it --
+ * `reconcile.ts`'s absence sweep derives "everything except X" from it, and
+ * a restated list is a list that drifts the day a seventh status is added.
  */
-export const DOWNLOAD_STATUSES: readonly DownloadStatus[] =
-  ['submitting', 'submitted', 'downloading', 'completed', 'delivered', 'failed'];
+export type { DownloadStatus };
+export { DOWNLOAD_STATUSES };
 
 function isDownloadStatus(value: string): value is DownloadStatus {
   return (DOWNLOAD_STATUSES as readonly string[]).includes(value);

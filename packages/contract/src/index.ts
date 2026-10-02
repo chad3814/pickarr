@@ -19,6 +19,7 @@ export type {
 export type { JobEnqueue, JobQueue, JobRecord } from './jobs.ts';
 export type {
   DownloadRead,
+  DownloadStatus,
   ImageInit,
   LookupState,
   MediaItemInit,
@@ -32,6 +33,7 @@ export type {
   RssItemRead,
   Transport,
 } from './media.ts';
+export { DOWNLOAD_STATUSES } from './media.ts';
 export { normalizeVideoResolution } from './videoResolution.ts';
 export type { AddFeedInput, AddFeedRefusalCode } from './feeds.ts';
 export { ADD_FEED_REFUSALS } from './feeds.ts';
