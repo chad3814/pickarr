@@ -153,3 +153,29 @@ test('the downloads list re-reads after a replica reset', async () => {
   await screen.findByText('No downloads in progress');
   assert.ok(!screen.queryByText('a.mkv'), 'a stale list does not survive a reset');
 });
+
+for (const table of ['torrent_download', 'nzb_download'] as const) {
+  test(`a change to ${table} re-reads the downloads list`, async () => {
+    let current: readonly ActiveDownload[] = [DOWNLOAD];
+    // The callbacks the page registered, by table, so the test fires exactly
+    // the one under test rather than emitting through the shared notifier.
+    const registered = new Map<string, Array<() => void>>();
+    const source: ActivitiesSource = {
+      ...sourceWith(() => current),
+      subscribeTable: (name, cb) => {
+        registered.set(name, [...(registered.get(name) ?? []), cb]);
+        return subscribeTable(name, cb);
+      },
+    };
+    render(<Activities source={source} fetchActivity={() => Promise.resolve(answered(READ))} onExpired={noExpiry} />);
+    await screen.findByText('a.mkv');
+    current = [{ ...DOWNLOAD, filename: 'b.mkv', table }];
+    const callbacks = registered.get(table) ?? [];
+    assert.ok(callbacks.length > 0, `the page subscribed to ${table}`);
+    act(() => {
+      for (const cb of callbacks) cb();
+    });
+    await screen.findByText('b.mkv');
+    assert.ok(!screen.queryByText('a.mkv'), 'the list was replaced, not appended to');
+  });
+}

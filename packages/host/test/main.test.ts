@@ -46,6 +46,7 @@ import {
 } from '../src/main.ts';
 import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
 import { JOB_TIMEOUT_MS } from '../src/jobs/run-job.ts';
+import { ACTIVITY_TRIGGER_NAMES } from '../src/jobs/activity-triggers.ts';
 import type { Secrets } from '../src/secrets/instance.ts';
 
 /** The plugin id every feed row below names, so `main` can register an owner for it. */
@@ -454,6 +455,27 @@ test('main starts the dispatcher before it schedules known feeds, so a feed whos
         SELECT state FROM jobs WHERE plugin_id = ? AND kind = 'poll' ORDER BY id
       `).all(HOST_PLUGIN_ID).map((row) => String((row as { state: unknown }).state));
       assert.deepEqual(states, ['dead', 'ready'], 'the crashed job dead-letters and a fresh cycle is scheduled beside it');
+    } finally {
+      after.raw.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('main installs the three jobs activity triggers on the database it boots', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-main-triggers-'));
+  try {
+    const databasePath = join(dir, 'pickarr.db');
+    const { timers } = createFakeTimers();
+    await runMain(databasePath, { plugins: [], timers, createReadServer: async () => fakeServer(() => {}) });
+    const after = openDatabase(databasePath);
+    try {
+      const names = after.raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+        .all().map((row) => String((row as { name: unknown }).name));
+      for (const name of ACTIVITY_TRIGGER_NAMES) {
+        assert.ok(names.includes(name), `boot must install trigger ${name}`);
+      }
     } finally {
       after.raw.close();
     }

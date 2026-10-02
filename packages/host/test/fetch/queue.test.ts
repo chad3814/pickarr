@@ -562,6 +562,27 @@ test('a passkey in the path is masked in the target', async () => {
   await pending;
 });
 
+test('the target drops userinfo and the fragment as well as the query, and still masks a passkey in the path', async () => {
+  let release: (() => void) | undefined;
+  const fetch = createHostFetch({
+    fetch: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return new Response('x');
+    },
+  });
+  const pending = fetch.text('https://admin:hunter2@qbit.local:8080/announce/0123456789abcdef0123456789abcdef/x?k=1#frag');
+  await tick();
+  const target = fetch.snapshot()[0]?.inFlight[0]?.target ?? '';
+  assert.match(target, /^https:\/\/qbit\.local:8080\/announce\/012\*{5}.*\/x$/);
+  assert.ok(!target.includes('admin'), `no username: ${target}`);
+  assert.ok(!target.includes('hunter2'), `no password: ${target}`);
+  assert.ok(!target.includes('@'), `no userinfo: ${target}`);
+  assert.ok(!target.includes('#') && !target.includes('frag'), `no fragment: ${target}`);
+  assert.ok(!/[0-9a-f]{8}/.test(target), `no run of 8 hex characters survives: ${target}`);
+  release?.();
+  await pending;
+});
+
 test('failed requests leave the snapshot; hosts sort by name and a missing method reads as GET', async () => {
   const releases: Array<() => void> = [];
   const changes: number[] = [];

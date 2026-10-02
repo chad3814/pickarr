@@ -75,7 +75,7 @@ interface JobSectionProps {
 function JobSection({ heading, label, empty, jobs, timing, showAttempts }: JobSectionProps): ReactElement {
   return (
     <section>
-      <h3>{heading}</h3>
+      <h2>{heading}</h2>
       {jobs.length === 0 ? (
         <p>{empty}</p>
       ) : (
@@ -121,7 +121,7 @@ function HostBlock({ host }: { host: ActivityHost }): ReactElement {
 function FetchSection({ fetches }: { fetches: readonly ActivityHost[] }): ReactElement {
   return (
     <section>
-      <h3>Fetch queue</h3>
+      <h2>Fetch queue</h2>
       {fetches.length === 0 ? (
         <p>No requests queued</p>
       ) : (
@@ -142,7 +142,7 @@ function downloadKey(d: ActiveDownload): string {
 function DownloadsSection({ downloads }: { downloads: readonly ActiveDownload[] | undefined }): ReactElement {
   return (
     <section>
-      <h3>Downloads in progress</h3>
+      <h2>Downloads in progress</h2>
       {downloads === undefined ? null : downloads.length === 0 ? (
         <p>No downloads in progress</p>
       ) : (

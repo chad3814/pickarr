@@ -146,6 +146,7 @@ import type { AddDownloadClientRefusal } from '../clients/add.ts';
 import type { MappingRefusal } from '../clients/mappings.ts';
 import type { RetryLookupOutcome } from '../media/retry.ts';
 import type {
+  ActivityHost,
   AddDownloadClientInput,
   AddFeedInput,
   AddMappingInput,
@@ -157,7 +158,6 @@ import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { SyncEvents } from '../sync/events.ts';
-import type { ActivityHost } from '@pickarr/contract';
 import { readActivity } from './activity.ts';
 import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';

@@ -6,6 +6,12 @@
  * whole of how "no payload travels" is enforced; `activity.test.ts` pins it
  * by seeding a payload and asserting its text is absent from the answer.
  *
+ * **`lastError` is the string only for a `dead` row.** The column is also
+ * written when a failed attempt returns a job to `ready` and is not cleared
+ * when a later attempt succeeds, so a retried-then-finished job still holds
+ * its old error; the contract says only a dead job carries one, so `toJob`
+ * reads the column against the row's `state`.
+ *
  * A row whose `state` is none of the four this build knows is in no list.
  * The dispatcher's vocabulary may grow; this reader must not fail the page
  * when it does.
@@ -18,7 +24,7 @@ const COLUMNS = 'id, plugin_id, kind, attempts, max_attempts, run_at, state, las
 function toJob(row: Record<string, unknown>): ActivityJob {
   const num = (key: string): number => { const v = row[key]; return typeof v === 'number' ? v : 0; };
   const text = (key: string): string => String(row[key] ?? '');
-  const lastError = row['last_error'];
+  const lastError = row['state'] === 'dead' ? row['last_error'] : null;
   const startedAt = row['started_at'];
   return {
     id: num('id'), pluginId: text('plugin_id'), kind: text('kind'),

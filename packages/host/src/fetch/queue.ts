@@ -26,9 +26,21 @@ export interface QueuedFetch extends HostFetch {
   snapshot(): readonly ActivityHost[];
 }
 
-/** `redactUrl`'s output with the query string gone: what a response body may say about a request. Computed once; the raw url is never kept. */
+/**
+ * What a response body may say about a request: the redacted url's origin and
+ * path, so userinfo, query string and fragment are all gone. Falls back to
+ * cutting the redacted string at its `?` if that string no longer parses as a
+ * url (redaction can rewrite the authority). Computed once; the raw url is
+ * never kept.
+ */
 function targetOf(url: string): string {
   const redacted = redactUrl(url);
+  try {
+    const parsed = new URL(redacted);
+    return parsed.origin + parsed.pathname;
+  } catch {
+    // Not a url after redaction; fall through to the string cut.
+  }
   const query = redacted.indexOf('?');
   return query === -1 ? redacted : redacted.slice(0, query);
 }
@@ -302,8 +314,6 @@ export function createHostFetch(
     const hostname = new URL(url).hostname;
     const state = hostFor(hostname);
     const record: ActivityRequest = { method: init?.method ?? 'GET', target: targetOf(url) };
-    state.waiting.add(record);
-    deps.onChange?.();
     const timeoutMs = timeoutFor(hostname);
     const callerSignal = init?.signal ?? undefined;
     // Aborted in the `finally` below, which is what detaches the listener:
@@ -311,6 +321,8 @@ export function createHostFetch(
     // signal with up to `timeoutMs` still to run.
     const settled = new AbortController();
     try {
+      state.waiting.add(record);
+      deps.onChange?.();
       return await enqueue(hostname, () => {
         state.waiting.delete(record);
         state.inFlight.add(record);

@@ -216,3 +216,61 @@ test('unmount clears the interval and unsubscribes', async () => {
     globalThis.clearInterval = realClear;
   }
 });
+
+/** A fetch whose every call stays open until the test settles it, in call order. */
+function held(): { fetch: ActivityFetch; calls: () => number; settle: (index: number, result: SendJsonResult) => void } {
+  const resolvers: Array<(result: SendJsonResult) => void> = [];
+  return {
+    fetch: () => new Promise<SendJsonResult>((resolve) => { resolvers.push(resolve); }),
+    calls: () => resolvers.length,
+    settle: (index, result) => {
+      const resolve = resolvers[index];
+      if (resolve === undefined) throw new Error(`no call ${String(index)} to settle`);
+      resolve(result);
+    },
+  };
+}
+
+test('a burst of events during an open fetch costs exactly one more fetch, and its answer is the one shown', async () => {
+  const h = held();
+  render(<Harness fetch={h.fetch} onExpired={() => {}} />);
+  assert.equal(h.calls(), 1, 'mount fetches');
+  act(() => {
+    emitActivity();
+    emitActivity();
+    emitActivity();
+  });
+  assert.equal(h.calls(), 1, 'wakes during the open fetch start nothing');
+  await act(async () => {
+    h.settle(0, answered(readWithRunning('old')));
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    assert.equal(h.calls(), 2, 'one follow-up fetch, not three');
+  });
+  await act(async () => {
+    h.settle(1, answered(readWithRunning('new')));
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    assert.ok(screen.getByText('ready new reachable'), 'the second fetch is what the hook shows');
+  });
+  await new Promise<void>((resolve) => { setTimeout(resolve, 15); });
+  assert.equal(h.calls(), 2, 'nothing further was queued');
+});
+
+test('a wake with nothing in flight fetches immediately, and again after each settles', async () => {
+  const h = held();
+  render(<Harness fetch={h.fetch} onExpired={() => {}} />);
+  await act(async () => {
+    h.settle(0, answered(readWithRunning('one')));
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    assert.ok(screen.getByText('ready one reachable'));
+  });
+  act(() => {
+    emitActivity();
+  });
+  assert.equal(h.calls(), 2, 'an idle wake fetches at once');
+});

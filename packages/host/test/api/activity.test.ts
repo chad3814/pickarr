@@ -55,3 +55,15 @@ test('fetches is the snapshot, passed through', () => {
   const hosts = [{ hostname: 'h', limit: 1, inFlight: [], waiting: [{ method: 'GET', target: 'https://h/x' }] }];
   assert.deepEqual(readActivity(raw, () => hosts).fetches, hosts);
 });
+
+test('lastError is read only from a dead job: a ready or done row that still holds one reads null', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  seed(raw, 'ready', 100, { lastError: 'earlier attempt failed' });
+  seed(raw, 'done', 100, { lastError: 'earlier attempt failed' });
+  seed(raw, 'dead', 100, { lastError: 'gave up' });
+  const { jobs } = readActivity(raw, () => []);
+  assert.equal(jobs.waiting[0]?.lastError, null);
+  assert.equal(jobs.recent[0]?.lastError, null);
+  assert.equal(jobs.dead[0]?.lastError, 'gave up');
+});

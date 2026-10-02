@@ -6,7 +6,16 @@
  * that was asleep).
  *
  * **A refetch, not a patch.** The event carries nothing, and the answer is
- * small, so every wake replaces the whole read. A failed refetch (offline, a
+ * small, so a wake replaces the whole read.
+ *
+ * **At most one fetch is in flight, and a wake during one is remembered, not
+ * dropped.** A burst of host events (each outbound request fires three, each
+ * job run two) would otherwise send one request per event, and an older slow
+ * response could land after a newer one and overwrite it. A wake that arrives
+ * while a fetch is open sets a `dirty` flag; when that fetch settles, a set
+ * flag is cleared and exactly one more fetch is issued, so any number of
+ * wakes during one fetch cost one more, and responses apply in the order
+ * they were asked for. A failed refetch (offline, a
  * non-200, or a body that is not an `ActivityRead`) after a good read keeps
  * that read and flags `unreachable` rather than blanking the page: an
  * operator watching a stalled queue should not lose it because one request
@@ -108,6 +117,8 @@ export function useActivity(
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    let dirty = false;
 
     async function refetch(): Promise<void> {
       const result = await latest.current.fetchActivity();
@@ -123,8 +134,24 @@ export function useActivity(
       setState((prev) => (prev.phase === 'ready' ? { ...prev, unreachable: true } : { phase: 'unreachable' }));
     }
 
+    async function drain(): Promise<void> {
+      try {
+        do {
+          dirty = false;
+          await refetch();
+        } while (dirty && !cancelled);
+      } finally {
+        inFlight = false;
+      }
+    }
+
     function run(): void {
-      void refetch();
+      if (inFlight) {
+        dirty = true;
+        return;
+      }
+      inFlight = true;
+      void drain();
     }
 
     run();
