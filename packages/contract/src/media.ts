@@ -169,6 +169,15 @@ export interface MediaWriter {
   dropMediaItem(mediaItemId: number): Promise<void>;
 
   /**
+   * `dropMediaItem` without the file unlinks: synchronously writes the
+   * tombstone and deletes the artwork rows and the item inside one savepoint,
+   * and returns the cached artwork paths the caller must now unlink. For a
+   * caller already inside a savepoint of its own (`reassignRelease`), which
+   * must hold it across no I/O.
+   */
+  dropMediaItemRows(mediaItemId: number): readonly string[];
+
+  /**
    * Attaches a poster, keyed on its url: attaching the same url twice leaves
    * one row and one cached file, so a handler re-run by crash recovery does
    * not double-write or double-fetch.

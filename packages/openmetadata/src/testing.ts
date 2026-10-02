@@ -293,6 +293,11 @@ export function createRecordingMedia(): RecordingMedia {
       record('dropMediaItem', mediaItemId);
       items.delete(mediaItemId);
     },
+    dropMediaItemRows(mediaItemId: number): readonly string[] {
+      record('dropMediaItemRows', mediaItemId);
+      items.delete(mediaItemId);
+      return [];
+    },
     async attachPoster(mediaItemId, poster): Promise<void> { record('attachPoster', mediaItemId, poster.url); },
     async attachBackground(mediaItemId, background): Promise<void> { record('attachBackground', mediaItemId, background.url); },
     async attachLogo(mediaItemId, logo): Promise<void> { record('attachLogo', mediaItemId, logo.url); },

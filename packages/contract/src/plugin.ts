@@ -230,15 +230,25 @@ export interface MediaPlugin {
   /**
    * Asked, inside the host's `reassignRelease` savepoint, to delete this
    * plugin's own rows for a media item the host is about to drop because
-   * its last release moved elsewhere. Required because a plugin's tables
-   * (`tv_release`, `movie_detail`, `xxx_scene`) reference `media_item` with
-   * foreign keys and no cascade: the host cannot delete the item until they
-   * are gone, and only the plugin knows which tables hold them.
+   * its last release moved elsewhere. Required because the host cannot
+   * delete the item while any table with a foreign key onto `media_item`
+   * still has a row for it, and only the plugin knows its own tables. Of
+   * those: the plugin's own tables (`tv_release`, `movie_detail`,
+   * `xxx_scene`) are cleared here; the lookup engine's own
+   * `<plugin>_lookup` table is cleared by the engine's implementation of
+   * this hook before the plugin's `dropRows` runs; roles and artwork are
+   * cleared by the host; `external_reference` has no writer today and is
+   * not cleared -- the foreign key would surface the day one appears.
    *
    * After this resolves the host deletes the item's roles and then the item
    * itself, writing its tombstone. The item still exists while this runs.
    * A throw rolls the whole move back, so the release is never left pointing
    * somewhere while its old item is half-deleted.
+   *
+   * **The hook may only run SQL on `ctx.db` and must perform no I/O** (no
+   * network, no filesystem, no timers). It runs inside a savepoint on a
+   * connection other jobs share; a hook that only runs SQL yields nothing
+   * but microtasks, so no other job's SQL can interleave inside it.
    */
   onMediaItemDropped(mediaItemId: number, ctx: PluginContext): Promise<void>;
 

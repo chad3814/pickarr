@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
+import type { MediaWriter, PluginContext } from '@pickarr/contract';
 import type { ArtworkStore } from '../../src/artwork/store.ts';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createMediaWriter } from '../../src/media/writer.ts';
 import { reassignRelease, type ReassignDeps } from '../../src/media/reassign.ts';
+import { createTvPlugin } from '@pickarr/plugin-tv';
 import { insertFeed } from './support.ts';
 
 const NOW = 1_700_000_000_000;
@@ -39,7 +41,14 @@ function fixture(dropRows: ReassignDeps['dropRows'] = async () => {}) {
   const { raw, db } = openTestDatabase();
   migrateHost(raw);
   const writer = createMediaWriter(db, () => NOW, unusedArtwork, { dropRows });
-  const deps: ReassignDeps = { raw, relink: writer.relinkRssItem, drop: writer.dropMediaItem, now: () => NOW, dropRows };
+  const deps: ReassignDeps = {
+    raw,
+    relink: writer.relinkRssItem,
+    drop: writer.dropMediaItemRows,
+    unlink: unusedArtwork.remove,
+    now: () => NOW,
+    dropRows,
+  };
   const feedId = insertFeed(raw, 'http://feed.invalid/a');
   return { raw, deps, feedId, writer };
 }
@@ -98,4 +107,39 @@ test('the writer exposes reassignRelease and it reaches the same rule', async ()
   await writer.reassignRelease(10, 2);
   assert.equal(release(raw, 10)?.['media_item_id'], 2);
   assert.equal(item(raw, 1), undefined, 'orphan dropped through the writer path too');
+});
+
+test('moving the last release off an item succeeds with the engine lookup table and plugin rows naming it, foreign keys on', async () => {
+  const { raw, db } = openTestDatabase();
+  migrateHost(raw);
+  const plugin = createTvPlugin({ now: () => NOW, baseUrl: 'https://openmetadata.test', resolveSecret: async () => 'unused' });
+  for (const migration of plugin.migrations) migration.up(raw);
+  const unused = async (): Promise<never> => { throw new Error('not used by this test'); };
+  const writer: MediaWriter = createMediaWriter(db, () => NOW, unusedArtwork, {
+    dropRows: async (_pluginId, id) => {
+      const ctx: PluginContext = {
+        db: raw,
+        media: writer,
+        read: { mediaItem: unused, mediaItemByProviderRef: unused, rssItemsFor: unused, downloadsFor: unused },
+        jobs: { enqueue: unused },
+        fetch: { json: unused, bytes: unused },
+        downloads: { submit: unused },
+        library: { list: unused, place: unused },
+        log: () => {},
+      };
+      await plugin.onMediaItemDropped(id, ctx);
+    },
+  });
+  const feedId = insertFeed(raw, 'http://feed.invalid/a');
+  seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1);
+  raw.prepare('INSERT INTO tv_series (id, provider, provider_ref, title, created_at, updated_at) VALUES (1, ?, ?, ?, 1, 1)').run('tmdb', 'tmdb:series:1', 'A Series');
+  raw.prepare("INSERT INTO tv_release (media_item_id, kind, series_id, created_at, updated_at) VALUES (1, 'episode', 1, 1, 1)").run();
+  raw.prepare('INSERT INTO tv_lookup (rss_item_id, media_item_id, created_at, updated_at) VALUES (10, 1, 1, 1)').run();
+  assert.equal(raw.prepare('PRAGMA foreign_keys').get()?.['foreign_keys'], 1);
+
+  await writer.reassignRelease(10, 2);
+
+  assert.equal(item(raw, 1), undefined);
+  assert.equal(raw.prepare('SELECT media_item_id FROM tv_lookup WHERE rss_item_id = 10').get()?.['media_item_id'], null);
+  assert.equal(raw.prepare('SELECT count(*) AS n FROM tv_release').get()?.['n'], 0);
 });

@@ -232,17 +232,25 @@ export function createMediaWriter(
 
     reassignRelease(rssItemId: number, mediaItemId: number): Promise<void> {
       return reassignRelease(
-        { raw, relink: writer.relinkRssItem, drop: writer.dropMediaItem, now, dropRows: hooks.dropRows },
+        { raw, relink: writer.relinkRssItem, drop: writer.dropMediaItemRows, unlink: (path) => artwork.remove(path), now, dropRows: hooks.dropRows },
         rssItemId,
         mediaItemId,
       );
     },
 
     async dropMediaItem(mediaItemId: number): Promise<void> {
-      // Read the paths, delete the rows, then unlink the files best-effort --
-      // in that order. A failed unlink after the row is gone leaks a file; a
-      // failed row delete after the unlink leaves a row pointing at nothing,
-      // which is worse, because something will try to serve it.
+      // Rows first, then the files: a failed unlink after the row is gone
+      // leaks a file; a failed row delete after the unlink leaves a row
+      // pointing at nothing, which is worse, because something will try to
+      // serve it.
+      const paths = writer.dropMediaItemRows(mediaItemId);
+      await Promise.all(paths.map((path) => artwork.remove(path)));
+    },
+
+    dropMediaItemRows(mediaItemId: number): readonly string[] {
+      // Read the paths and delete the rows; the caller unlinks the files
+      // afterwards, outside any savepoint of its own. Synchronous so a
+      // caller inside a savepoint (`reassignRelease`) holds it across no I/O.
       const paths = artworkPaths(mediaItemId);
       const at = now();
       // One savepoint for the three artwork tables, the media item row and
@@ -296,7 +304,7 @@ export function createMediaWriter(
         throw err;
       }
       raw.exec('RELEASE drop_media_item');
-      await Promise.all(paths.map((path) => artwork.remove(path)));
+      return paths;
     },
 
     async attachPoster(mediaItemId: number, poster: ImageInit): Promise<void> {

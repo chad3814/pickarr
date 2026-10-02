@@ -76,6 +76,7 @@ const fakeCtx: PluginContext = {
     claimProviderRef: async () => { throw new Error('media.claimProviderRef: not used by this test'); },
     relinkRssItem: async () => { throw new Error('media.relinkRssItem: not used by this test'); },
     reassignRelease: async () => { throw new Error('media.reassignRelease: not used by this test'); },
+    dropMediaItemRows: () => { throw new Error('media.dropMediaItemRows: not used by this test'); },
     dropMediaItem: async () => { throw new Error('media.dropMediaItem: not used by this test'); },
     attachPoster: async () => { throw new Error('media.attachPoster: not used by this test'); },
     attachBackground: async () => { throw new Error('media.attachBackground: not used by this test'); },

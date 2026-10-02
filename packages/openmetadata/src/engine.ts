@@ -27,7 +27,7 @@ import { VIDEO_RESOLUTION_BACKFILL_JOB, createVideoResolutionBackfillJob } from 
 import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
 import { MAX_BATCH, createLookupClient } from './client.ts';
-import { lookupTable, lookupTableMigration } from './table.ts';
+import { lookupTable, lookupTableMigration, lookupTableName } from './table.ts';
 import { lookupJsonFor } from './lookupJson.ts';
 import { videoResolutionOf } from './quality.ts';
 import { isPlaced, recordPlacement } from './placement.ts';
@@ -921,7 +921,12 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     },
 
     async onMediaItemDropped(mediaItemId, ctx) {
-      spec.dropRows(mediaItemId, asDatabase(ctx.db));
+      const raw = asDatabase(ctx.db);
+      // The engine's own table references `media_item` with a foreign key, so
+      // it must stop naming the item before the host deletes it. The row
+      // itself stays: it is the release's lookup history.
+      raw.prepare(`UPDATE ${lookupTableName(spec.id)} SET media_item_id = NULL WHERE media_item_id = ?`).run(mediaItemId);
+      spec.dropRows(mediaItemId, raw);
     },
 
     /**
