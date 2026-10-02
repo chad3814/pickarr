@@ -89,11 +89,13 @@ export function deserializeChanged(serialized: SerializedChanged): Changed {
  * Carries table names and ids only, on both branches -- never a row's
  * `value` (Global Constraints: no row contents in a message). `changed`
  * already satisfies this by construction (`Changed`'s own shape), and
- * `reset` has nothing to carry beyond the generation it minted (spec §6).
+ * `reset` has nothing to carry beyond the generation it minted (spec §6), and
+ * `activity` carries nothing at all: it only says "refetch".
  */
 export type ChannelMessage =
   | { type: 'changed'; changed: SerializedChanged }
-  | { type: 'reset'; generation: string };
+  | { type: 'reset'; generation: string }
+  | { type: 'activity' };
 
 /**
  * Whether *this* tab is the one holding a lease it requested through

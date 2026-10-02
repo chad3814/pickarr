@@ -5,7 +5,7 @@ import { applyBatch } from '../../src/store/apply.ts';
 import { getRow } from '../../src/store/rows.ts';
 import type { Changed } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { subscribe, subscribeInserts, subscribeTable, subscribeTouched, subscribeReset, emit, emitReset } from '../../src/store/notify.ts';
+import { subscribe, subscribeInserts, subscribeTable, subscribeTouched, subscribeReset, subscribeActivity, emit, emitReset, emitActivity } from '../../src/store/notify.ts';
 
 /**
  * A `Changed` naming one touched row, optionally inserted -- most tests here
@@ -308,4 +308,15 @@ test('the same holds for subscribeInserts, which shares the registry helper', as
   assert.deepEqual(seen, ['second']);
   second();
   db.close();
+});
+
+test('subscribeActivity hears emitActivity until unsubscribed', () => {
+  let heard = 0;
+  const off = subscribeActivity(() => {
+    heard += 1;
+  });
+  emitActivity();
+  off();
+  emitActivity();
+  assert.equal(heard, 1);
 });

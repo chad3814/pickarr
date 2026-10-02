@@ -70,6 +70,8 @@ import { mappingSubmit } from '../settings/postMapping.ts';
 import { feedRemovalSubmit } from '../settings/postFeedRemoval.ts';
 import { destinationSubmit } from '../settings/postDestination.ts';
 import { postPick } from '../library/postPick.ts';
+import { Activities } from '../activity/Activities.tsx';
+import { fetchActivity } from '../activity/fetchActivity.ts';
 
 /** The one replica this shell ever opens. One tab, one database (design spec §5). */
 const DB_NAME = 'pickarr';
@@ -295,6 +297,19 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
         */}
         <Route path="unmatched" element={store === undefined ? null : <Unmatched source={store} retry={postRetry} />} />
         {/*
+          `fetchActivity` is the page's one real network call, wired here like
+          the settings screen's submits below. A 401 on it is `sendJson`'s
+          `expired`, which the hook hands to `onExpired`.
+        */}
+        <Route
+          path="activities"
+          element={
+            store === undefined ? null : (
+              <Activities source={store} fetchActivity={fetchActivity} onExpired={() => { onUnauthenticated('expired'); }} />
+            )
+          }
+        />
+        {/*
           `postFeed`, `postDownloadClient`, `mappingSubmit` and
           `destinationSubmit` are the real `submit`s this screen needs
           (`../settings/AddFeed.tsx`'s own doc on why each is injected
@@ -427,6 +442,9 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
           */}
           <li>
             <NavLink to="/unmatched">Unmatched</NavLink>
+          </li>
+          <li>
+            <NavLink to="/activities">Activities</NavLink>
           </li>
           <li>
             <NavLink to="/settings">Settings</NavLink>

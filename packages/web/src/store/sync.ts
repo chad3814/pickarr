@@ -43,7 +43,7 @@ import {
   type Cursors,
 } from './meta.ts';
 import type { SyncOp } from './wire.ts';
-import { emit, emitReset } from './notify.ts';
+import { emit, emitActivity, emitReset } from './notify.ts';
 import {
   holdLease,
   broadcast,
@@ -190,15 +190,16 @@ export interface Lease {
  * The subset of `EventSource` the leader's stream uses, so a test can hand
  * in a fake rather than a real browser connection (design spec §3).
  *
- * Two kinds of event: `open`/`error`, which only say whether the connection
+ * Three kinds of event: `open`/`error`, which only say whether the connection
  * is currently up and drive {@link TAIL_INTERVAL_STREAMING_MS} /
- * {@link TAIL_INTERVAL_POLLING_MS}; and `changed`, whose `data` is the
- * host's wire shape (Global Constraints): `{"cursor":<number>,"generation":"<string>"}`.
+ * {@link TAIL_INTERVAL_POLLING_MS}; `changed`, whose `data` is the
+ * host's wire shape (Global Constraints): `{"cursor":<number>,"generation":"<string>"}`;
+ * and `activity`, which carries no data and only says "refetch `/api/activity`".
  * Nothing else is ever read off a real `EventSource` here, so nothing else
  * is declared.
  */
 export interface SyncEventStream {
-  addEventListener(type: 'open' | 'error', listener: () => void): void;
+  addEventListener(type: 'open' | 'error' | 'activity', listener: () => void): void;
   addEventListener(type: 'changed', listener: (event: { readonly data: string }) => void): void;
   close(): void;
 }
@@ -506,6 +507,10 @@ export function startSync(deps: SyncDeps): SyncHandle {
       emitReset();
       return;
     }
+    if (msg.type === 'activity') {
+      emitActivity();
+      return;
+    }
     emit(deserializeChanged(msg.changed));
   });
 
@@ -518,7 +523,7 @@ export function startSync(deps: SyncDeps): SyncHandle {
   }
 
   /**
-   * Opens the event stream and wires its three events (design spec §3).
+   * Opens the event stream and wires its four events (design spec §3).
    * Called once this instance becomes the leader, below -- only the leader
    * opens a stream; a follower hears about changes over the
    * `BroadcastChannel` instead, via `onMessage` above. `deps.events` answers
@@ -545,6 +550,12 @@ export function startSync(deps: SyncDeps): SyncHandle {
       if (pending.has('tail') && !failures.has('tail')) {
         schedule('tail', TAIL_INTERVAL_POLLING_MS);
       }
+    });
+    stream?.addEventListener('activity', () => {
+      // The leader wakes its own page, then tells the followers; the
+      // `onMessage` guard above keeps it from hearing its own relay.
+      emitActivity();
+      broadcast({ type: 'activity' });
     });
     stream?.addEventListener('changed', (event) => {
       void onChanged(event.data).catch(reportStreamFailure);
