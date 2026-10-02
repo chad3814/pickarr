@@ -10,6 +10,7 @@ import {
   partialEnvelope,
   refusedEnvelope,
   resolvedEnvelope,
+  unresolvedEnvelope,
 } from '../src/testing.ts';
 import { MAX_BATCH } from '../src/client.ts';
 import { placementTableMigration } from '../src/placement.ts';
@@ -280,7 +281,58 @@ test('a still-partial poll schedules the next one, counting up', async () => {
     harness.ctx,
   );
 
-  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-d', rssItemId, polls: 5 });
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-d', rssItemId, polls: 5, posted: 'd.mp4' });
+});
+
+test('a poll payload from before posted existed still runs, quoting the filename', async () => {
+  const service = createFakeLookupService({
+    batch: new Map(),
+    polls: new Map([['lookup-g', [unresolvedEnvelope({ lookupId: 'lookup-g' })]]]),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('g.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[POLL_JOB];
+  assert.ok(handler !== undefined);
+  await handler({ id: 8, kind: POLL_JOB, payload: { lookupId: 'lookup-g', rssItemId, polls: 1 }, attempts: 1 }, harness.ctx);
+  assert.match(harness.media.lookupStates.get(rssItemId)?.detail ?? '', /g\.mp4/);
+});
+
+test('a poll payload that carries posted keeps it for the next poll', async () => {
+  const service = createFakeLookupService({
+    batch: new Map(),
+    polls: new Map([['lookup-e', [partialEnvelope({ lookupId: 'lookup-e' })]]]),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('e.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[POLL_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 6, kind: POLL_JOB, payload: { lookupId: 'lookup-e', rssItemId, polls: 1, posted: 'Typed Name' }, attempts: 1 },
+    harness.ctx,
+  );
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-e', rssItemId, polls: 2, posted: 'Typed Name' });
+});
+
+test('the lookup handler hands the posted name to the poll it enqueues', async () => {
+  const service = createFakeLookupService({
+    batch: new Map([['Typed Name', partialEnvelope({ lookupId: 'lookup-f' })]]),
+    polls: new Map(),
+  });
+  const { plugin, harness } = build(service);
+  const rssItemId = harness.insertRssItem('f.mp4');
+  harness.raw.prepare('INSERT INTO xxx_lookup (rss_item_id, created_at, updated_at) VALUES (?, ?, ?)')
+    .run(rssItemId, NOW, NOW);
+  const handler = plugin.jobs[LOOKUP_JOB];
+  assert.ok(handler !== undefined);
+  await handler(
+    { id: 7, kind: LOOKUP_JOB, payload: { rssItemIds: [rssItemId], names: { [String(rssItemId)]: 'Typed Name' } }, attempts: 1 },
+    harness.ctx,
+  );
+  assert.deepEqual(harness.enqueued[0]?.payload, { lookupId: 'lookup-f', rssItemId, polls: 1, posted: 'Typed Name' });
 });
 
 test('a malformed payload throws naming what it should carry', async () => {

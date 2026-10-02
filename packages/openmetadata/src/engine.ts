@@ -65,7 +65,14 @@ export interface ApplyArgs {
 /** Which rss item an answer is about, and how many polls it has already cost. */
 export interface ApplyTarget {
   readonly rssItemId: number;
+  /** The release's real filename. */
   readonly filename: string;
+  /**
+   * What the service was actually asked about: the typed name when a requery
+   * carried one, the filename otherwise. What a sentence about "the name the
+   * service did not recognise" has to quote.
+   */
+  readonly posted: string;
   readonly polls: number;
 }
 
@@ -88,7 +95,7 @@ export interface EnvelopeDeps {
  * one we misread, and `suggestions` is how the two are told apart: "we have
  * never seen this" against "we know the site, not the scene".
  */
-export function describeUnresolved(filename: string, suggestions: MediaSuggestions | null): string {
+export function describeUnresolved(posted: string, suggestions: MediaSuggestions | null): string {
   const parts: string[] = [];
   if (suggestions !== null) {
     if (suggestions.site !== null) parts.push(`site ${suggestions.site.name}`);
@@ -96,8 +103,8 @@ export function describeUnresolved(filename: string, suggestions: MediaSuggestio
       parts.push(`performers ${suggestions.performers.map((person) => person.name).join(', ')}`);
     }
   }
-  if (parts.length === 0) return `the lookup service did not recognise "${filename}"`;
-  return `the lookup service recognised ${parts.join(' and ')} in "${filename}", but not the item itself`;
+  if (parts.length === 0) return `the lookup service did not recognise "${posted}"`;
+  return `the lookup service recognised ${parts.join(' and ')} in "${posted}", but not the item itself`;
 }
 
 /**
@@ -286,6 +293,18 @@ async function applyResolved(
 }
 
 /**
+ * The stored answer for a terminal outcome that is not a match: the envelope,
+ * or `null` when the release is currently linked to a media item. A requery
+ * of a linked release can end `unresolved` or `refused`, and the contract's
+ * invariant is that `lookup_json` exists only while the release is unmatched.
+ */
+function unmatchedLookupJson(raw: DatabaseSync, rssItemId: number, envelope: LookupEnvelope): string | null {
+  const row = raw.prepare('SELECT media_item_id FROM rss_item WHERE id = ?').get(rssItemId);
+  const linked = row !== undefined && row['media_item_id'] !== null;
+  return linked ? null : lookupJsonFor(envelope);
+}
+
+/**
  * One answer, applied. The five outcomes, in the one order that reads them
  * correctly.
  */
@@ -323,14 +342,14 @@ export async function applyEnvelope(
       await ctx.media.setLookupState(
         target.rssItemId,
         'unresolved',
-        `the lookup service never finished lookup ${envelope.lookupId} for "${target.filename}"`,
+        `the lookup service never finished lookup ${envelope.lookupId} for "${target.posted}"`,
         lookupJsonFor(envelope),
       );
       return;
     }
     await ctx.jobs.enqueue({
       kind: POLL_JOB,
-      payload: { lookupId: envelope.lookupId, rssItemId: target.rssItemId, polls },
+      payload: { lookupId: envelope.lookupId, rssItemId: target.rssItemId, polls, posted: target.posted },
       runAt: deps.now + POLL_DELAY_MS,
     });
     // The lookup state stays `pending`: nothing is known about this item yet.
@@ -354,7 +373,12 @@ export async function applyEnvelope(
     // The refusal sentence says *that* the name was rejected; the envelope
     // behind `lookupJsonFor` is what the service actually saw, which is what
     // `/unmatched` shows for the second question a reader asks.
-    await ctx.media.setLookupState(target.rssItemId, 'refused', envelope.refusal, lookupJsonFor(envelope));
+    await ctx.media.setLookupState(
+      target.rssItemId,
+      'refused',
+      envelope.refusal,
+      unmatchedLookupJson(deps.raw, target.rssItemId, envelope),
+    );
     return;
   }
 
@@ -364,8 +388,8 @@ export async function applyEnvelope(
     await ctx.media.setLookupState(
       target.rssItemId,
       'unresolved',
-      describeUnresolved(target.filename, envelope.suggestions),
-      lookupJsonFor(envelope),
+      describeUnresolved(target.posted, envelope.suggestions),
+      unmatchedLookupJson(deps.raw, target.rssItemId, envelope),
     );
     return;
   }
@@ -584,7 +608,11 @@ function readNames(value: unknown): ReadonlyMap<number, string> {
   return names;
 }
 
-function readPollPayload(payload: unknown): { lookupId: string; rssItemId: number; polls: number } {
+/**
+ * `posted` is absent from a payload enqueued before it existed; the caller
+ * falls back to the filename, so an in-flight poll still runs.
+ */
+function readPollPayload(payload: unknown): { lookupId: string; rssItemId: number; polls: number; posted: string | null } {
   if (typeof payload !== 'object' || payload === null
     || !('lookupId' in payload) || !('rssItemId' in payload) || !('polls' in payload)) {
     throw new TypeError('openmetadata: a poll payload must carry lookupId, rssItemId and polls');
@@ -593,7 +621,8 @@ function readPollPayload(payload: unknown): { lookupId: string; rssItemId: numbe
   if (typeof lookupId !== 'string' || typeof rssItemId !== 'number' || typeof polls !== 'number') {
     throw new TypeError('openmetadata: a poll payload must carry lookupId, rssItemId and polls');
   }
-  return { lookupId, rssItemId, polls };
+  const posted = 'posted' in payload && typeof payload.posted === 'string' ? payload.posted : null;
+  return { lookupId, rssItemId, polls, posted };
 }
 
 /**
@@ -749,7 +778,9 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     const { ids, names } = readLookupPayload(job.payload);
     const items = readRssItems(raw, ids);
     // A corrected name replaces the filename only in what is asked of the
-    // service; the target below keeps the real filename for logs.
+    // service. The target below keeps both: `posted` is what a sentence about
+    // the lookup quotes; `filename` is what the lookup table row and the
+    // thrown no-answer error are about.
     const posted = items.map((item) => names.get(item.id) ?? item.filename);
     const answers = await logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).batch(spec.category, posted));
 
@@ -763,7 +794,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
       // eslint-disable-next-line no-await-in-loop -- answers are applied in the order they were asked for, because that order decides which of two items claiming one provider ref wins the dedup
       await applyEnvelope(
         envelope,
-        { rssItemId: item.id, filename: item.filename, polls: 0 },
+        { rssItemId: item.id, filename: item.filename, posted: posted[index] ?? item.filename, polls: 0 },
         envelopeDeps(ctx, raw, db),
       );
     }
@@ -785,7 +816,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     const { raw, db } = ownTables(ctx);
     // The rss item comes from the payload, never from `job.id`: both are
     // numbers, so the wrong one compiles and quietly resolves a stranger.
-    const { lookupId, rssItemId, polls } = readPollPayload(job.payload);
+    const { lookupId, rssItemId, polls, posted } = readPollPayload(job.payload);
     const [item] = readRssItems(raw, [rssItemId]);
     if (item === undefined) throw new Error(`openmetadata: rss item ${rssItemId} does not exist`);
     const envelope = await logged(ctx, deps.baseUrl, () => clientFor(ctx, signal).poll(lookupId));
@@ -793,7 +824,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     // the next one through the very code that enqueued this one.
     await applyEnvelope(
       envelope,
-      { rssItemId, filename: item.filename, polls },
+      { rssItemId, filename: item.filename, posted: posted ?? item.filename, polls },
       envelopeDeps(ctx, raw, db),
     );
   };
