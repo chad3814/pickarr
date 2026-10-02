@@ -1,5 +1,6 @@
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { AddDownloadClientRefusal } from '../clients/add.ts';
+import type { IdentifyReleaseRefusalCode } from '@pickarr/contract';
 import type { RetryLookupOutcome } from '../media/retry.ts';
 import type { PickRefusal } from '../clients/pick.ts';
 import type { MappingRefusal } from '../clients/mappings.ts';
@@ -124,6 +125,24 @@ export function statusForRetryRefusal(refusal: Exclude<RetryLookupOutcome, { acc
       return 409;
     case 'unknown-release':
     case 'plugin-not-registered':
+      return 422;
+  }
+}
+
+/**
+ * `POST /api/releases/:id/identify`'s five refusals, on
+ * {@link statusForRetryRefusal}'s split: `already-linked` is a state that
+ * changed under the caller (409); the other four name something this host
+ * cannot act on (422).
+ */
+export function statusForIdentifyRefusal(refusal: IdentifyReleaseRefusalCode): number {
+  switch (refusal) {
+    case 'already-linked':
+      return 409;
+    case 'unknown-release':
+    case 'plugin-not-registered':
+    case 'unknown-media-item':
+    case 'wrong-plugin':
       return 422;
   }
 }

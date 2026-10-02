@@ -6,6 +6,8 @@ import type {
   DownloadClients,
   DownloadedFile,
   EditMappingInput,
+  IdentifyReleaseOutcome,
+  IdentifyRequest,
   JobHandler,
   MediaPlugin,
   PluginContext,
@@ -36,6 +38,7 @@ import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
 import { retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
+import { identifyRelease as identifyReleaseRule } from './media/identify.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
 import {
   addMapping as addMappingRule,
@@ -185,6 +188,13 @@ export interface Host {
    * its three refusals it decides itself.
    */
   retryLookup(rssItemId: number): Promise<RetryLookupOutcome>;
+  /**
+   * Identifies a release by hand: asks its plugin to look it up again
+   * (`requery`), to look it up under a corrected name (`name`), or links it
+   * to a media item the library already has (`media-item`). Refusals are
+   * values; a plugin fault throws. See `media/identify.ts`.
+   */
+  identifyRelease(rssItemId: number, request: IdentifyRequest): Promise<IdentifyReleaseOutcome>;
   /**
    * Validates and writes a new `rss_feed` row, then schedules its first poll
    * immediately -- the same call `main.ts` already makes at boot for every
@@ -851,6 +861,14 @@ export function createHost(deps: {
       // ids nothing claims, and a retry that re-implemented either would be
       // a second copy free to drift.
       return retryLookupRule({ raw: deps.raw, notify: notifyNewRssItems }, rssItemId);
+    },
+
+    identifyRelease(rssItemId, request) {
+      return identifyReleaseRule(
+        { raw: deps.raw, pluginFor: (id) => plugins.get(id), ctxFor, reassign: media.reassignRelease },
+        rssItemId,
+        request,
+      );
     },
 
     async requestPick(rssItemId) {
