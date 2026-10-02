@@ -241,3 +241,13 @@ test('the listener wired to a real connection publishes on a trigger write', () 
   runDeferred();
   assert.ok(r.body().slice(len).startsWith('event: changed'));
 });
+
+test('notifyActivity publishes one `activity` event per turn, with no data line', () => {
+  const { events, runDeferred } = harness();
+  const r = fakeResponse();
+  events.attach(r.response);
+  const len = r.body().length;
+  events.notifyActivity(); events.notifyActivity(); events.notifyActivity();
+  runDeferred();
+  assert.equal(r.body().slice(len), 'event: activity\ndata:\n\n');
+});

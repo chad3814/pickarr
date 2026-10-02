@@ -37,7 +37,7 @@ import { openConfig } from './config/instance.ts';
 import { DEFAULT_CONFIG_PATH, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret, ensureSyncGeneration } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
-import { openDatabase, setSyncChangedListener } from './db/open.ts';
+import { openDatabase, setActivityChangedListener, setSyncChangedListener } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
@@ -45,6 +45,7 @@ import type { Timers } from './jobs/dispatcher.ts';
 import { assertOriginOnly } from './origin.ts';
 import { envNameFor } from './secrets/names.ts';
 import { installSyncTriggers } from './sync/log.ts';
+import { installActivityTriggers } from './jobs/activity-triggers.ts';
 import { createSyncRegistry } from './sync/registry.ts';
 import { HOST_SYNCED_TABLES } from './sync/tables.ts';
 import { createSyncEvents } from './sync/events.ts';
@@ -835,6 +836,7 @@ export async function main(
   // treatment per boot, in `host.register` (`host.ts`), which is where a
   // plugin's declared names are known.
   installSyncTriggers(raw, HOST_SYNCED_TABLES);
+  installActivityTriggers(raw);
 
   // Resolved once, here, rather than per request: this value cannot change
   // while the process holds `raw` open, so a route reading it would be a
@@ -877,6 +879,7 @@ export async function main(
     defer: (fn) => { setImmediate(fn); },
   });
   setSyncChangedListener(raw, () => { events.notify(); });
+  setActivityChangedListener(raw, () => { events.notifyActivity(); });
 
   const secrets = createSecrets({ raw, baseDir: settings.secretsBaseDir });
 
@@ -943,6 +946,7 @@ export async function main(
     fetch: globalThis.fetch,
     limits: { default: DEFAULT_HOST_CONCURRENCY, perHost: { [lookupHostname]: LOOKUP_CONCURRENCY } },
     timeouts: { default: DEFAULT_FETCH_TIMEOUT_MS, perHost: { [lookupHostname]: LOOKUP_TIMEOUT_MS } },
+    onChange: () => { events.notifyActivity(); },
   });
   // A factory, not a built object: `createHost` supplies the `Secrets` it
   // will also give the reconcile handler, so the two cannot be different
@@ -1042,6 +1046,8 @@ export async function main(
     // The hub `GET /api/sync/events` attaches to, built above and already
     // wired to `setSyncChangedListener`.
     events,
+    // The fetch layer's queue as the Activities page sees it.
+    fetchSnapshot: () => fetch.snapshot(),
     host: settings.readHost,
     port: settings.port,
     webRoot: settings.webRoot,

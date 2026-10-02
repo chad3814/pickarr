@@ -1,4 +1,4 @@
-import type { HostFetch } from '@pickarr/contract';
+import type { ActivityHost, ActivityRequest, HostFetch } from '@pickarr/contract';
 import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
 import type { BoundedQueue } from '../util/bounded-queue.ts';
 import { redactUrl } from '../clients/redact.ts';
@@ -24,19 +24,6 @@ export interface QueuedFetch extends HostFetch {
    * something waiting or in flight appear, sorted by hostname.
    */
   snapshot(): readonly ActivityHost[];
-}
-
-// Mirrors @pickarr/contract's ActivityHost/ActivityRequest; Task 3 switches the import.
-export interface ActivityRequest {
-  readonly method: string;
-  readonly target: string;
-}
-
-export interface ActivityHost {
-  readonly hostname: string;
-  readonly limit: number;
-  readonly inFlight: readonly ActivityRequest[];
-  readonly waiting: readonly ActivityRequest[];
 }
 
 /** `redactUrl`'s output with the query string gone: what a response body may say about a request. Computed once; the raw url is never kept. */
