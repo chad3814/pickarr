@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 import { createStore, type CreateStoreDeps, type Store } from '../../src/store/index.ts';
 import { openStore } from '../../src/store/db.ts';
 import { readCursors } from '../../src/store/meta.ts';
-import { emitReset } from '../../src/store/notify.ts';
+import { emit, emitReset } from '../../src/store/notify.ts';
 import {
   eventually,
   freshDbName,
@@ -233,4 +233,33 @@ test('subscribeReset on the Store reaches the registry a reset announces to', as
   emitReset();
 
   assert.equal(announced, 1, 'the Store subscription is wired to the registry, and unsubscribing works through it');
+});
+
+test('createStore exposes listCatalog and subscribeCatalog, wired to the replica and the registry', async () => {
+  const fetch = stubSyncFetch({ '/api/sync/bootstrap': { since: 0, before: null, generation: 'g' } });
+  const sched = manualScheduler();
+  const store: Store = await createStore({
+    dbName: freshDbName('store-catalog'),
+    fetch: fetch.fetch,
+    schedule: sched.schedule,
+    now: (): number => 1000,
+    locks: grantedLease(),
+  });
+  cleanups.push(() => {
+    store.stop();
+  });
+  await eventually(() => {
+    assert.deepEqual(fetch.urls, ['/api/sync/bootstrap'], 'the bootstrap was requested');
+  }, 'the bootstrap to be requested');
+
+  assert.deepEqual(await store.listCatalog({ pluginId: 'tv', filter: 'all', term: '' }, { limit: 10 }), [], 'an empty replica lists nothing');
+
+  const heard: (readonly number[])[] = [];
+  const off = store.subscribeCatalog((ids) => {
+    heard.push(ids);
+  });
+  emit({ touched: new Map(), inserted: new Map(), catalog: [5] });
+  off();
+  emit({ touched: new Map(), inserted: new Map(), catalog: [6] });
+  assert.deepEqual(heard, [[5]]);
 });

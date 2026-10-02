@@ -486,6 +486,7 @@ test('a mismatched generation wipes, re-bootstraps, and broadcasts, in that orde
   const tx = db.transaction('rows', 'readwrite');
   await request(tx.objectStore('rows').put({ table: 'media_item', id: 7, value: ALPHA }));
   assert.equal(await countRows(db), 1, 'the stale replica has something in it to lose');
+  await request(db.transaction('catalog', 'readwrite').objectStore('catalog').put({ id: 7, pluginId: 'tv', updatedAt: 1, picked: 0, haystack: 'stale' }));
 
   const events: string[] = [];
 
@@ -540,6 +541,7 @@ test('a mismatched generation wipes, re-bootstraps, and broadcasts, in that orde
   assert.deepEqual(heard, [{ type: 'reset', generation: 'gen-new' }], 'the other tab is told, because only the leader could have noticed');
   assert.equal(await countRows(db), 0, 'the replica of the database that no longer exists is gone whole');
   assert.equal(await getRow(db, 'media_item', 7), undefined);
+  assert.equal(await request(db.transaction('catalog', 'readonly').objectStore('catalog').count()), 0, 'and so is the derived catalog, which would otherwise outlive the rows it was computed from');
   assert.ok(sched.pendingFor('tail'), 'both loops restart against the new pivot');
   assert.ok(sched.pendingFor('backfill'), 'including the walk, which has a fresh pivot to descend from');
 });
@@ -725,7 +727,7 @@ test('a follower relays what the leader broadcasts to its own subscribers', asyn
   cleanups.push(() => {
     leaderTab.close();
   });
-  const changed = serializeChanged({ touched: new Map([['media_item', [7]]]), inserted: new Map() });
+  const changed = serializeChanged({ touched: new Map([['media_item', [7]]]), inserted: new Map(), catalog: [] });
   // eslint-disable-next-line unicorn/require-post-message-target-origin -- that argument belongs to `Window.postMessage`; `BroadcastChannel.postMessage` has no origin to name
   leaderTab.postMessage({ type: 'changed', changed } satisfies ChannelMessage);
   await settle();

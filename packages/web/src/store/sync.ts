@@ -44,6 +44,7 @@ import {
 } from './meta.ts';
 import type { SyncOp } from './wire.ts';
 import { emit, emitActivity, emitReset } from './notify.ts';
+import { CATALOG_STORE } from './catalog.ts';
 import {
   holdLease,
   broadcast,
@@ -773,12 +774,13 @@ export function startSync(deps: SyncDeps): SyncHandle {
     });
   }
 
-  /** `rows` and `meta`, both emptied in one transaction, so no reader ever sees one without the other. */
+  /** `rows`, `meta` and the derived `catalog`, all emptied in one transaction, so no reader ever sees one without the others. */
   async function wipe(): Promise<void> {
-    const tx = db.transaction(['rows', 'meta'], 'readwrite');
+    const tx = db.transaction(['rows', 'meta', CATALOG_STORE], 'readwrite');
     await Promise.all([
       request(tx.objectStore('rows').clear()),
       request(tx.objectStore('meta').clear()),
+      request(tx.objectStore(CATALOG_STORE).clear()),
     ]);
     await done(tx);
   }
