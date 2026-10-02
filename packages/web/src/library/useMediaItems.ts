@@ -63,7 +63,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * per that index's own doc), so this exists to decline a malformed row
  * rather than to filter by category a second time.
  */
-function isMediaItem(value: unknown): value is MediaItemSyncRead {
+export function isMediaItem(value: unknown): value is MediaItemSyncRead {
   return isRecord(value) && typeof value.pluginId === 'string';
 }
 
