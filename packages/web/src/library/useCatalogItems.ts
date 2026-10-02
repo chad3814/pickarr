@@ -147,5 +147,8 @@ export function useCatalogItems(
       });
   }, [source, pageSize]);
 
-  return { items, loadMore, done, empty: resolved && items.length === 0 };
+  // `empty` means "no items and nothing more to page", not "the first page
+  // had no items": a page of records whose `media_item` rows are absent
+  // yields no items while `done` is still false and later pages may hold some.
+  return { items, loadMore, done, empty: resolved && done && items.length === 0 };
 }

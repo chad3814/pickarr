@@ -247,15 +247,57 @@ test('a media item missing from rows is skipped, not rendered as a hole', async 
   const { source } = sourceFor(db);
   render(<Listing source={source} query={PICKED} pageSize={2} />);
 
-  // The first page of two records is [Three, Ghost]; Ghost has no row.
+  // The first page of two records is [Three, Ghost]; Ghost has no row and is skipped.
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Three']);
   });
-  // The cursor comes from the last record, so the next page continues past
-  // Ghost rather than stalling on it.
   fireEvent.click(screen.getByRole('button', { name: /load more/i }));
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['Three', 'One']);
+  });
+
+  db.close();
+});
+
+test('a page of records with no media_item rows is not empty, and paging continues from the last record', async () => {
+  // Both records on the first page are ghosts. A cursor taken from the last
+  // *item* would stay undefined, making loadMore a no-op and stranding 'One'.
+  const db = await freshDb();
+  await seed(db, [
+    { id: 1, title: 'One', updatedAt: 10, picked: 1 },
+    { id: 2, title: 'Ghost A', updatedAt: 20, picked: 1, rowMissing: true },
+    { id: 3, title: 'Ghost B', updatedAt: 30, picked: 1, rowMissing: true },
+  ]);
+  let firstPageRead = false;
+  const { source } = sourceFor(db, async (query, opts) => {
+    const records = await listCatalog(db, query, opts);
+    if (opts.from === undefined) firstPageRead = true;
+    return records;
+  });
+  function Probe(): ReactElement {
+    const { items, loadMore, done: allLoaded, empty } = useCatalogItems(source, PICKED, 2);
+    return (
+      <div>
+        <p>{`items=${String(items.length)} done=${String(allLoaded)} empty=${String(empty)}`}</p>
+        {items.map((item) => (
+          <h2 key={item.id}>{item.title}</h2>
+        ))}
+        <button type="button" onClick={loadMore}>Load more</button>
+      </div>
+    );
+  }
+  render(<Probe />);
+
+  // The initial render also reads items=0 done=false empty=false, so wait
+  // for the first page to have been read and committed before asserting.
+  await waitFor(() => {
+    assert.ok(firstPageRead, 'the first page has been read');
+  });
+  await settleRenders();
+  assert.ok(screen.getByText('items=0 done=false empty=false'), 'all-ghost first page: no items, more to page, not empty');
+  fireEvent.click(screen.getByRole('button', { name: /load more/i }));
+  await waitFor(() => {
+    assert.deepEqual(titlesShown(), ['One']);
   });
 
   db.close();
