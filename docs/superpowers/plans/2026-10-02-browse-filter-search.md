@@ -478,10 +478,12 @@ Run: `node --import tsx --conditions development --test packages/web/test/store/
  * **A recompute, never a patch.** Each affected item is rebuilt from `rows`
  * in full, which is what makes op order inside a batch irrelevant: a
  * download before its release, a role before its person, a release before
- * its item -- all read the same final state. The price is three to six
- * reads per affected item; `catalog-apply.test.ts` keeps a tripwire on it.
+ * its item -- all read the same final state. The price is two reads per
+ * affected item plus one per release and one per role with a person id (two in all
+ * for an absent item); `catalog-apply.test.ts` keeps a tripwire on it.
  *
- * Only five tables matter here. A plugin-owned row that carries
+ * Only six tables matter here (`media_item`, `rss_item`, `role`, `person`,
+ * `torrent_download`, `nzb_download`). A plugin-owned row that carries
  * `mediaItemId` (a `tv_release`) comes back from `by_media_item` too and is
  * filtered out by `table`, not by shape.
  */

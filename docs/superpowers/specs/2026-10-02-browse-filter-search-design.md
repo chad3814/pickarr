@@ -105,7 +105,7 @@ fired by `sync.ts` from `Changed` beside the others and relayed to follower tabs
 
 ### 1.4 Cost
 
-Each affected media item is three to six reads and one write. A bootstrap page of several
+Each affected media item is two reads, plus one per release and one per role that names a person, and one write (an item that is absent costs two reads). A bootstrap page of several
 hundred ops over distinct items is a few thousand local requests. §5 includes a timed test as a
 regression tripwire.
 
@@ -181,7 +181,7 @@ Each category route has its own params, so switching category starts from All an
 - **A term with `%`, `_`, `.` or `*`** is a literal substring.
 - **A multi-word term** is one phrase. Parts are newline-joined, so it cannot match across a title and a filename.
 - **No `releaseDate`** contributes no year.
-- **An old tab on schema 2** is closed by the `versionchange` handling `openStore` already has.
+- **An old tab on schema 2** closes its connection in the `versionchange` handler `openStore` already has, and now also reloads the page: the old bundle cannot speak schema 3, and it would otherwise keep its Web Lock lease, leaving a new tab a follower with nothing to follow. The reload loads the new bundle, and the old document's lock releases with it.
 - **A category with no items** shows the controls and `Nothing here yet.` as today under All; under a filter or term it shows the matching empty sentence.
 
 ## 5. Testing
