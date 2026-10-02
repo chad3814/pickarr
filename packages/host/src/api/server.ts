@@ -1,6 +1,6 @@
 /**
- * The read-and-write API on a socket: `node:http`, twenty routes --
- * eighteen behind a session and two open (`/api/health` and the static
+ * The read-and-write API on a socket: `node:http`, twenty-one routes --
+ * nineteen behind a session and two open (`/api/health` and the static
  * bundle) -- bound by default to every interface.
  *
  * The split is spelled out because the line that used to stand here said "six
@@ -24,7 +24,8 @@
  * with `POST /api/unmatched/:id/retry`, letting an operator ask for an
  * unmatched release to be identified again, and to nineteen with
  * `GET /api/sync/events`, the live-push slice's stream of sync nudges, and
- * to twenty with `GET /api/activity`, the Activities slice's read.)
+ * to twenty with `GET /api/activity`, the Activities slice's read, and to
+ * twenty-one with `POST /api/releases/:id/identify`.)
  *
  * **It said "eleven" through two of those.** The download-clients slice
  * added its route and left both this line and `ROUTES`' own doc reading
@@ -152,6 +153,8 @@ import type {
   AddMappingInput,
   DestinationRefusalBody,
   EditMappingInput,
+  IdentifyReleaseOutcome,
+  IdentifyRequest,
 } from '@pickarr/contract';
 import type { DestinationRefusal, SaveDestinationInput } from '../media/destinations.ts';
 import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
@@ -165,21 +168,24 @@ import { json } from './answer.ts';
 import type { Answer } from './answer.ts';
 import { readBody } from './body.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
-import { DIGITS, feedIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
+import { DIGITS, feedIdFrom, identifyIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
 import {
   destinationBodyFrom,
   isDownloadClientBody,
   isFeedBody,
+  isIdentifyBody,
   isMappingBody,
   isMappingEditBody,
   isPickBody,
   isSetFeedDisabledBody,
+  trimIdentifyBody,
 } from './request-shapes.ts';
 import {
   statusForDestinationRefusal,
   statusForDownloadClientRefusal,
   statusForFeedRefusal,
+  statusForIdentifyRefusal,
   statusForMappingRefusal,
   statusForPickRefusal,
   statusForRetryRefusal,
@@ -371,6 +377,12 @@ export interface ReadServerDeps {
    * Resolves a refusal value; throws only on a fault.
    */
   retryLookup: (rssItemId: number) => Promise<RetryLookupOutcome>;
+  /**
+   * Identifies a release by hand -- `Host.identifyRelease`, handed in as one
+   * function for the same reason. Resolves a refusal value; throws only on a
+   * fault.
+   */
+  identifyRelease: (rssItemId: number, request: IdentifyRequest) => Promise<IdentifyReleaseOutcome>;
   /**
    * Submits a pick -- `Host.requestPick`, handed in as the one operation
    * this route needs rather than the whole `Host`, for the reason `addFeed`
@@ -867,8 +879,8 @@ interface Route {
 const STATIC_ROUTE_PATH = '/*';
 
 /**
- * The twenty routes -- eighteen guarded, two `open: true`, the same split
- * this module's own doc states. Twenty *routes*, twenty-two
+ * The twenty-one routes -- nineteen guarded, two `open: true`, the same split
+ * this module's own doc states. Twenty-one *routes*, twenty-three
  * route-and-method pairs: `/api/mappings/:id` and `/api/feeds/:id` are the
  * two entries here that declare two methods each, so the two counts have
  * parted company and a reader counting "endpoints" will get a different
@@ -884,9 +896,10 @@ const STATIC_ROUTE_PATH = '/*';
  * made it fifteen and the importer slice sixteen. The feed-removal slice
  * made it seventeen and the retry slice eighteen, both missing this line
  * too. The live-push slice's `GET /api/sync/events` made it nineteen
- * and the Activities slice's `GET /api/activity` twenty.
+ * and the Activities slice's `GET /api/activity` twenty, and
+ * `POST /api/releases/:id/identify` twenty-one.
  * Measured with the `grep` below on each occasion, not incremented on
- * sight -- `20` on this tree.) That is not an argument for deleting the number:
+ * sight -- `21` on this tree.) That is not an argument for deleting the number:
  * a reader wants to know whether the table below is the whole set. It is
  * an argument for checking it, because no test pins the total and none
  * can usefully. The one count assertion in `api/server.test.ts` is
@@ -1203,6 +1216,24 @@ export const ROUTES: readonly Route[] = [
         return json(statusForRetryRefusal(result.refusal), { refusal: result.refusal });
       }
       return json(202, { accepted: true });
+    },
+  },
+  {
+    path: '/api/releases/:id/identify',
+    methods: ['POST'],
+    open: false,
+    // Guarded like every write. 202 for `requery` and `name`, because the
+    // plugin only enqueues a lookup and the answer arrives through the sync
+    // replica; 200 for `media-item`, which is finished when this answers.
+    // The id travels in the path and the mode in the body, whose `name` is
+    // trimmed here so nothing downstream sees the padding.
+    answer: async ({ deps, pathname, body }) => {
+      const id = identifyIdFrom(pathname);
+      if (id === undefined) return UNKNOWN_ROUTE;
+      if (!isIdentifyBody(body)) return json(400, { refusal: 'invalid-shape' });
+      const result = await deps.identifyRelease(id, trimIdentifyBody(body));
+      if ('refusal' in result) return json(statusForIdentifyRefusal(result.refusal), { refusal: result.refusal });
+      return 'accepted' in result ? json(202, result) : json(200, result);
     },
   },
   {

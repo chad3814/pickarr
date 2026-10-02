@@ -101,6 +101,9 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     retryLookup: () => {
       throw new Error('retryLookup not stubbed in this test');
     },
+    identifyRelease: () => {
+      throw new Error('identifyRelease not stubbed in this test');
+    },
     requestPick: () => {
       throw new Error('requestPick not stubbed in this test');
     },

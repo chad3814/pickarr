@@ -746,6 +746,8 @@ async function boot(): Promise<Booted> {
     // cannot see is a release becoming matched, which needs a real lookup
     // service and is not something this suite has.
     retryLookup: (rssItemId) => host.retryLookup(rssItemId),
+    // `Host.identifyRelease`, wired exactly as `main.ts` wires it.
+    identifyRelease: (rssItemId, request) => host.identifyRelease(rssItemId, request),
     // `Host.requestPick`, wired exactly as `main.ts` wires it. What a spec
     // can observe through it is *wider* than through the two above, which
     // is the opposite of what this comment said while `stubPlugin`'s

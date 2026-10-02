@@ -101,6 +101,7 @@ function fakeHost(overrides: Partial<Host>): Host {
     requestDownload: async () => { throw new Error('requestDownload: not used by this test'); },
     requestPick: async () => { throw new Error('requestPick: not used by this test'); },
     retryLookup: async () => { throw new Error('retryLookup: not used by this test'); },
+    identifyRelease: async () => { throw new Error('identifyRelease: not used by this test'); },
     deliverToPlugin: async () => { throw new Error('deliverToPlugin: not used by this test'); },
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
     scheduleReconcile: async () => { throw new Error('scheduleReconcile: not used by this test'); },
