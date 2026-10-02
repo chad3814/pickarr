@@ -155,6 +155,40 @@ test('a publish deferred into an open transaction re-defers instead of reading u
   assert.equal(after.split('event: changed').length - 1, 1, 'the deferred publish lands once the transaction commits');
 });
 
+test('an activity publish deferred into an open transaction re-defers, and is written once after COMMIT', () => {
+  // The same re-defer path as `publish`, with its own flag.
+  const { events, raw, runDeferred } = harness();
+  const r = fakeResponse();
+  events.attach(r.response);
+  const before = r.body();
+
+  raw.exec('BEGIN');
+  events.notifyActivity();
+  runDeferred();
+  assert.equal(r.body(), before, 'nothing published while still inside the transaction');
+  assert.equal(events.openStreams, 1, 'the stream is still open, not dropped');
+
+  raw.exec('COMMIT');
+  runDeferred();
+  const after = r.body().slice(before.length);
+  assert.equal(after, 'event: activity\ndata:\n\n', 'the deferred activity event lands once, after the commit');
+  runDeferred();
+  assert.equal(r.body().slice(before.length), after, 'and is not written again');
+});
+
+test('notify and notifyActivity in the same turn write both a changed and an activity event', () => {
+  const { events, runDeferred } = harness();
+  const r = fakeResponse();
+  events.attach(r.response);
+  const before = r.body();
+  events.notify();
+  events.notifyActivity();
+  runDeferred();
+  const after = r.body().slice(before.length);
+  assert.equal(after.split('event: changed').length - 1, 1, after);
+  assert.equal(after.split('event: activity').length - 1, 1, after);
+});
+
 test('the heartbeat is a comment line to every open stream', () => {
   const { events, heartbeat } = harness();
   const a = fakeResponse(); const b = fakeResponse();
