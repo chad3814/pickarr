@@ -52,8 +52,14 @@ export interface FeedsProps {
  * One feed, with the control that removes it or puts it back.
  *
  * **Its own component so each row owns its pending state and its own
- * sentence.** Held on `Feeds` they would be one map keyed by feed id, and
- * every click would have to be careful not to clear another row's message.
+ * sentence** -- with one exception. Held on `Feeds` they would be one map
+ * keyed by feed id, and every click would have to be careful not to clear
+ * another row's message. The exception is the `deleted` outcome: that row
+ * leaves the list on the next sync tick, about twenty milliseconds after the
+ * DELETE answers in a real browser (the e2e spec's own timeline), and a
+ * sentence held here would unmount with it before anyone read it. So that
+ * one sentence goes up through `onRemoved` to a status line `Feeds` keeps
+ * outside the rows; "disabled" and every refusal keep the row and stay here.
  *
  * **Removing says what happened rather than "done".** A feed that produced
  * releases is disabled and keeps them, because `rss_item.feed_id` is
@@ -61,7 +67,14 @@ export interface FeedsProps {
  * came from. An operator who asked to remove something and got "disabled"
  * is owed the reason, and the count is it.
  */
-function FeedRow({ feed, removal }: { feed: RssFeedSyncRead; removal: FeedRemovalSubmit }): ReactElement {
+interface FeedRowProps {
+  feed: RssFeedSyncRead;
+  removal: FeedRemovalSubmit;
+  /** The `deleted` sentence, which must outlive this row -- see the docblock above. */
+  onRemoved: (sentence: string) => void;
+}
+
+function FeedRow({ feed, removal, onRemoved }: FeedRowProps): ReactElement {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | undefined>(undefined);
   const disabled = feed.disabledAt !== null;
@@ -101,7 +114,13 @@ function FeedRow({ feed, removal }: { feed: RssFeedSyncRead; removal: FeedRemova
           type="button"
           disabled={pending}
           onClick={() => {
-            run(async () => removalMessage(await removal.remove(feed.id)));
+            run(async () => {
+              const outcome = await removal.remove(feed.id);
+              const sentence = removalMessage(outcome);
+              if (outcome.outcome !== 'deleted') return sentence;
+              onRemoved(sentence);
+              return undefined;
+            });
           }}
         >
           {pending ? 'Removing\u2026' : `Remove ${feed.name}`}
@@ -114,18 +133,23 @@ function FeedRow({ feed, removal }: { feed: RssFeedSyncRead; removal: FeedRemova
 
 export function Feeds({ source, submit, removal }: FeedsProps): ReactElement {
   const feeds = useFeeds(source);
+  // The last removal's sentence, kept here because the row that earned it is
+  // about to leave the list (see `FeedRow`'s docblock). One slot, not a map:
+  // a second removal replaces the first sentence, which is the news anyway.
+  const [removed, setRemoved] = useState<string | undefined>(undefined);
 
   return (
     <section aria-labelledby="feeds-heading">
       <h2 id="feeds-heading">Feeds</h2>
       <AddFeed submit={submit} />
+      {removed !== undefined && <p role="status">{removed}</p>}
       {feeds !== undefined &&
         (feeds.length === 0 ? (
           <p>No feeds yet.</p>
         ) : (
           <ul aria-label="feeds">
             {feeds.map((feed) => (
-              <FeedRow key={feed.id} feed={feed} removal={removal} />
+              <FeedRow key={feed.id} feed={feed} removal={removal} onRemoved={setRemoved} />
             ))}
           </ul>
         ))}
