@@ -37,7 +37,7 @@
  * `DownloadClientSyncRead` is its projection -- so both ids now name a row
  * the replica actually holds. Neither is resolved here all the same, for
  * the reason the paragraph above gives rather than for want of a row: this
- * gatherer names six tables and neither of those two is among them.
+ * gatherer names ten tables and neither of those two is among them.
  * Resolving either is a caller's join against `store/rows.ts` directly --
  * `settings/useDownloadClients.ts` reads `download_client` exactly that
  * way -- not this module's job.
@@ -63,11 +63,10 @@ import { byMediaItem, byPersonIds, byRssItem, getRow, getRows } from './rows.ts'
  * `store/rows.ts` deliberately returns `unknown`: the row-level surface does
  * not know what shape any table holds, by design (that knowledge belongs to
  * this module and to a plugin's `compose.ts`, never to the store itself).
- * This gatherer does know, for exactly the six tables it names, because
- * `@pickarr/contract`'s `*SyncRead` interface for each of those six -- one
- * of nine now that `rss_feed`, `download_client` and `filepath_mapping`
- * have joined the synced set, none of the other three named anywhere in
- * this module -- is pinned
+ * This gatherer does know, for exactly the ten tables it names, because
+ * `@pickarr/contract`'s `*SyncRead` interface for each of those ten (the
+ * four artwork tables share two: `ArtworkSyncRead` and `PersonImageSyncRead`)
+ * is pinned
  * to the projection the host actually emits for it (`packages/host/test/sync/tables.test.ts` is what keeps the
  * two from drifting).
  *

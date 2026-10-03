@@ -161,6 +161,22 @@ test("a role carries its person's pictures by rank, and none when the person has
   db.close();
 });
 
+test('a poster row missing rank, or with a string width, is skipped while the others still list', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    artworkRow('poster', 20, 7, 0),
+    { op: 'upsert', table: 'poster', id: 21, value: { mediaItemId: 7, width: 10, height: 15, language: null } },
+    { op: 'upsert', table: 'poster', id: 22, value: { mediaItemId: 7, width: '10', height: 15, language: null, rank: 1 } },
+  ]);
+
+  const gathered = await gatherMediaItem(db, 7);
+
+  assert.ok(gathered !== undefined);
+  assert.deepEqual(gathered.artwork.posters.map((p) => p.id), [20]);
+  db.close();
+});
+
 test('a poster row for an item not yet replicated does not break gathering of another item', async () => {
   const db = await freshDb();
   await seed(db, [
