@@ -335,15 +335,18 @@ export async function applyEnvelope(
     const polls = target.polls + 1;
     if (polls > MAX_POLLS) {
       // The service never finished, so the last envelope it sent is the only
-      // record of how far it got -- `lookupJsonFor` is what a reader of
-      // `/unmatched` sees instead of a bare "gave up" sentence, and its parse
-      // is the best video resolution there is (issue #98).
+      // record of how far it got -- what a reader of `/unmatched` sees
+      // instead of a bare "gave up" sentence, and its parse is the best video
+      // resolution there is (issue #98). Stored only while the release is
+      // unmatched, through the same gate the unresolved and refused branches
+      // use (#109): a requery of a matched release that times out leaves no
+      // answer on a linked row.
       await ctx.media.setVideoResolution(target.rssItemId, videoResolutionOf(envelope));
       await ctx.media.setLookupState(
         target.rssItemId,
         'unresolved',
         `the lookup service never finished lookup ${envelope.lookupId} for "${target.posted}"`,
-        lookupJsonFor(envelope),
+        unmatchedLookupJson(deps.raw, target.rssItemId, envelope),
       );
       return;
     }

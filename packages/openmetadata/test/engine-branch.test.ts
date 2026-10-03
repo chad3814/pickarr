@@ -103,6 +103,24 @@ test('the last permitted poll gives up, naming the lookup id, and stores the env
   assert.equal(recorded?.lookupJson, lookupJsonFor(envelope));
 });
 
+test('a poll that expires on a linked release leaves lookup_json NULL, and on an unlinked one stores the envelope', async () => {
+  // The same invariant the unresolved and refused branches keep (#109): a
+  // stored answer exists only while the release is unmatched. A requery of a
+  // matched release that never finishes must not leave one behind.
+  const linked = fixture('linked.mkv');
+  linked.harness.raw.prepare('UPDATE rss_item SET media_item_id = 1 WHERE id = ?').run(linked.rssItemId);
+  const envelope = pendingEnvelope({ lookupId: 'lookup-expired' });
+  await applyEnvelope(envelope, { rssItemId: linked.rssItemId, filename: 'linked.mkv', posted: 'linked.mkv', polls: MAX_POLLS }, linked.deps);
+  const linkedState = linked.harness.media.lookupStates.get(linked.rssItemId);
+  assert.equal(linkedState?.state, 'unresolved');
+  assert.match(linkedState?.detail ?? '', /lookup-expired/);
+  assert.equal(linkedState?.lookupJson, null, 'a linked release keeps no stored answer');
+
+  const unlinked = fixture('unlinked.mkv');
+  await applyEnvelope(envelope, { rssItemId: unlinked.rssItemId, filename: 'unlinked.mkv', posted: 'unlinked.mkv', polls: MAX_POLLS }, unlinked.deps);
+  assert.equal(unlinked.harness.media.lookupStates.get(unlinked.rssItemId)?.lookupJson, lookupJsonFor(envelope), 'an unmatched release still stores it');
+});
+
 test('a refusal is terminal: the lookup state says so and nothing else is written', async () => {
   const { harness, deps, rssItemId, applied } = fixture('item.srt');
 
