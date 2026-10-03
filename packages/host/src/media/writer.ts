@@ -83,49 +83,48 @@ export function createMediaWriter(
   }
 
   /**
-   * The rows to drop, and the files to unlink, once a slot's new image is
-   * in: every other row this owner has in that table.
+   * Each table's two statements, with the `NOT IN (...)` tail supplied per
+   * call: the rows to drop, and the files to unlink, once the images an
+   * owner keeps are known.
    *
-   * **A slot holds one image, and until this existed it accumulated them.**
-   * Each `attach*` upserts on `(owner, url)`, which makes a re-run of the
-   * *same* url idempotent -- the reason that key was chosen -- but makes a
-   * *better* url a second row rather than a correction. Every
-   * `ARTWORK_QUERY` in `api/artwork-route.ts` then serves
-   * `ORDER BY id ASC LIMIT 1`, the oldest row, so the new picture was
-   * written to disk and never served. Re-running the artwork job to
-   * improve artwork could not work, which is how a batch of square
-   * performer crops survived a deliberate re-fetch.
+   * **A table holds the owner's best `ARTWORK_KEEP` images (issue #79), and
+   * until `keepTop` existed it accumulated them.** Each `attach*` upserts on
+   * `(owner, url)`, which makes a re-run of the *same* url idempotent but
+   * makes a better url another row rather than a correction. The attaches
+   * therefore never prune; the artwork job names the survivors once, after
+   * every attach of a kind has settled, and everything else goes.
    *
-   * Two SQL statements per table, spelled literally rather than built from
-   * a table name in a variable: `scripts/check-test-hygiene.ts` reads this
-   * file for reads of named tables, and an interpolated name is not one.
-   * The same reason `sync/tables.ts` spells its own.
-   *
-   * Widening a slot to hold several images is issue #79. When that lands
-   * this is what has to change, and the route's `LIMIT 1` with it -- the
-   * two are one policy stated in two places.
+   * Table names are spelled literally in every statement rather than built
+   * from a variable: `scripts/check-test-hygiene.ts` reads this file for
+   * reads of named tables, and an interpolated name is not one. Only the
+   * placeholder list is interpolated -- SQLite has no array parameter -- and
+   * that is not a table name. The same reason `sync/tables.ts` spells its own.
    */
-  const OTHER_ARTWORK_SQL: Readonly<Record<string, { readonly paths: string; readonly drop: string }>> = {
-    poster: {
-      paths: 'SELECT path FROM poster WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
-      drop: 'DELETE FROM poster WHERE media_item_id = ? AND url <> ?',
-    },
-    background: {
-      paths: 'SELECT path FROM background WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
-      drop: 'DELETE FROM background WHERE media_item_id = ? AND url <> ?',
-    },
-    logo: {
-      paths: 'SELECT path FROM logo WHERE media_item_id = ? AND url <> ? AND path IS NOT NULL',
-      drop: 'DELETE FROM logo WHERE media_item_id = ? AND url <> ?',
-    },
-    person_image: {
-      paths: 'SELECT path FROM person_image WHERE person_id = ? AND url <> ? AND path IS NOT NULL',
-      drop: 'DELETE FROM person_image WHERE person_id = ? AND url <> ?',
-    },
+  const KEEP_TOP_SQL: Readonly<Record<
+    'poster' | 'background' | 'logo' | 'person_image',
+    (placeholders: string) => { readonly paths: string; readonly drop: string }
+  >> = {
+    poster: (p) => ({
+      paths: `SELECT path FROM poster WHERE media_item_id = ? AND url NOT IN (${p}) AND path IS NOT NULL`,
+      drop: `DELETE FROM poster WHERE media_item_id = ? AND url NOT IN (${p})`,
+    }),
+    background: (p) => ({
+      paths: `SELECT path FROM background WHERE media_item_id = ? AND url NOT IN (${p}) AND path IS NOT NULL`,
+      drop: `DELETE FROM background WHERE media_item_id = ? AND url NOT IN (${p})`,
+    }),
+    logo: (p) => ({
+      paths: `SELECT path FROM logo WHERE media_item_id = ? AND url NOT IN (${p}) AND path IS NOT NULL`,
+      drop: `DELETE FROM logo WHERE media_item_id = ? AND url NOT IN (${p})`,
+    }),
+    person_image: (p) => ({
+      paths: `SELECT path FROM person_image WHERE person_id = ? AND url NOT IN (${p}) AND path IS NOT NULL`,
+      drop: `DELETE FROM person_image WHERE person_id = ? AND url NOT IN (${p})`,
+    }),
   };
 
   /**
-   * Leaves `keptUrl` as the owner's only image in `table`.
+   * Makes `urls` the owner's only images in `table`: deletes every other row
+   * and unlinks its file. An empty `urls` deletes every row the owner has.
    *
    * Rows first, then files, the same order and for the same reason
    * `dropMediaItem` gives: a failed unlink after the row is gone leaks a
@@ -134,15 +133,15 @@ export function createMediaWriter(
    * for that reason -- `artwork.remove` swallowing a missing file is what
    * makes a re-run of this safe.
    */
-  async function keepOnly(table: string, ownerId: number, keptUrl: string): Promise<void> {
-    const sql = OTHER_ARTWORK_SQL[table];
-    if (sql === undefined) return;
-    const stale = raw.prepare(sql.paths).all(ownerId, keptUrl);
+  async function keepTop(table: keyof typeof KEEP_TOP_SQL, ownerId: number, urls: readonly string[]): Promise<void> {
+    // `NOT IN ()` is a syntax error in SQLite; `NOT IN ('')` is "keep
+    // nothing" for every url a row can hold, since `url` is never empty.
+    const placeholders = urls.length === 0 ? "''" : urls.map(() => '?').join(', ');
+    const sql = KEEP_TOP_SQL[table](placeholders);
+    const stale = raw.prepare(sql.paths).all(ownerId, ...urls);
     if (stale.length === 0) return;
-    raw.prepare(sql.drop).run(ownerId, keptUrl);
-    await Promise.all(
-      stale.map((row) => artwork.remove(String((row as { path: unknown }).path))),
-    );
+    raw.prepare(sql.drop).run(ownerId, ...urls);
+    await Promise.all(stale.map((row) => artwork.remove(String(row['path']))));
   }
 
   const writer: MediaWriter = {
@@ -325,7 +324,6 @@ export function createMediaWriter(
               width = excluded.width, height = excluded.height, path = excluded.path,
               rank = excluded.rank
       `).run(mediaItemId, poster.title, poster.language, poster.url, width, height, path, poster.rank, at);
-      await keepOnly('poster', mediaItemId, poster.url);
     },
 
     async attachBackground(mediaItemId: number, background: ImageInit): Promise<void> {
@@ -344,7 +342,6 @@ export function createMediaWriter(
               width = excluded.width, height = excluded.height, path = excluded.path,
               rank = excluded.rank
       `).run(mediaItemId, background.title, background.language, background.url, width, height, path, background.rank, at);
-      await keepOnly('background', mediaItemId, background.url);
     },
 
     async attachLogo(mediaItemId: number, logo: ImageInit): Promise<void> {
@@ -364,7 +361,6 @@ export function createMediaWriter(
               width = excluded.width, height = excluded.height, path = excluded.path,
               rank = excluded.rank
       `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, logo.rank, at);
-      await keepOnly('logo', mediaItemId, logo.url);
     },
 
     async attachPersonImage(personId: number, image: ImageInit): Promise<void> {
@@ -390,7 +386,14 @@ export function createMediaWriter(
               width = excluded.width, height = excluded.height, path = excluded.path,
               rank = excluded.rank
       `).run(personId, image.title, image.language, image.url, width, height, path, image.rank, at);
-      await keepOnly('person_image', personId, image.url);
+    },
+
+    async keepArtwork(kind: 'poster' | 'background' | 'logo', mediaItemId: number, urls: readonly string[]): Promise<void> {
+      await keepTop(kind, mediaItemId, urls);
+    },
+
+    async keepPersonImages(personId: number, urls: readonly string[]): Promise<void> {
+      await keepTop('person_image', personId, urls);
     },
 
     async upsertPerson(person: PersonInit): Promise<number> {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProviderImage } from '../../src/artwork/source.ts';
-import { bestImage, createArtworkSources } from '../../src/artwork/source.ts';
+import { bestImage, createArtworkSources, rankImages } from '../../src/artwork/source.ts';
 
 test('the highest score wins', () => {
   // Urls are deliberately the *reverse* of alphabetical order versus score,
@@ -58,6 +58,50 @@ test('ties break on score, then stably', () => {
     { url: 'https://example.test/a.jpg', language: 'en', score: 5 },
   ];
   assert.equal(bestImage(images, 'en')?.url, 'https://example.test/a.jpg');
+});
+
+test('rankImages returns the whole list in bestImage’s order', () => {
+  // One image per tier and score, given scrambled; the expected order is
+  // spelled literally: configured language, then neutral, then foreign, a
+  // higher score first within a tier, and url ascending on a full tie.
+  const images: readonly ProviderImage[] = [
+    { url: 'https://example.test/foreign-high.jpg', language: 'ja', score: 9 },
+    { url: 'https://example.test/neutral-low.jpg', language: null, score: 1 },
+    { url: 'https://example.test/match-low-b.jpg', language: 'en', score: 1 },
+    { url: 'https://example.test/neutral-high.jpg', language: null, score: 8 },
+    { url: 'https://example.test/match-high.jpg', language: 'en', score: 7 },
+    { url: 'https://example.test/match-low-a.jpg', language: 'en', score: 1 },
+  ];
+  assert.deepEqual(rankImages(images, 'en').map((image) => image.url), [
+    'https://example.test/match-high.jpg',
+    'https://example.test/match-low-a.jpg',
+    'https://example.test/match-low-b.jpg',
+    'https://example.test/neutral-high.jpg',
+    'https://example.test/neutral-low.jpg',
+    'https://example.test/foreign-high.jpg',
+  ]);
+  assert.equal(images[0]?.url, 'https://example.test/foreign-high.jpg', 'the input is not reordered');
+  assert.deepEqual(rankImages([], 'en'), []);
+});
+
+test('bestImage is the first of rankImages', () => {
+  const images: readonly ProviderImage[] = [
+    { url: 'https://example.test/b.jpg', language: 'en', score: 5 },
+    { url: 'https://example.test/c.jpg', language: null, score: 9 },
+    { url: 'https://example.test/a.jpg', language: 'en', score: 5 },
+  ];
+  assert.equal(bestImage(images, 'en'), rankImages(images, 'en')[0]);
+  assert.equal(bestImage(images, 'en')?.url, 'https://example.test/a.jpg');
+});
+
+test('rankImages is stable on a full tie', () => {
+  // Same url, language and score: only identity tells them apart, and the
+  // provider's order must survive.
+  const first: ProviderImage = { url: 'https://example.test/same.jpg', language: 'en', score: 5 };
+  const second: ProviderImage = { url: 'https://example.test/same.jpg', language: 'en', score: 5 };
+  const ranked = rankImages([first, second], 'en');
+  assert.equal(ranked[0], first);
+  assert.equal(ranked[1], second);
 });
 
 test('createArtworkSources registers every provider openmetadata emits', () => {

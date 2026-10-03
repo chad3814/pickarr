@@ -208,6 +208,17 @@ export interface MediaWriter {
    * instead.
    */
   attachPersonImage(personId: number, image: ImageInit): Promise<void>;
+  /**
+   * Makes `urls` the media item's only images of `kind`: every other row of
+   * that kind is deleted and its cached file unlinked. The attaches never
+   * prune -- a caller attaches the images it wants, waits for them all, and
+   * then names the survivors once, so an attach that failed is not in `urls`
+   * and a re-run that ranks the same set differently drops nothing. An empty
+   * `urls` drops every image of that kind.
+   */
+  keepArtwork(kind: 'poster' | 'background' | 'logo', mediaItemId: number, urls: readonly string[]): Promise<void>;
+  /** As `keepArtwork`, for a person's pictures. */
+  keepPersonImages(personId: number, urls: readonly string[]): Promise<void>;
   upsertPerson(person: PersonInit): Promise<number>;
   /**
    * Attaches one person's part in one item, keyed on

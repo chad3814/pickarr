@@ -145,8 +145,9 @@ export interface ArtworkSource {
 }
 
 /**
- * Picks the one image a caller should use, out of everything a provider
- * returned for a single kind. The order is a strict three-tier preference,
+ * Orders everything a provider returned for a single kind, best first; the
+ * artwork job keeps the first `ARTWORK_KEEP` and a row's `rank` is its index
+ * here. The order is a strict three-tier preference,
  * decided **before** score is ever consulted:
  *
  *   0. `language` equals the caller's configured language -- the operator
@@ -163,15 +164,14 @@ export interface ArtworkSource {
  * whichever sort stability a runtime happens to implement, or on the order
  * the provider happened to list two equally-good images in.
  *
- * Answers `undefined` for an empty list: a provider having nothing for this
- * item is ordinary, not a failure this function should throw over.
+ * Answers `[]` for an empty list: a provider having nothing for this item is
+ * ordinary, not a failure this function should throw over. The sort is
+ * stable, so two images equal on every key keep the provider's order.
  */
-export function bestImage(
+export function rankImages(
   images: readonly ProviderImage[],
   language: string,
-): ProviderImage | undefined {
-  if (images.length === 0) return undefined;
-
+): ProviderImage[] {
   function tier(image: ProviderImage): 0 | 1 | 2 {
     if (image.language === language) return 0;
     if (image.language === null) return 1;
@@ -184,7 +184,15 @@ export function bestImage(
     if (a.score !== b.score) return b.score - a.score;
     if (a.url === b.url) return 0;
     return a.url < b.url ? -1 : 1;
-  })[0];
+  });
+}
+
+/** The first of {@link rankImages}, or `undefined` for an empty list -- a provider with nothing is ordinary, not a failure. */
+export function bestImage(
+  images: readonly ProviderImage[],
+  language: string,
+): ProviderImage | undefined {
+  return rankImages(images, language)[0];
 }
 
 /** What a provider needs in order to build its `ArtworkSource`. */

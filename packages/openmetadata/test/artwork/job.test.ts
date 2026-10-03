@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import type { HostFetch, ImageInit, JobRecord, MediaWriter, PluginContext } from '@pickarr/contract';
-import { ARTWORK_JOB, createArtworkJob } from '../../src/artwork/job.ts';
+import { ARTWORK_JOB, ARTWORK_KEEP, createArtworkJob } from '../../src/artwork/job.ts';
 import type { ArtworkJobPayload } from '../../src/artwork/job.ts';
 import type { ArtworkAnswer, ArtworkParent, ArtworkSource, ProviderImage } from '../../src/artwork/source.ts';
+import { rankImages } from '../../src/artwork/source.ts';
 import { createTestHarness } from '../../src/testing.ts';
 
 function image(url: string, fields: { language?: string | null; score?: number } = {}): ProviderImage {
@@ -86,7 +87,7 @@ function bytesFetch(table: Readonly<Record<string, Uint8Array | Error>>): {
 }
 
 /**
- * The eight `MediaWriter` methods the artwork job must never reach. Throwing
+ * The `MediaWriter` methods the artwork job must never reach. Throwing
  * rather than recording is deliberate: a double that quietly tolerated a
  * `createMediaItem` or a `setLookupState` could not tell anyone the job made
  * one.
@@ -103,19 +104,34 @@ interface Attached {
   /** The media item id, or the person id for `person`. */
   id: number;
   init: ImageInit;
+  /** Position among every attach and keep call the writer saw, so a test can assert one ran after another. */
+  at: number;
+}
+
+/** One `keepArtwork` or `keepPersonImages` call. */
+interface Kept {
+  /** `poster`, `background`, `logo`, or `person`. */
+  what: string;
+  id: number;
+  urls: readonly string[];
+  /** As `Attached.at`. */
+  at: number;
 }
 
 interface AttachWriter {
   writer: MediaWriter;
   attached: Attached[];
+  kept: Kept[];
   /** Makes every attach of this url reject, the way `ArtworkStore` refuses bytes it cannot measure. */
   refuse(url: string): void;
 }
 
-/** A `MediaWriter` whose four attach methods record and whose other eight throw. */
+/** A `MediaWriter` whose four attach and two keep methods record and whose other seven throw. */
 function attachWriter(): AttachWriter {
   const attached: Attached[] = [];
+  const kept: Kept[] = [];
   const refused = new Set<string>();
+  let calls = 0;
 
   function record(what: string, id: number, init: ImageInit): void {
     if (refused.has(init.url)) {
@@ -124,7 +140,11 @@ function attachWriter(): AttachWriter {
       // cannot measure -- an html error page served 200 looks like this.
       throw new Error(`artwork store: bytes for ${init.url} could not be measured as an image`);
     }
-    attached.push({ what, id, init });
+    attached.push({ what, id, init, at: calls++ });
+  }
+
+  function keep(what: string, id: number, urls: readonly string[]): void {
+    kept.push({ what, id, urls: [...urls], at: calls++ });
   }
 
   const writer: MediaWriter = {
@@ -143,9 +163,11 @@ function attachWriter(): AttachWriter {
     async attachBackground(mediaItemId, background): Promise<void> { record('background', mediaItemId, background); },
     async attachLogo(mediaItemId, logo): Promise<void> { record('logo', mediaItemId, logo); },
     async attachPersonImage(personId, picture): Promise<void> { record('person', personId, picture); },
+    async keepArtwork(kind, mediaItemId, urls): Promise<void> { keep(kind, mediaItemId, urls); },
+    async keepPersonImages(personId, urls): Promise<void> { keep('person', personId, urls); },
   };
 
-  return { writer, attached, refuse: (url) => refused.add(url) };
+  return { writer, attached, kept, refuse: (url) => refused.add(url) };
 }
 
 function payloadFor(fields: Partial<ArtworkJobPayload> = {}): ArtworkJobPayload {
@@ -178,73 +200,95 @@ function urlsOf(attached: readonly Attached[], what: string): string[] {
   return attached.filter((entry) => entry.what === what).map((entry) => entry.init.url);
 }
 
-test('a resolved item gets one poster, one background and one logo', async () => {
-  // Every kind is offered more than one image, so "one per slot" is a
-  // counted property rather than the only thing available. The winners are
-  // spelled literally: `bestImage` decides, and a test that asked it which
-  // one it chose could not see it choose differently.
-  const { source } = scriptedSource(answer({
-    posters: [
-      image('https://cdn.test/poster-fr.jpg', { language: 'fr', score: 9 }),
-      image('https://cdn.test/poster-en.jpg', { language: 'en', score: 2 }),
-      image('https://cdn.test/poster-neutral.jpg', { language: null, score: 8 }),
-    ],
-    backgrounds: [
-      image('https://cdn.test/back-low.jpg', { language: 'en', score: 1 }),
-      image('https://cdn.test/back-high.jpg', { language: 'en', score: 6 }),
-    ],
-    logos: [
-      image('https://cdn.test/logo-de.png', { language: 'de', score: 9 }),
-      image('https://cdn.test/logo-neutral.png', { language: null, score: 1 }),
-    ],
-  }));
+/** `count` images of one language whose scores fall as the index rises, so `rankImages` keeps their order. */
+function descending(prefix: string, count: number): ProviderImage[] {
+  return Array.from({ length: count }, (_, index) =>
+    image(`https://cdn.test/${prefix}-${String(index)}.jpg`, { language: 'en', score: 100 - index }));
+}
+
+test('a resolved item gets up to ARTWORK_KEEP of each kind, ranked', async () => {
+  assert.equal(ARTWORK_KEEP, 5);
+  // Seven posters, scrambled, across all three language tiers, so which
+  // five survive and in what order is `rankImages`' decision. The expected
+  // urls are spelled literally: a test that asked `rankImages` for them
+  // could not see it rank differently.
+  const posters = [
+    image('https://cdn.test/p-foreign.jpg', { language: 'fr', score: 99 }),
+    image('https://cdn.test/p-en-3.jpg', { language: 'en', score: 3 }),
+    image('https://cdn.test/p-neutral-8.jpg', { language: null, score: 8 }),
+    image('https://cdn.test/p-en-5.jpg', { language: 'en', score: 5 }),
+    image('https://cdn.test/p-neutral-2.jpg', { language: null, score: 2 }),
+    image('https://cdn.test/p-en-9.jpg', { language: 'en', score: 9 }),
+    image('https://cdn.test/p-en-1.jpg', { language: 'en', score: 1 }),
+  ];
+  const backgrounds = [
+    image('https://cdn.test/back-low.jpg', { language: 'en', score: 1 }),
+    image('https://cdn.test/back-high.jpg', { language: 'en', score: 6 }),
+    image('https://cdn.test/back-neutral.jpg', { language: null, score: 9 }),
+  ];
+  const logos = [image('https://cdn.test/logo-de.png', { language: 'de', score: 9 })];
+  const { source } = scriptedSource(answer({ posters, backgrounds, logos }));
   // **Every** offered url is downloadable, including the ones that should
   // lose. A table holding only the winners would mask a job that tried to
-  // store all seven: the losers would fail to download, be isolated, and
+  // store all of them: the losers would fail to download, be isolated, and
   // the count would come out right for the wrong reason.
-  const { fetch, asked } = bytesFetch({
-    'https://cdn.test/poster-fr.jpg': BYTES,
-    'https://cdn.test/poster-en.jpg': BYTES,
-    'https://cdn.test/poster-neutral.jpg': BYTES,
-    'https://cdn.test/back-low.jpg': BYTES,
-    'https://cdn.test/back-high.jpg': BYTES,
-    'https://cdn.test/logo-de.png': BYTES,
-    'https://cdn.test/logo-neutral.png': BYTES,
-  });
+  const { fetch, asked } = bytesFetch(Object.fromEntries(
+    [...posters, ...backgrounds, ...logos].map((entry) => [entry.url, BYTES]),
+  ));
   const writer = attachWriter();
   const { ctx } = contextWith(fetch, writer.writer);
 
   const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
   await handler(jobRecord(payloadFor({ mediaItemId: 42 })), ctx);
 
-  assert.deepEqual(urlsOf(writer.attached, 'poster'), ['https://cdn.test/poster-en.jpg']);
-  assert.deepEqual(urlsOf(writer.attached, 'background'), ['https://cdn.test/back-high.jpg']);
-  assert.deepEqual(urlsOf(writer.attached, 'logo'), ['https://cdn.test/logo-neutral.png']);
-  // Three attaches and no more: storing every image a provider offered
-  // would be disk the serving route (#79) can never show.
-  assert.equal(writer.attached.length, 3);
-  // And three downloads: a loser is never even fetched, so the choice
-  // happens before the network rather than after it.
-  assert.deepEqual(asked.toSorted(), [
-    'https://cdn.test/back-high.jpg',
-    'https://cdn.test/logo-neutral.png',
-    'https://cdn.test/poster-en.jpg',
+  const topFivePosters = [
+    'https://cdn.test/p-en-9.jpg',
+    'https://cdn.test/p-en-5.jpg',
+    'https://cdn.test/p-en-3.jpg',
+    'https://cdn.test/p-en-1.jpg',
+    'https://cdn.test/p-neutral-8.jpg',
+  ];
+  // The attaches settle concurrently, so within a kind they are read back by rank.
+  const byRank = (what: string) => writer.attached
+    .filter((entry) => entry.what === what)
+    .toSorted((a, b) => a.init.rank - b.init.rank);
+  assert.deepEqual(
+    byRank('poster').map((entry) => [entry.init.url, entry.init.rank]),
+    topFivePosters.map((url, rank) => [url, rank]),
+  );
+  assert.deepEqual(byRank('background').map((entry) => [entry.init.url, entry.init.rank]), [
+    ['https://cdn.test/back-high.jpg', 0],
+    ['https://cdn.test/back-low.jpg', 1],
+    ['https://cdn.test/back-neutral.jpg', 2],
   ]);
-  // All three against the media item from the payload, not the job id.
-  assert.deepEqual(writer.attached.map((entry) => entry.id), [42, 42, 42]);
-  // The provider's own language travels onto the row, so the chosen
-  // image's language is recoverable later.
-  assert.equal(writer.attached[0]?.init.language, 'en');
-  assert.equal(writer.attached[2]?.init.language, null);
+  assert.deepEqual(byRank('logo').map((entry) => [entry.init.url, entry.init.rank]), [['https://cdn.test/logo-de.png', 0]]);
+  // Five, three and one attaches and no more: the sixth and seventh posters
+  // are never even fetched, so the cut happens before the network.
+  assert.equal(writer.attached.length, 9);
+  assert.equal(asked.length, 9);
+  assert.ok(!asked.includes('https://cdn.test/p-foreign.jpg'));
+  assert.ok(!asked.includes('https://cdn.test/p-neutral-2.jpg'));
+  // All against the media item from the payload, not the job id.
+  assert.ok(writer.attached.every((entry) => entry.id === 42));
+  // The provider's own language travels onto the row.
+  assert.equal(byRank('poster')[0]?.init.language, 'en');
+  assert.equal(byRank('poster')[4]?.init.language, null);
+
+  // One keep call per kind, naming exactly what was attached.
+  assert.deepEqual(writer.kept.map((entry) => [entry.what, entry.id, entry.urls.toSorted()]), [
+    ['poster', 42, topFivePosters.toSorted()],
+    ['background', 42, ['https://cdn.test/back-high.jpg', 'https://cdn.test/back-low.jpg', 'https://cdn.test/back-neutral.jpg']],
+    ['logo', 42, ['https://cdn.test/logo-de.png']],
+  ]);
+  // The literal list agrees with `rankImages`: the job did not re-implement it.
+  assert.deepEqual(rankImages(posters, 'en').slice(0, ARTWORK_KEEP).map((entry) => entry.url), topFivePosters);
 });
 
-test('each person gets one image', async () => {
+test('each person gets up to ARTWORK_KEEP pictures, and one keepPersonImages', async () => {
+  const faces = descending('a', 3);
   const { source, asked } = scriptedSource(answer({
     people: {
-      'person-a': [
-        image('https://cdn.test/a-low.jpg', { language: 'en', score: 1 }),
-        image('https://cdn.test/a-high.jpg', { language: 'en', score: 7 }),
-      ],
+      'person-a': faces,
       'person-b': [image('https://cdn.test/b-only.jpg')],
       // A person the payload never asked about: a source is free to answer
       // more than it was asked, and nothing may be stored for someone this
@@ -252,15 +296,12 @@ test('each person gets one image', async () => {
       'person-unasked': [image('https://cdn.test/unasked.jpg')],
     },
   }));
-  // Every url is downloadable, the losers and the unasked-for included, so
-  // that a job which stored the wrong people is caught by the count rather
-  // than rescued by a download that was never scripted.
-  const { fetch } = bytesFetch({
-    'https://cdn.test/a-low.jpg': BYTES,
-    'https://cdn.test/a-high.jpg': BYTES,
-    'https://cdn.test/b-only.jpg': BYTES,
-    'https://cdn.test/unasked.jpg': BYTES,
-  });
+  // Every url is downloadable, the unasked-for included, so that a job
+  // which stored the wrong people is caught by the count rather than
+  // rescued by a download that was never scripted.
+  const { fetch } = bytesFetch(Object.fromEntries(
+    [...faces, image('https://cdn.test/b-only.jpg'), image('https://cdn.test/unasked.jpg')].map((entry) => [entry.url, BYTES]),
+  ));
   const writer = attachWriter();
   const { ctx } = contextWith(fetch, writer.writer);
 
@@ -279,12 +320,87 @@ test('each person gets one image', async () => {
   // is asked in the provider's vocabulary.
   assert.deepEqual(asked[0]?.personRefs, ['person-a', 'person-b', 'person-c']);
   assert.deepEqual(
-    writer.attached.map((entry) => [entry.what, entry.id, entry.init.url]),
+    writer.attached.map((entry) => [entry.what, entry.id, entry.init.url, entry.init.rank]).toSorted(),
     [
-      ['person', 11, 'https://cdn.test/a-high.jpg'],
-      ['person', 12, 'https://cdn.test/b-only.jpg'],
+      ['person', 11, 'https://cdn.test/a-0.jpg', 0],
+      ['person', 11, 'https://cdn.test/a-1.jpg', 1],
+      ['person', 11, 'https://cdn.test/a-2.jpg', 2],
+      ['person', 12, 'https://cdn.test/b-only.jpg', 0],
     ],
   );
+  assert.deepEqual(writer.kept.map((entry) => [entry.what, entry.id, entry.urls.toSorted()]), [
+    ['person', 11, ['https://cdn.test/a-0.jpg', 'https://cdn.test/a-1.jpg', 'https://cdn.test/a-2.jpg']],
+    ['person', 12, ['https://cdn.test/b-only.jpg']],
+  ]);
+});
+
+test('keepArtwork is called once per kind, after every attach of that kind settled', async () => {
+  const posters = descending('p', 4);
+  const backgrounds = descending('b', 2);
+  const faces = descending('f', 3);
+  const { source } = scriptedSource(answer({ posters, backgrounds, people: { 'person-a': faces } }));
+  const { fetch } = bytesFetch(Object.fromEntries([...posters, ...backgrounds, ...faces].map((entry) => [entry.url, BYTES])));
+  const writer = attachWriter();
+  const { ctx } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ mediaItemId: 3, people: [{ personId: 11, providerRef: 'person-a' }] })), ctx);
+
+  assert.deepEqual(writer.kept.map((entry) => entry.what), ['poster', 'background', 'person'], 'once per kind that had images');
+  const lastAttach = Math.max(...writer.attached.map((entry) => entry.at));
+  for (const entry of writer.kept) {
+    assert.ok(entry.at > lastAttach, `keep ${entry.what} ran at ${String(entry.at)}, before the last attach at ${String(lastAttach)}`);
+  }
+});
+
+test('a failed download of the rank-1 image still keeps the other four and names only the four', async () => {
+  const posters = descending('p', 5);
+  const { source } = scriptedSource(answer({ posters }));
+  const { fetch } = bytesFetch(Object.fromEntries(posters.map((entry) => [entry.url, BYTES])));
+  const writer = attachWriter();
+  writer.refuse('https://cdn.test/p-1.jpg');
+  const { ctx, logs } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ mediaItemId: 9 })), ctx);
+
+  assert.deepEqual(
+    writer.attached.map((entry) => [entry.init.url, entry.init.rank]).toSorted(),
+    [
+      ['https://cdn.test/p-0.jpg', 0],
+      ['https://cdn.test/p-2.jpg', 2],
+      ['https://cdn.test/p-3.jpg', 3],
+      ['https://cdn.test/p-4.jpg', 4],
+    ],
+    'a rank is the provider ranking, so the survivors keep 0, 2, 3 and 4',
+  );
+  assert.equal(writer.kept.length, 1);
+  assert.equal(writer.kept[0]?.what, 'poster');
+  assert.deepEqual(writer.kept[0]?.urls.toSorted(), [
+    'https://cdn.test/p-0.jpg',
+    'https://cdn.test/p-2.jpg',
+    'https://cdn.test/p-3.jpg',
+    'https://cdn.test/p-4.jpg',
+  ]);
+  assert.equal(logs.filter((line) => line.message.includes('could not be stored')).length, 1);
+});
+
+test('a kind whose every download failed is not pruned', async () => {
+  // Naming no survivors would delete what a previous run stored because of
+  // a transient failure; storing nothing should change nothing.
+  const posters = descending('p', 2);
+  const backgrounds = descending('b', 1);
+  const { source } = scriptedSource(answer({ posters, backgrounds }));
+  const { fetch } = bytesFetch(Object.fromEntries([...posters, ...backgrounds].map((entry) => [entry.url, BYTES])));
+  const writer = attachWriter();
+  writer.refuse('https://cdn.test/p-0.jpg');
+  writer.refuse('https://cdn.test/p-1.jpg');
+  const { ctx } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ mediaItemId: 9 })), ctx);
+
+  assert.deepEqual(writer.kept.map((entry) => entry.what), ['background']);
 });
 
 test('the payload\u2019s ancestors reach the source', async () => {
@@ -454,7 +570,7 @@ test('a download the store refuses does not stop the other images', async () => 
   assert.deepEqual(urlsOf(writer.attached, 'poster'), []);
   const complaints = logs.filter((line) => line.message.includes('could not be stored'));
   assert.equal(complaints.length, 1);
-  assert.equal(complaints[0]?.detail?.['what'], 'poster');
+  assert.equal(complaints[0]?.detail?.['what'], 'poster 0');
 });
 
 test('a download that 404s does not stop the other images', async () => {
@@ -669,6 +785,18 @@ function storingWriter(): { writer: MediaWriter; rows(table: string): number; fi
     `).run(ownerId, init.title, init.language, init.url, 10, 10, `/artwork/${fileKey}.bin`, 0);
   }
 
+  /** Drops the owner's rows whose url is not named, and their files -- `keepTop`'s contract. */
+  function keep(table: string, owner: string, ownerId: number, urls: readonly string[], filePrefix: string): void {
+    const kept = new Set(urls);
+    const rows = db.prepare(`SELECT url FROM ${table} WHERE ${owner} = ?`).all(ownerId);
+    for (const row of rows) {
+      const url = String(row['url']);
+      if (kept.has(url)) continue;
+      db.prepare(`DELETE FROM ${table} WHERE ${owner} = ? AND url = ?`).run(ownerId, url);
+      files.delete(`${filePrefix}${url}`);
+    }
+  }
+
   const writer: MediaWriter = {
     createMediaItem: unused('createMediaItem'),
     updateMediaItem: unused('updateMediaItem'),
@@ -687,6 +815,8 @@ function storingWriter(): { writer: MediaWriter; rows(table: string): number; fi
     async attachPersonImage(id, init): Promise<void> {
       write('person_image', 'person_id', id, init, `person:${id}:${init.url}`);
     },
+    async keepArtwork(kind, id, urls): Promise<void> { keep(kind, 'media_item_id', id, urls, `${id}:`); },
+    async keepPersonImages(id, urls): Promise<void> { keep('person_image', 'person_id', id, urls, `person:${id}:`); },
   };
 
   return {
@@ -699,10 +829,10 @@ function storingWriter(): { writer: MediaWriter; rows(table: string): number; fi
   };
 }
 
-test('running twice writes one row and one file per slot', async () => {
+test('running twice writes one row and one file per kept image', async () => {
   // The unique indexes make the second write a no-op; this proves the job
   // does not instead throw on the conflict -- and, just as load-bearing,
-  // that the second run chooses the *same* url, which is what `bestImage`'s
+  // that the second run chooses the *same* urls, which is what `rankImages`'
   // url tiebreak exists for. A choice that varied between runs would write
   // a second row past every index.
   const { source } = scriptedSource(answer({
@@ -712,7 +842,7 @@ test('running twice writes one row and one file per slot', async () => {
     ],
     backgrounds: [image('https://cdn.test/b.jpg')],
     logos: [image('https://cdn.test/l.png')],
-    people: { 'person-a': [image('https://cdn.test/f.jpg')] },
+    people: { 'person-a': [image('https://cdn.test/f.jpg'), image('https://cdn.test/g.jpg')] },
   }));
   const { fetch } = bytesFetch({
     'https://cdn.test/p-a.jpg': BYTES,
@@ -720,6 +850,7 @@ test('running twice writes one row and one file per slot', async () => {
     'https://cdn.test/b.jpg': BYTES,
     'https://cdn.test/l.png': BYTES,
     'https://cdn.test/f.jpg': BYTES,
+    'https://cdn.test/g.jpg': BYTES,
   });
   const store = storingWriter();
   const { ctx, logs } = contextWith(fetch, store.writer);
@@ -729,16 +860,18 @@ test('running twice writes one row and one file per slot', async () => {
   await handler(job, ctx);
   await handler(job, ctx);
 
-  assert.equal(store.rows('poster'), 1);
+  assert.equal(store.rows('poster'), 2);
   assert.equal(store.rows('background'), 1);
   assert.equal(store.rows('logo'), 1);
-  assert.equal(store.rows('person_image'), 1);
-  // One file per slot, and the person's is in its own namespace.
+  assert.equal(store.rows('person_image'), 2);
+  // One file per kept image, and the person's are in their own namespace.
   assert.deepEqual([...store.files.keys()].toSorted(), [
     '5:https://cdn.test/b.jpg',
     '5:https://cdn.test/l.png',
     '5:https://cdn.test/p-a.jpg',
+    '5:https://cdn.test/p-b.jpg',
     'person:11:https://cdn.test/f.jpg',
+    'person:11:https://cdn.test/g.jpg',
   ]);
   assert.deepEqual(logs, [], 'a second run is not an error and says nothing');
 });
