@@ -36,7 +36,7 @@
  * rule just as it would under the bug, and prove nothing about either.
  * `POSTER_FIXTURE` below is a real, decodable 1000x1500 PNG (2:3, the same
  * ratio the poster crop uses) built with ImageMagick and stripped of
- * metadata, intercepted onto `/api/artwork/poster/:id` with `page.route`
+ * metadata, intercepted onto `/api/artwork/poster/:posterId` (the poster row's id) with `page.route`
  * rather than added to `Harness.seedTvRelease` -- that method's own doc
  * says its row's `width`/`height` columns are read back nowhere, and the
  * bytes it seeds are the frame-vs-load distinction `shell.spec.ts`'s own

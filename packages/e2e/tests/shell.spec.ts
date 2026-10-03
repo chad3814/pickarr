@@ -718,7 +718,7 @@ const BARE_ITEM_TITLE = 'No Art Tonight';
 /*
  * **The end-to-end proof that a cached poster reaches the screen.** A
  * `poster` row, the bytes its `path` names, `GET
- * /api/artwork/poster/:mediaItemId`, and Chromium decoding the response --
+ * /api/artwork/poster/:posterId` (the poster row's id), and Chromium decoding the response --
  * four links, and no smaller test can hold more than one of them at a
  * time. Nothing exercised the whole chain before this slice: the `<img>`
  * in every browse card 404'd from the day it was written.
@@ -785,7 +785,7 @@ test('a cached poster is decoded in the browser, and an item with none shows a p
   // **Both cards have to be expanded, and that is new.** A browse row
   // carried a poster until the detail section landed; `MediaItemCard`
   // renders no artwork now, so the only `<img>` that loads from
-  // `/api/artwork/poster/:id` is the detail section's, inside the
+  // `/api/artwork/poster/:posterId` is the detail section's, inside the
   // expanded body. This spec is the only place in the suite that proves
   // that route serves real bytes end to end --
   // `media-details.spec.ts` intercepts it with a fixture -- so the proof

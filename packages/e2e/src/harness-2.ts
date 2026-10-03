@@ -442,7 +442,8 @@ export interface Harness {
    * One television media item and the `tv_release` row that gives its
    * collapsed card a headline -- the series, the season and episode numbers,
    * and, optionally, a poster the `<img>` will actually load. Returns the
-   * `media_item` id.
+   * `media_item` id and the poster row's id (`undefined` without a poster):
+   * the browser addresses a poster by that row id, `/api/artwork/poster/<id>`.
    *
    * **Every insert happens in one synchronous call**: nothing here `await`s,
    * so the host's own `/api/sync` handler cannot run between two of these
@@ -467,11 +468,10 @@ export interface Harness {
    * woken** -- which is acceptance 1 -- and a two-call seed would quietly
    * turn it into an assertion about the recovery path instead.
    *
-   * Callers therefore get one method rather than a composable
-   * `seedPoster(mediaItemId)` beside a `seedTvRelease(mediaItemId)`. Two
-   * calls would still be safe back to back -- both would be synchronous --
-   * but nothing at either call site would say that an `await` between them
-   * is what breaks the spec.
+   * Callers therefore get one method for the first poster. A further poster
+   * for the same item is {@link Harness.seedPoster}, which is synchronous
+   * too: back to back the two are safe, and an `await` between them only
+   * delays the second poster's arrival.
    *
    * **`withPoster` is required rather than defaulted**, the same reason
    * `seedPickableRelease`'s `withDownloadClient` is: a spec that omitted it
@@ -490,7 +490,15 @@ export interface Harness {
     seasonNumber: number | null;
     episodeNumber: number | null;
     withPoster: boolean;
-  }): number;
+  }): { mediaItemId: number; posterId: number | undefined };
+  /**
+   * One more `poster` row for `mediaItemId` at `rank`, pointing at the same
+   * file {@link Harness.seedTvRelease}'s `withPoster` uses (one file, two
+   * rows serves fine). Returns the new row's id, which is what the browser
+   * addresses it by. The `url` is distinct per rank, as the unique index on
+   * `(media_item_id, url)` requires.
+   */
+  seedPoster(mediaItemId: number, rank: number): number;
   /**
    * Everything a pick needs that a browser cannot create for itself: a
    * torrent download client pointed at this test's fake qBittorrent, a
@@ -858,6 +866,24 @@ export const test = base.extend<{ harness: Harness }>({
         return Number(info.lastInsertRowid);
       }
 
+      function seedPoster(mediaItemId: number, rank: number): number {
+        // `width`/`height` are the real 1x1 of `POSTER_PNG`, not the frame
+        // the card renders: the replica carries them (artwork rows replicate
+        // as `id`, owner, `width`, `height`, `language`, `rank`) but nothing
+        // reads them back for layout, and recording the frame's numbers here
+        // would be a measurement of the wrong thing in a `NOT NULL` column.
+        //
+        // `url` is `.invalid` (RFC 2606) for the same reason
+        // `seedPickableRelease`'s feed url is: it is under a unique index
+        // with `media_item_id`, so it needs a value, and nothing should be
+        // able to resolve it. It never replicates; the browser addresses
+        // the row by id.
+        const result = raw.prepare(
+          'INSERT INTO poster (media_item_id, url, width, height, rank, created_at, path) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ).run(mediaItemId, `http://artwork.invalid/${String(mediaItemId)}-${String(rank)}.png`, 1, 1, rank, Date.now(), posterPath);
+        return Number(result.lastInsertRowid);
+      }
+
       // Synchronous from end to end -- see `Harness.seedTvRelease`'s own doc
       // for why nothing in here may `await`.
       function seedTvRelease(
@@ -868,24 +894,10 @@ export const test = base.extend<{ harness: Harness }>({
           episodeNumber: number | null;
           withPoster: boolean;
         },
-      ): number {
+      ): { mediaItemId: number; posterId: number | undefined } {
         const at = Date.now();
         const mediaItemId = seedMediaItem('tv', title);
-        if (withPoster) {
-          // `width`/`height` are the real 1x1 of `POSTER_PNG`, not the frame
-          // the card renders: nothing reads these two back (`poster` is not
-          // a synced table -- artwork is not replicated, design spec §1.2),
-          // and recording the frame's numbers here would be a measurement of
-          // the wrong thing written into a `NOT NULL` column.
-          //
-          // `url` is `.invalid` (RFC 2606) for the same reason
-          // `seedPickableRelease`'s feed url is: it is under a unique index
-          // with `media_item_id`, so it needs a value, and nothing should be
-          // able to resolve it even if some future change did try.
-          raw.prepare(
-            'INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (?, ?, ?, ?, ?, ?)',
-          ).run(mediaItemId, `http://artwork.invalid/${String(mediaItemId)}.png`, 1, 1, at, posterPath);
-        }
+        const posterId = withPoster ? seedPoster(mediaItemId, 0) : undefined;
         const series = raw.prepare(`
           INSERT INTO tv_series (provider, provider_ref, title, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?)
@@ -912,7 +924,7 @@ export const test = base.extend<{ harness: Harness }>({
           at,
           at,
         );
-        return mediaItemId;
+        return { mediaItemId, posterId };
       }
 
       function seedXxxScene({ title, siteName }: { title: string; siteName: string | null }): number {
@@ -938,6 +950,7 @@ export const test = base.extend<{ harness: Harness }>({
         claimToken,
         seedMediaItem,
         seedTvRelease,
+        seedPoster,
         seedXxxScene,
         async seedUnmatchedRelease({ filename, feedName, lookupState, detail, lookupJson }) {
           const feed = await host.addFeed({
