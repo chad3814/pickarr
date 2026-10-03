@@ -8,7 +8,8 @@
  *
  * Everything here comes from the replica -- `media_item`'s own columns and
  * the `roles` the gather resolves -- except the images, which are urls the
- * host serves because artwork is deliberately not replicated (#79).
+ * host serves: artwork rows replicate without their bytes, so each picture is
+ * a url built from its row id (#79).
  */
 import type { ReactElement } from 'react';
 import { useState } from 'react';
@@ -90,17 +91,19 @@ function galleryImages(
   // look at. Dropping it also spares the carousel a slot that is empty
   // for most items, since a logo is the artwork providers supply least
   // often.
-  const media = [gathered.artwork.poster, gathered.artwork.background]
-    .map((url) => ({ url, caption: item.title }));
-  const people = cast.flatMap((role) => (
-    role.person === undefined ? [] : [{ url: role.imageUrl, caption: role.person.name }]
-  ));
+  const media = [gathered.artwork.posters[0], gathered.artwork.backgrounds[0]]
+    .flatMap((image) => (image === undefined ? [] : [{ url: image.url, caption: item.title }]));
+  const people = cast.flatMap((role) => {
+    const image = role.images[0];
+    return role.person === undefined || image === undefined ? [] : [{ url: image.url, caption: role.person.name }];
+  });
   return [...media, ...people];
 }
 export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsProps): ReactElement {
   // Which image the gallery opened on, or `undefined` for closed.
   const [openAt, setOpenAt] = useState<string | undefined>(undefined);
   const [posterFailed, setPosterFailed] = useState(false);
+  const posterUrl = gathered.artwork.posters[0]?.url;
 
   const cast = topBilled(gathered.roles, CAST_LIMIT);
   const own = mediaLink(item.provider, item.providerRef);
@@ -115,14 +118,14 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
           type="button"
           className="poster"
           onClick={() => {
-            setOpenAt(gathered.artwork.poster);
+            setOpenAt(posterUrl);
           }}
         >
-          {posterFailed ? (
+          {posterFailed || posterUrl === undefined ? (
             <ImagePlaceholder label={`No poster for ${item.title}`} />
           ) : (
             <img
-              src={gathered.artwork.poster}
+              src={posterUrl}
               alt={item.title}
               onError={() => {
                 setPosterFailed(true);
@@ -184,7 +187,7 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
  * picture failed -- which a `map` in the parent cannot.
  *
  * **No button once the picture has failed, whole-branch review finding
- * 2.** A person's gallery holds exactly one url (`role.imageUrl`, unlike
+ * 2.** A person's gallery holds exactly one url (`role.images[0]`, unlike
  * the media gallery's three), so once that url has 404'd there is nothing
  * left for the gallery to show. `Gallery`'s own effect closes itself the
  * instant it finds no image showing -- which fires the same render pass it
@@ -206,22 +209,23 @@ function CastMember({
   onOpen: (url: string) => void;
 }): ReactElement {
   const [failed, setFailed] = useState(false);
+  const imageUrl = role.images[0]?.url;
   const name = role.person?.name ?? '';
   const href = role.person === undefined ? undefined : personLink(provider, role.person.providerRef);
 
   return (
     <li>
-      {failed ? (
+      {failed || imageUrl === undefined ? (
         <ImagePlaceholder label={`No picture of ${name}`} />
       ) : (
         <button
           type="button"
           onClick={() => {
-            onOpen(role.imageUrl);
+            onOpen(imageUrl);
           }}
         >
           <img
-            src={role.imageUrl}
+            src={imageUrl}
             alt={name}
             onError={() => {
               setFailed(true);

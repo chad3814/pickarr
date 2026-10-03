@@ -2,9 +2,9 @@
  * The host-owned gatherer: everything common to one media item, assembled
  * from the row-level replica in `store/rows.ts` (design spec §7).
  *
- * **Plugin-blind by construction.** This module names exactly six tables --
- * `media_item`, `rss_item`, `torrent_download`, `nzb_download`, `person` and
- * `role` -- and no others. `byMediaItem` hands back every row belonging to a
+ * **Plugin-blind by construction.** This module names exactly ten tables --
+ * `media_item`, `rss_item`, `torrent_download`, `nzb_download`, `person`,
+ * `role`, `poster`, `background`, `logo` and `person_image` -- and no others. `byMediaItem` hands back every row belonging to a
  * media item across *every* synced table, plugin ones included; this
  * gatherer simply does not recognise a table it did not name and leaves it
  * out. A plugin's own `compose.ts` reads the rows this one ignores. That
@@ -21,8 +21,12 @@
  * known, before any card expands, and `library/usePluginRows.ts` is what a
  * screen calls it through.
  *
- * **No artwork rows.** Artwork is not replicated (design spec §1.2, #79); the
- * three urls below are the whole of what this gatherer can say about it.
+ * **Artwork rows are gathered, and a url is derived, never stored.** The host
+ * replicates `poster`, `background`, `logo` and `person_image` rows without
+ * their `url` or `path` (#79): an id, a size, a language and a `rank`. They
+ * arrive in `byMediaItem` like any other row of the item (a person's through
+ * `byPersonIds`), and this gatherer turns each into a `GatheredImage` whose
+ * url is `/api/artwork/<kind>/<row id>`, ordered by `rank` and then `id`.
  *
  * **`feedId` and `downloadClientId` are carried through untouched, and both
  * are now resolvable by someone -- just not here.** This paragraph used to
@@ -39,15 +43,18 @@
  * way -- not this module's job.
  */
 import type {
+  ArtworkSyncRead,
   MediaItemSyncRead,
   NzbDownloadSyncRead,
+  PersonImageSyncRead,
   PersonSyncRead,
   RoleSyncRead,
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
 import type { GatheredItemView } from '@pickarr/plugin-ui';
-import { byMediaItem, byRssItem, getRow, getRows } from './rows.ts';
+import type { StoredRow } from './db.ts';
+import { byMediaItem, byPersonIds, byRssItem, getRow, getRows } from './rows.ts';
 
 /**
  * Trusts a replica value to be the shape its table's `*SyncRead` contract
@@ -118,28 +125,66 @@ function isRole(value: unknown): value is RoleSyncRead {
   return isRecord(value) && typeof value.personId === 'number';
 }
 
-/** `poster`, `background` or `logo` -- the three kinds a media item has artwork for (design spec §1.2, #79). */
-export type ArtworkKind = 'poster' | 'background' | 'logo';
-
-/** Where to fetch a media item's artwork, keyed by kind -- urls, never rows. */
-export type ArtworkUrls = Readonly<Record<ArtworkKind, string>>;
-
-function artworkUrls(mediaItemId: number): ArtworkUrls {
-  return {
-    poster: `/api/artwork/poster/${String(mediaItemId)}`,
-    background: `/api/artwork/background/${String(mediaItemId)}`,
-    logo: `/api/artwork/logo/${String(mediaItemId)}`,
-  };
+/**
+ * The fields every artwork row carries, whichever table it is in. Checked
+ * rather than asserted, for the reason the predicates above give.
+ */
+function hasImageFields(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.width === 'number' &&
+    typeof value.height === 'number' &&
+    (typeof value.language === 'string' || value.language === null) &&
+    typeof value.rank === 'number'
+  );
 }
 
-/**
- * Where a person's picture is served from. Separate from `artworkUrls`
- * because the route keys this kind on `person_id` and the other three on
- * `media_item_id` (`host/src/api/artwork-route.ts`'s `ARTWORK_QUERY`), so
- * one function taking a media item id could not produce it.
- */
-function personImageUrl(personId: number): string {
-  return `/api/artwork/person/${String(personId)}`;
+function isArtworkRow(value: unknown): value is ArtworkSyncRead {
+  return isRecord(value) && typeof value.mediaItemId === 'number' && hasImageFields(value);
+}
+
+function isPersonImageRow(value: unknown): value is PersonImageSyncRead {
+  return isRecord(value) && typeof value.personId === 'number' && hasImageFields(value);
+}
+
+/** The route kinds `artworkUrl` answers for; `person` is the `person_image` table's. */
+export type ArtworkUrlKind = 'poster' | 'background' | 'logo' | 'person';
+
+/** Where one artwork row is served from. The id is the row's own, so each picture has its own url. */
+export function artworkUrl(kind: ArtworkUrlKind, id: number): string {
+  return `/api/artwork/${kind}/${String(id)}`;
+}
+
+/** One picture, ready to render: the row's facts plus the url that serves it. */
+export interface GatheredImage {
+  readonly id: number;
+  readonly url: string;
+  readonly width: number;
+  readonly height: number;
+  readonly language: string | null;
+  /** Position in the host's preference order, 0 best. */
+  readonly rank: number;
+}
+
+/** A media item's pictures by kind, each list best first. */
+export interface GatheredArtwork {
+  readonly posters: readonly GatheredImage[];
+  readonly backgrounds: readonly GatheredImage[];
+  readonly logos: readonly GatheredImage[];
+}
+
+/** `rows` as images of `kind`, by `rank` then `id`; a row that does not match the contract is left out. */
+function toImages(
+  kind: ArtworkUrlKind,
+  rows: readonly StoredRow[],
+  isRow: (value: unknown) => value is ArtworkSyncRead | PersonImageSyncRead,
+): GatheredImage[] {
+  return rows
+    .flatMap((row): GatheredImage[] => {
+      if (!isRow(row.value)) return [];
+      const { width, height, language, rank } = row.value;
+      return [{ id: row.id, url: artworkUrl(kind, row.id), width, height, language, rank }];
+    })
+    .toSorted((a, b) => a.rank - b.rank || a.id - b.id);
 }
 
 /** One download under a release, tagged by which of the two host tables it came from. */
@@ -170,8 +215,8 @@ export interface GatheredRole {
   readonly id: number;
   readonly row: RoleSyncRead;
   readonly person: PersonSyncRead | undefined;
-  /** Where this person's picture is served from; 404s for most people. */
-  readonly imageUrl: string;
+  /** This person's pictures, best first; empty when the replica holds none. */
+  readonly images: readonly GatheredImage[];
 }
 
 /** Everything common to one media item -- the host's half of design spec §7's join. */
@@ -181,7 +226,7 @@ export interface GatheredItem {
   readonly pluginId: string;
   readonly releases: readonly GatheredRelease[];
   readonly roles: readonly GatheredRole[];
-  readonly artwork: ArtworkUrls;
+  readonly artwork: GatheredArtwork;
   /** The distinct `feedId`s across `releases`, for a caller that wants the set without walking them. */
   readonly feedIds: readonly number[];
 }
@@ -214,6 +259,7 @@ function gatherRole(
   id: number,
   value: unknown,
   people: ReadonlyMap<number, unknown>,
+  images: ReadonlyMap<number, readonly GatheredImage[]>,
 ): GatheredRole | undefined {
   if (!isRole(value)) return undefined;
   const personValue = people.get(value.personId);
@@ -225,7 +271,7 @@ function gatherRole(
     id,
     row: value,
     person: personValue !== undefined && isPerson(personValue) ? personValue : undefined,
-    imageUrl: personImageUrl(value.personId),
+    images: images.get(value.personId) ?? [],
   };
 }
 
@@ -236,7 +282,8 @@ function gatherRole(
  * arrived yet (`getRow`'s own doc on why those two are, and must stay, the
  * same answer).
  *
- * One `byMediaItem` query supplies the item's releases and roles together;
+ * One `byMediaItem` query supplies the item's releases, roles and artwork
+ * together, and one `byPersonIds` read its cast's pictures;
  * only the downloads under each release need a query of their own, one per
  * release, over `byRssItem`.
  */
@@ -253,20 +300,29 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
   const rows = await byMediaItem(db, mediaItemId);
   const releaseRows = rows.filter((row) => row.table === 'rss_item');
   const roleRows = rows.filter((row) => row.table === 'role');
+  const artwork: GatheredArtwork = {
+    posters: toImages('poster', rows.filter((row) => row.table === 'poster'), isArtworkRow),
+    backgrounds: toImages('background', rows.filter((row) => row.table === 'background'), isArtworkRow),
+    logos: toImages('logo', rows.filter((row) => row.table === 'logo'), isArtworkRow),
+  };
 
   const personIds = [...new Set(
     roleRows.flatMap((row) => (isRole(row.value) ? [row.value.personId] : [])),
   )];
-  const people = await getRows(db, 'person', personIds);
+  const [people, personRows] = await Promise.all([getRows(db, 'person', personIds), byPersonIds(db, personIds)]);
+  const images = new Map<number, GatheredImage[]>();
+  for (const [personId, pictures] of personRows) {
+    images.set(personId, toImages('person', pictures.filter((row) => row.table === 'person_image'), isPersonImageRow));
+  }
 
   const gathered = await Promise.all(releaseRows.map((row) => gatherRelease(db, row.id, row.value)));
   const releases = gathered.filter((release): release is GatheredRelease => release !== undefined);
   const roles = roleRows
-    .map((row) => gatherRole(row.id, row.value, people))
+    .map((row) => gatherRole(row.id, row.value, people, images))
     .filter((role): role is GatheredRole => role !== undefined);
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
-  return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork: artworkUrls(mediaItemId), feedIds };
+  return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork, feedIds };
 }
 
 /**

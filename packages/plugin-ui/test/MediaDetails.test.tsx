@@ -20,7 +20,10 @@ function role(
   const row: RoleSyncRead = {
     id, mediaItemId: 1, personId, role: 'actor', name: null, billingOrder, createdAt: 0,
   };
-  return { id, row, person: who, imageUrl: `/api/artwork/person/${String(personId)}` };
+  const images = [{
+    id: personId, url: `/api/artwork/person/${String(personId)}`, width: 10, height: 15, language: null, rank: 0,
+  }];
+  return { id, row, person: who, images };
 }
 
 function item(overrides: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
@@ -37,9 +40,9 @@ function gathered(overrides: Partial<GatheredItemView> = {}): GatheredItemView {
     releases: [],
     roles: [],
     artwork: {
-      poster: '/api/artwork/poster/1',
-      background: '/api/artwork/background/1',
-      logo: '/api/artwork/logo/1',
+      posters: [{ id: 1, url: '/api/artwork/poster/1', width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [{ id: 1, url: '/api/artwork/background/1', width: 15, height: 10, language: null, rank: 0 }],
+      logos: [],
     },
     ...overrides,
   };

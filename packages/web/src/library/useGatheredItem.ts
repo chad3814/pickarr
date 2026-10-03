@@ -131,6 +131,13 @@
  * **A release it already shows is watched the same way**, by its `rss_item`
  * row, so a requery's `pending` write (which touches no other row) re-gathers.
  *
+ * **Artwork is watched on two channels, as downloads are.** A picture the
+ * gather showed (its item's `poster`, `background` and `logo` rows, and the
+ * `person_image` rows of its cast) is matched by id on `subscribeTouched`,
+ * which catches a rank rewrite or a deletion; a picture that arrives is
+ * caught on `subscribeInserts` and read, like a download, to see whether its
+ * `mediaItemId` is this item's or its `personId` is in this cast.
+ *
  * **What it still does not subscribe to.** A new `rss_item`: a release
  * arriving for an item already on screen is still only caught the next time
  * something touches the media item itself, or the next time this hook
@@ -149,7 +156,7 @@ import type { Store } from '../store/index.ts';
 import type { GatheredItem } from '../store/gather.ts';
 
 /**
- * The four `Store` members this hook needs, and nothing else -- so a test
+ * The five `Store` members this hook needs, and nothing else -- so a test
  * can hand it a bare stub instead of a whole `Store` (see this file's test
  * and `MediaItemCard.test.tsx`). A real `Store` satisfies this by structural
  * assignment.
@@ -166,6 +173,7 @@ export interface GatheredSource {
   gatherMediaItem: Store['gatherMediaItem'];
   subscribe: Store['subscribe'];
   subscribeInserts: Store['subscribeInserts'];
+  subscribeTouched: Store['subscribeTouched'];
   getRows: Store['getRows'];
 }
 
@@ -188,6 +196,39 @@ function isStoreClosed(err: unknown): boolean {
  * produce a row in.
  */
 const DOWNLOAD_TABLES = ['torrent_download', 'nzb_download'] as const;
+
+/**
+ * The four tables artwork rows replicate in: the three a media item has
+ * pictures in, and the one a person has. A picture is not a row of any
+ * release, so it is watched on its own channels (see {@link ArtworkIds}).
+ */
+const ARTWORK_TABLES = ['poster', 'background', 'logo', 'person_image'] as const;
+
+/** The artwork row ids, per table, that a gather showed -- what a rank rewrite or a deletion has to be matched against. */
+type ArtworkIds = ReadonlyMap<string, ReadonlySet<number>>;
+
+/** The artwork row ids `result` shows for its own item and for the people in its cast. */
+function artworkIdsOf(result: GatheredItem | undefined): ArtworkIds {
+  const images = (list: readonly { readonly id: number }[]): Set<number> => new Set(list.map((image) => image.id));
+  return new Map([
+    ['poster', images(result?.artwork.posters ?? [])],
+    ['background', images(result?.artwork.backgrounds ?? [])],
+    ['logo', images(result?.artwork.logos ?? [])],
+    ['person_image', images((result?.roles ?? []).flatMap((role) => role.images))],
+  ]);
+}
+
+/**
+ * The owner a replica artwork row names, as a number, or `undefined` when the
+ * stored value does not carry one -- `mediaItemId` on a `poster`,
+ * `background` or `logo`, `personId` on a `person_image`. Checked for the
+ * reason `releaseOf` gives.
+ */
+function ownerOf(value: unknown, field: 'mediaItemId' | 'personId'): number | undefined {
+  if (typeof value !== 'object' || value === null || !(field in value)) return undefined;
+  const owner: unknown = Reflect.get(value, field);
+  return typeof owner === 'number' ? owner : undefined;
+}
 
 /**
  * The release a replica download row belongs to, or `undefined` when the
@@ -235,6 +276,12 @@ export function useGatheredItem(
     // download that is gone from the replica stops being watched with it.
     let downloadOffs: (() => void)[] = [];
 
+    // The artwork row ids the latest gather showed, and the people it
+    // showed. Read by the artwork subscriptions below, which are made once
+    // per effect and not per gather, so these are updated in `watchDownloads`.
+    let artworkIds: ArtworkIds = artworkIdsOf(undefined);
+    let castIds = new Set<number>();
+
     function unwatchDownloads(): void {
       for (const off of downloadOffs) off();
       downloadOffs = [];
@@ -242,6 +289,8 @@ export function useGatheredItem(
 
     function watchDownloads(result: GatheredItem | undefined): void {
       unwatchDownloads();
+      artworkIds = artworkIdsOf(result);
+      castIds = new Set((result?.roles ?? []).map((role) => role.row.personId));
       // The release's own row too: a requery writes `rss_item` and nothing
       // else, so without this the card keeps the row it gathered and the
       // `Requery` button waits on an `updatedAt` it can never see change.
@@ -304,6 +353,23 @@ export function useGatheredItem(
       };
     }
 
+    /**
+     * Re-gathers if any of `ids`, newly inserted into artwork table `table`,
+     * belongs to this item (`mediaItemId`) or to a person its last gather
+     * showed. The same shape as {@link regatherIfOurs}, and for the same
+     * reason: the insert channel is table-wide and names ids, not owners.
+     */
+    async function regatherIfOurArtwork(table: (typeof ARTWORK_TABLES)[number], ids: readonly number[]): Promise<void> {
+      const values = await source.getRows(table, ids);
+      if (cancelled) return;
+      const mine = [...values.values()].some((value) =>
+        table === 'person_image'
+          ? castIds.has(ownerOf(value, 'personId') ?? -1)
+          : ownerOf(value, 'mediaItemId') === mediaItemId,
+      );
+      if (mine) safeGather();
+    }
+
     // Re-gathers on a notification for this item's own row, on a download
     // inserted under one of its releases, and (through `watchDownloads`) on
     // any change to a release or download it already shows -- see this file's docblock
@@ -312,10 +378,29 @@ export function useGatheredItem(
     const unsubscribeInserts = DOWNLOAD_TABLES.map((table) =>
       source.subscribeInserts(table, safeRegatherIfOurs(table)),
     );
+    // Artwork, on two channels because a picture can change in two ways. A
+    // new row names no id this hook could have subscribed to, so it arrives
+    // by `subscribeInserts` and is matched to its owner as a download is. A
+    // rank rewrite or a deletion of a row a gather showed is an update, which
+    // an insert subscription never reports, so `subscribeTouched` is matched
+    // against the ids that gather returned.
+    const unsubscribeArtwork = ARTWORK_TABLES.flatMap((table) => [
+      source.subscribeInserts(table, (ids) => {
+        regatherIfOurArtwork(table, ids).catch((err: unknown) => {
+          if (isStoreClosed(err)) return;
+          throw err;
+        });
+      }),
+      source.subscribeTouched(table, (ids) => {
+        const known = artworkIds.get(table);
+        if (known !== undefined && ids.some((id) => known.has(id))) safeGather();
+      }),
+    ]);
     return () => {
       cancelled = true;
       unsubscribe();
       for (const off of unsubscribeInserts) off();
+      for (const off of unsubscribeArtwork) off();
       unwatchDownloads();
     };
   }, [source, mediaItemId, enabled]);

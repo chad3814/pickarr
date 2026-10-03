@@ -265,6 +265,22 @@ export async function byMediaItem(db: IDBDatabase, mediaItemId: number): Promise
   return request<StoredRow[]>(rowsStore(db).index('by_media_item').getAll(mediaItemId));
 }
 
+/**
+ * The rows of every table that belong to each of `personIds`, keyed by person
+ * -- their `person_image` rows, and their `role` rows in every media item,
+ * because both carry `personId`; a caller filters by table. One `getAll` on
+ * `by_person` per id, all issued before any resolves on one store handle. An
+ * id with no rows maps to an empty list.
+ */
+export async function byPersonIds(
+  db: IDBDatabase,
+  personIds: readonly number[],
+): Promise<ReadonlyMap<number, readonly StoredRow[]>> {
+  const index = rowsStore(db).index('by_person');
+  const found = await Promise.all(personIds.map((id) => request<StoredRow[]>(index.getAll(id))));
+  return new Map(personIds.map((id, i): [number, readonly StoredRow[]] => [id, found[i] ?? []]));
+}
+
 /** A release's downloads, across `torrent_download` and `nzb_download` alike. */
 export async function byRssItem(db: IDBDatabase, rssItemId: number): Promise<readonly StoredRow[]> {
   return request<StoredRow[]>(rowsStore(db).index('by_rss_item').getAll(rssItemId));

@@ -95,21 +95,85 @@ test('a role is paired with its person, and a role whose person has not arrived 
   db.close();
 });
 
-test('artwork is three urls, not rows', async () => {
+/** A `poster`, `background` or `logo` row as the host replicates it -- no `url`, no `path`. */
+function artworkRow(table: 'poster' | 'background' | 'logo', id: number, mediaItemId: number, rank: number): SyncOp {
+  return { op: 'upsert', table, id, value: { id, mediaItemId, width: 10, height: 15, language: null, rank, createdAt: 1 } };
+}
+
+function personImageRow(id: number, personId: number, rank: number): SyncOp {
+  return { op: 'upsert', table: 'person_image', id, value: { id, personId, width: 10, height: 15, language: null, rank, createdAt: 1 } };
+}
+
+test("artwork is the item's poster, background and logo rows, each list by rank then id, with per-row urls", async () => {
   const db = await freshDb();
-  await seed(db, [{ op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } }]);
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    artworkRow('poster', 20, 7, 1),
+    artworkRow('poster', 21, 7, 0),
+    artworkRow('poster', 22, 7, 0),
+    artworkRow('background', 30, 7, 0),
+    // Another item's poster must not leak in.
+    artworkRow('poster', 23, 8, 0),
+  ]);
 
   const gathered = await gatherMediaItem(db, 7);
 
   assert.ok(gathered !== undefined);
-  assert.deepEqual(gathered.artwork, {
-    poster: '/api/artwork/poster/7',
-    background: '/api/artwork/background/7',
-    logo: '/api/artwork/logo/7',
+  assert.deepEqual(
+    gathered.artwork.posters.map((p) => [p.id, p.rank, p.url]),
+    [[21, 0, '/api/artwork/poster/21'], [22, 0, '/api/artwork/poster/22'], [20, 1, '/api/artwork/poster/20']],
+  );
+  assert.deepEqual(
+    gathered.artwork.backgrounds.map((p) => [p.id, p.url]),
+    [[30, '/api/artwork/background/30']],
+  );
+  assert.deepEqual(gathered.artwork.logos, []);
+  assert.deepEqual(gathered.artwork.posters[0], {
+    id: 21, url: '/api/artwork/poster/21', width: 10, height: 15, language: null, rank: 0,
   });
-  for (const url of Object.values(gathered.artwork)) {
-    assert.equal(typeof url, 'string');
-  }
+  db.close();
+});
+
+test("a role carries its person's pictures by rank, and none when the person has no rows", async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    { op: 'upsert', table: 'person', id: 9, value: { name: 'Pictured' } },
+    { op: 'upsert', table: 'person', id: 10, value: { name: 'Plain' } },
+    { op: 'upsert', table: 'role', id: 1, value: { mediaItemId: 7, personId: 9, role: 'actor' } },
+    { op: 'upsert', table: 'role', id: 2, value: { mediaItemId: 7, personId: 10, role: 'actor' } },
+    personImageRow(50, 9, 1),
+    personImageRow(51, 9, 0),
+    personImageRow(52, 11, 0),
+  ]);
+
+  const gathered = await gatherMediaItem(db, 7);
+
+  assert.ok(gathered !== undefined);
+  const pictured = gathered.roles.find((role) => role.id === 1);
+  const plain = gathered.roles.find((role) => role.id === 2);
+  assert.ok(pictured !== undefined && plain !== undefined);
+  assert.deepEqual(
+    pictured.images.map((image) => [image.id, image.url]),
+    [[51, '/api/artwork/person/51'], [50, '/api/artwork/person/50']],
+  );
+  assert.deepEqual(plain.images, []);
+  db.close();
+});
+
+test('a poster row for an item not yet replicated does not break gathering of another item', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    artworkRow('poster', 20, 7, 0),
+    artworkRow('poster', 90, 99, 0),
+  ]);
+
+  const gathered = await gatherMediaItem(db, 7);
+
+  assert.ok(gathered !== undefined);
+  assert.deepEqual(gathered.artwork.posters.map((p) => p.id), [20]);
+  assert.equal(await gatherMediaItem(db, 99), undefined);
   db.close();
 });
 
@@ -174,24 +238,3 @@ test('a media item that does not match its shape reads as absent', async () => {
   db.close();
 });
 
-test('a gathered role carries the url its person’s picture is served from', async () => {
-  // The url is spelled literally, never rebuilt by calling the helper that
-  // produces it: a test whose expectation is computed by the code under
-  // test cannot detect that code changing (see CLAUDE.md on `groupAnchor`,
-  // which returned a constant while 70 tests passed).
-  const db = await freshDb();
-  await seed(db, [
-    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
-    { op: 'upsert', table: 'person', id: 9, value: { name: 'Alice', providerRef: 'tmdb:person:9' } },
-    { op: 'upsert', table: 'role', id: 2, value: { mediaItemId: 7, personId: 9, role: 'actor' } },
-  ]);
-
-  const gathered = await gatherMediaItem(db, 7);
-
-  assert.ok(gathered !== undefined);
-  assert.equal(gathered.roles[0]?.imageUrl, '/api/artwork/person/9');
-  // The media urls keyed on the item, not on the person -- the route takes
-  // a different id column for each (`ARTWORK_QUERY`).
-  assert.equal(gathered.artwork.poster, '/api/artwork/poster/7');
-  db.close();
-});
