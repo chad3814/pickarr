@@ -846,6 +846,8 @@ function fakeContext(jobs: JobQueue): PluginContext {
       attachBackground: unusedMediaCall('attachBackground'),
       attachLogo: unusedMediaCall('attachLogo'),
       attachPersonImage: unusedMediaCall('attachPersonImage'),
+      keepArtwork: unusedMediaCall('keepArtwork'),
+      keepPersonImages: unusedMediaCall('keepPersonImages'),
       upsertPerson: unusedMediaCall('upsertPerson'),
       attachRole: unusedMediaCall('attachRole'),
       setLookupState: unusedMediaCall('setLookupState'),

@@ -298,10 +298,12 @@ export function createRecordingMedia(): RecordingMedia {
       items.delete(mediaItemId);
       return [];
     },
-    async attachPoster(mediaItemId, poster): Promise<void> { record('attachPoster', mediaItemId, poster.url); },
-    async attachBackground(mediaItemId, background): Promise<void> { record('attachBackground', mediaItemId, background.url); },
-    async attachLogo(mediaItemId, logo): Promise<void> { record('attachLogo', mediaItemId, logo.url); },
-    async attachPersonImage(personId, image): Promise<void> { record('attachPersonImage', personId, image.url); },
+    async attachPoster(mediaItemId, poster): Promise<void> { record('attachPoster', mediaItemId, poster.url, poster.rank); },
+    async attachBackground(mediaItemId, background): Promise<void> { record('attachBackground', mediaItemId, background.url, background.rank); },
+    async attachLogo(mediaItemId, logo): Promise<void> { record('attachLogo', mediaItemId, logo.url, logo.rank); },
+    async attachPersonImage(personId, image): Promise<void> { record('attachPersonImage', personId, image.url, image.rank); },
+    async keepArtwork(kind, mediaItemId, urls): Promise<void> { record('keepArtwork', kind, mediaItemId, [...urls]); },
+    async keepPersonImages(personId, urls): Promise<void> { record('keepPersonImages', personId, [...urls]); },
     async upsertPerson(person): Promise<number> {
       record('upsertPerson', person);
       const existing = people.get(person.providerRef);

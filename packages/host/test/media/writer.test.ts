@@ -626,67 +626,163 @@ test('attaching a person\'s picture twice leaves one row and one file', async ()
   });
 });
 
-test('attaching a person\'s picture at a NEW url replaces the old one, row and file', async () => {
-  // **The bug this fixes, and it made re-running artwork pointless.** The
-  // upsert is keyed on `(person_id, url)`, so a better url was a second
-  // row rather than a correction -- and `ARTWORK_QUERY.person` serves
-  // `ORDER BY id ASC LIMIT 1`, the *oldest* row. So a re-fetch wrote the
-  // new picture to disk, kept the old one, and went on serving the old
-  // one for ever. Reported as "all the old square ones are still on
-  // disk" after a deliberate re-run.
+/** An image init whose url and bytes are fixed by `name`, so a test can name its survivors. */
+function imageNamed(name: string, rank: number) {
+  return { title: null, language: null, url: `https://images.test/${name}.gif`, bytes: gifBytes(300, 450), rank };
+}
+
+test('attaching several posters keeps them all until keepArtwork names the survivors', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('b', 1));
+    await writer.attachPoster(mediaItemId, imageNamed('c', 2));
+
+    const read = () => raw.prepare('SELECT url, rank FROM poster WHERE media_item_id = ? ORDER BY rank ASC')
+      .all(mediaItemId) as { url: unknown; rank: unknown }[];
+    assert.deepEqual(read().map((row) => [row.url, row.rank]), [
+      ['https://images.test/a.gif', 0],
+      ['https://images.test/b.gif', 1],
+      ['https://images.test/c.gif', 2],
+    ]);
+    assert.equal((await readdir(dir)).length, 3, 'attaching prunes nothing');
+
+    await writer.keepArtwork('poster', mediaItemId, ['https://images.test/a.gif', 'https://images.test/b.gif']);
+
+    assert.deepEqual(read().map((row) => [row.url, row.rank]), [
+      ['https://images.test/a.gif', 0],
+      ['https://images.test/b.gif', 1],
+    ]);
+    assert.equal((await readdir(dir)).length, 2, 'the dropped row\'s file is unlinked, the others\' are not');
+  });
+});
+
+test('keepArtwork prunes background and logo too, and only for the named media item', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const first = await writer.createMediaItem({ pluginId: 'movie', title: 'One', releaseDate: null, description: null });
+    const second = await writer.createMediaItem({ pluginId: 'movie', title: 'Two', releaseDate: null, description: null });
+
+    for (const id of [first, second]) {
+      await writer.attachBackground(id, imageNamed('b1', 0));
+      await writer.attachBackground(id, imageNamed('b2', 1));
+      await writer.attachLogo(id, imageNamed('l1', 0));
+      await writer.attachLogo(id, imageNamed('l2', 1));
+    }
+    await writer.keepArtwork('background', first, ['https://images.test/b1.gif']);
+    await writer.keepArtwork('logo', first, ['https://images.test/l2.gif']);
+
+    const urls = (table: 'background' | 'logo', id: number) =>
+      (raw.prepare(`SELECT url FROM ${table} WHERE media_item_id = ? ORDER BY id ASC`).all(id) as { url: unknown }[]).map((row) => row.url);
+    assert.deepEqual(urls('background', first), ['https://images.test/b1.gif']);
+    assert.deepEqual(urls('logo', first), ['https://images.test/l2.gif']);
+    assert.deepEqual(urls('background', second), ['https://images.test/b1.gif', 'https://images.test/b2.gif'], 'another item is untouched');
+    assert.deepEqual(urls('logo', second), ['https://images.test/l1.gif', 'https://images.test/l2.gif']);
+    assert.equal((await readdir(dir)).length, 6, 'eight files attached, the first item\'s two superseded ones unlinked');
+  });
+});
+
+test('re-attaching a url rewrites its rank in place and keeps its id', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('b', 1));
+    const idOf = (name: string): unknown =>
+      (raw.prepare('SELECT id FROM poster WHERE url = ?').get(`https://images.test/${name}.gif`) as { id: unknown }).id;
+    const before = [idOf('a'), idOf('b')];
+
+    // The provider's order changed: b is now the best.
+    await writer.attachPoster(mediaItemId, imageNamed('b', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('a', 1));
+
+    const rows = raw.prepare('SELECT id, url, rank FROM poster ORDER BY rank ASC').all() as { id: unknown; url: unknown; rank: unknown }[];
+    assert.deepEqual(rows.map((row) => [row.url, row.rank]), [['https://images.test/b.gif', 0], ['https://images.test/a.gif', 1]]);
+    assert.deepEqual([idOf('a'), idOf('b')], before, 'ids are stable across a re-rank');
+    assert.equal((await readdir(dir)).length, 2);
+  });
+});
+
+test('keepArtwork with an unchanged set deletes nothing and unlinks nothing', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const removed: string[] = [];
+    const spied: ArtworkStore = {
+      ...artwork,
+      remove: async (path) => { removed.push(path); await artwork.remove(path); },
+    };
+    const writer = createMediaWriter(db, () => 1000, spied, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('b', 1));
+
+    await writer.keepArtwork('poster', mediaItemId, ['https://images.test/b.gif', 'https://images.test/a.gif']);
+
+    assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM poster').get() as { n: unknown }).n, 2);
+    assert.deepEqual(removed, []);
+    assert.equal((await readdir(dir)).length, 2);
+  });
+});
+
+test('keepPersonImages prunes person_image the same way', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
     const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
+    const other = await writer.upsertPerson({ name: 'Another', providerRef: 'tmdb:person:2' });
+    await writer.attachPersonImage(personId, imageNamed('a', 0));
+    await writer.attachPersonImage(personId, imageNamed('b', 1));
+    await writer.attachPersonImage(other, imageNamed('a', 0));
+    await writer.attachPersonImage(other, imageNamed('b', 1));
 
-    await writer.attachPersonImage(personId, {
-      title: null, language: null,
-      url: 'https://images.test/500x500/smart/headshot.gif', bytes: gifBytes(500, 500), rank: 0,
-    });
-    await writer.attachPersonImage(personId, {
-      title: null, language: null,
-      url: 'https://images.test/full/headshot.gif', bytes: gifBytes(633, 950), rank: 0,
-    });
+    await writer.keepPersonImages(personId, ['https://images.test/a.gif']);
 
-    const rows = raw.prepare('SELECT url, width, height FROM person_image WHERE person_id = ? ORDER BY id ASC')
-      .all(personId) as { url: unknown; width: unknown; height: unknown }[];
-    assert.equal(rows.length, 1, 'one slot, one row -- the crop must not linger with a lower id');
-    assert.equal(rows[0]?.url, 'https://images.test/full/headshot.gif');
-    // The dimensions, not just the url: this is what a reader actually
-    // gets, and the route picks by id rather than by url.
-    assert.equal(rows[0]?.width, 633);
-    assert.equal(rows[0]?.height, 950);
-
-    const files = await readdir(dir);
-    assert.equal(files.length, 1, 'and the superseded file is unlinked rather than left on disk');
+    const urls = (id: number) =>
+      (raw.prepare('SELECT url FROM person_image WHERE person_id = ? ORDER BY id ASC').all(id) as { url: unknown }[]).map((row) => row.url);
+    assert.deepEqual(urls(personId), ['https://images.test/a.gif']);
+    assert.deepEqual(urls(other), ['https://images.test/a.gif', 'https://images.test/b.gif'], 'another person is untouched');
+    assert.equal((await readdir(dir)).length, 3);
   });
 });
 
-test('attaching a poster at a new url replaces the old one too', async () => {
-  // The same accumulation applies to all three media slots: `bestImage`
-  // can pick differently once a provider adds artwork, and every route
-  // query serves the lowest id.
+test('attaching the same url twice is one row, which keepArtwork keeps', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
     migrateHost(raw);
     const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
-    const mediaItemId = await writer.createMediaItem({
-      pluginId: 'movie', title: 'A Film', releaseDate: null, description: null,
-    });
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
 
-    await writer.attachPoster(mediaItemId, {
-      title: null, language: null, url: 'https://images.test/old.gif', bytes: gifBytes(300, 450), rank: 0,
-    });
-    await writer.attachPoster(mediaItemId, {
-      title: null, language: null, url: 'https://images.test/new.gif', bytes: gifBytes(600, 900), rank: 0,
-    });
+    await writer.keepArtwork('poster', mediaItemId, ['https://images.test/a.gif', 'https://images.test/a.gif']);
 
-    const rows = raw.prepare('SELECT url FROM poster WHERE media_item_id = ? ORDER BY id ASC')
-      .all(mediaItemId) as { url: unknown }[];
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.url, 'https://images.test/new.gif');
-    assert.equal((await readdir(dir)).length, 1, 'the superseded poster file is gone');
+    assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM poster').get() as { n: unknown }).n, 1);
+    assert.equal((await readdir(dir)).length, 1);
+  });
+});
+
+test('keepArtwork with no urls drops every row and file the owner has', async () => {
+  await withArtworkStore(async (artwork, dir) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('a', 0));
+
+    await writer.keepArtwork('poster', mediaItemId, []);
+
+    assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM poster').get() as { n: unknown }).n, 0);
+    assert.equal((await readdir(dir)).length, 0);
   });
 });
 
