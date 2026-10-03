@@ -69,10 +69,10 @@ function rank(role: GatheredRoleView): number {
 /** How many of the cast the section shows. */
 const CAST_LIMIT = 5;
 
-/** What the gallery is currently open over, or `undefined` for closed. */
 /**
  * Every image this card can show, in the order the gallery walks them:
- * the media item's own three slots first, then each cast member's.
+ * the media item's posters, then its backgrounds, then each cast member's
+ * pictures, each list already in rank order.
  *
  * Built once and handed whole to the gallery, rather than one subject's
  * images per click, because the attribution is per image -- the title
@@ -84,26 +84,29 @@ function galleryImages(
   gathered: GatheredItemView,
   cast: readonly GatheredRoleView[],
 ): readonly GalleryImage[] {
-  // Poster and background only. **The logo is deliberately not here**,
-  // though `artwork` still carries its url and the job still fetches and
-  // stores it: a wordmark on a transparent background is a thing a card
-  // might one day draw *with*, not a picture anyone opens a lightbox to
-  // look at. Dropping it also spares the carousel a slot that is empty
-  // for most items, since a logo is the artwork providers supply least
-  // often.
-  const media = [gathered.artwork.posters[0], gathered.artwork.backgrounds[0]]
-    .flatMap((image) => (image === undefined ? [] : [{ url: image.url, caption: item.title }]));
+  // Posters and backgrounds only. **The logo is deliberately not here**,
+  // though `artwork.logos` still carries its rows and the job still
+  // fetches and stores them: a wordmark on a transparent background is a
+  // thing a card might one day draw *with*, not a picture anyone opens a
+  // lightbox to look at.
+  const media = [...gathered.artwork.posters, ...gathered.artwork.backgrounds]
+    .map((image) => ({ url: image.url, caption: item.title }));
   const people = cast.flatMap((role) => {
-    const image = role.images[0];
-    return role.person === undefined || image === undefined ? [] : [{ url: image.url, caption: role.person.name }];
+    const person = role.person;
+    return person === undefined ? [] : role.images.map((image) => ({ url: image.url, caption: person.name }));
   });
   return [...media, ...people];
 }
+
 export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsProps): ReactElement {
   // Which image the gallery opened on, or `undefined` for closed.
   const [openAt, setOpenAt] = useState<string | undefined>(undefined);
   const [posterFailed, setPosterFailed] = useState(false);
   const posterUrl = gathered.artwork.posters[0]?.url;
+  // Where the poster button opens: the top poster, or the top background
+  // when the item has none. Neither means a gallery with nothing to show,
+  // which would close the instant it opened, so the button is disabled.
+  const openUrl = posterUrl ?? gathered.artwork.backgrounds[0]?.url;
 
   const cast = topBilled(gathered.roles, CAST_LIMIT);
   const own = mediaLink(item.provider, item.providerRef);
@@ -117,8 +120,9 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
         <button
           type="button"
           className="poster"
+          disabled={openUrl === undefined}
           onClick={() => {
-            setOpenAt(posterUrl);
+            setOpenAt(openUrl);
           }}
         >
           {posterFailed || posterUrl === undefined ? (
@@ -186,20 +190,15 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
  * Its own component because it holds per-person state -- whether that
  * picture failed -- which a `map` in the parent cannot.
  *
- * **No button once the picture has failed, whole-branch review finding
- * 2.** A person's gallery holds exactly one url (`role.images[0]`, unlike
- * the media gallery's three), so once that url has 404'd there is nothing
- * left for the gallery to show. `Gallery`'s own effect closes itself the
- * instant it finds no image showing -- which fires the same render pass it
- * mounts in, since the 404 this button's own `onError` reacted to is
- * already cached -- so a button that still opened it would flash a dialog
- * open and shut in one frame, stealing and returning focus for nothing.
- * Most people on a card have no picture at all (the person artwork route
- * 404s for all but a few), so this is the common path, not an edge case.
- * A control that opens nothing is worse than no control, so the button is
- * dropped rather than kept as a no-op -- unlike the poster's own button
- * just below, which keeps opening even once its poster has failed, because
- * that gallery also holds a background and a logo that may still resolve.
+ * **No button without a working thumbnail.** A person with no stored
+ * pictures, or whose rank-0 picture has 404'd, gets the placeholder and no
+ * button: the button's whole content is that picture, and opening the
+ * gallery on a url known to be dead would show a broken frame before
+ * `Gallery` skips past it. Most people on a card have no picture at all
+ * (the person artwork route 404s for all but a few), so this is the common
+ * path, not an edge case. The poster's own button differs: it keeps
+ * opening once its poster has failed, because the gallery behind it holds
+ * more than that one image and walks on to the next that loads.
  */
 function CastMember({
   role, provider, onOpen,
