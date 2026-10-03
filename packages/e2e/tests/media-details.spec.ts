@@ -36,8 +36,8 @@
  * rule just as it would under the bug, and prove nothing about either.
  * `POSTER_FIXTURE` below is a real, decodable 1000x1500 PNG (2:3, the same
  * ratio the poster crop uses) built with ImageMagick and stripped of
- * metadata, intercepted onto `/api/artwork/poster/:posterId` (the poster row's id) with `page.route`
- * rather than added to `Harness.seedTvRelease` -- that method's own doc
+ * metadata, intercepted onto `/api/artwork/poster/:posterId` (the poster
+ * row's id) with `page.route` rather than added to `Harness.seedTvRelease` -- that method's own doc
  * says its row's `width`/`height` columns are read back nowhere, and the
  * bytes it seeds are the frame-vs-load distinction `shell.spec.ts`'s own
  * poster specs are pinning; a second, larger fixture belongs at the one
@@ -50,12 +50,14 @@
  * not consult the intrinsic size at all. That 96px-vs-336px gap, not any
  * particular viewport arithmetic, is what the assertion is chosen to catch.
  *
- * The intercepted route also answers the browse-row thumbnail's and the
- * detail section's own poster `<img>` requests, since both share the same
- * url. That is harmless to both: `article img` and `.details .poster img`
- * each set an explicit `width` (`6rem` and `120px`), which -- unlike the
- * gallery's `auto` -- does not depend on the intrinsic size of what
- * loaded, so serving a bigger image does not move either box.
+ * The intercepted route (`**\/api/artwork/poster/**`) answers every poster
+ * request the page makes, which in this spec is the detail section's own
+ * `.details .poster img` (a browse card renders no artwork) and the
+ * gallery's image: the one seeded poster row is the only artwork there is.
+ * That is harmless to the detail image: it sets an explicit `width`
+ * (`120px`), which -- unlike the gallery's `auto` -- does not depend on the
+ * intrinsic size of what loaded, so serving a bigger image does not move
+ * its box.
  */
 import { expect, type Page } from '@playwright/test';
 import { test } from '../src/harness-2.ts';
@@ -140,9 +142,9 @@ const POSTER_FIXTURE = Buffer.from(
 const POSTER_FIXTURE_WIDTH = 1000;
 
 test('the gallery opens as an overlay covering the viewport, and its image escapes the thumbnail crop', async ({ page, harness }) => {
-  // Set up before navigating: the browse-row poster fires this same
-  // request the moment the seeded card renders, well before the click
-  // sequence below reaches the gallery.
+  // Set up before navigating, so the detail section's poster request,
+  // which fires as soon as the card is expanded, is already intercepted
+  // and cannot be answered by the host's 1x1 file first.
   await page.route('**/api/artwork/poster/**', async (route) => {
     await route.fulfill({ status: 200, contentType: 'image/png', body: POSTER_FIXTURE });
   });
@@ -178,12 +180,11 @@ test('the gallery opens as an overlay covering the viewport, and its image escap
   expect(viewport).not.toBeNull();
   expect(backdropBox!.width).toBeGreaterThanOrEqual(viewport!.width - 1);
 
-  // The regression this file exists to catch. `urls` is `[poster,
-  // background, logo]` and only the poster resolves (the other two 404
-  // against the harness's real route, and `Gallery` drops a failed url
-  // from `showing`), so the first `<img>` in the open dialog is always the
-  // poster -- `.first()` rather than a name, because `Gallery` gives every
-  // image the same `alt` (the caption), not one per role.
+  // The regression this file exists to catch. The spec seeds one poster
+  // and no background, logo or cast, so the gallery holds exactly that
+  // poster and the first `<img>` in the open dialog is it -- `.first()`
+  // rather than a name, because `Gallery` gives every image the same `alt`
+  // (the caption), not one per image.
   const galleryImage = dialog.locator('img').first();
   await expect(galleryImage, 'the intercepted fixture decoded, not a 404 or a stale cache').toHaveJSProperty(
     'naturalWidth',

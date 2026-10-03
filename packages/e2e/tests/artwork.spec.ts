@@ -2,9 +2,9 @@
  * **Several images per kind, end to end.** A media item with two `poster`
  * rows shows the rank-0 one in its detail section, and the gallery steps to
  * the rank-1 one. The browser addresses each by its row id,
- * `/api/artwork/poster/<posterId>`, so the `src` assertions below are what
- * prove the replica carried the ids and ranks (and no `url`) and that
- * `gather` ordered by rank.
+ * `/api/artwork/poster/<posterId>`, so the `src` assertions below prove the
+ * id-based address is used and that the rank-0 row comes first and the
+ * rank-1 row second. They say nothing about what the replica omits.
  *
  * Both rows point at the same file (`Harness.seedPoster`), so serving is
  * the same for either; the distinction under test is the address.
