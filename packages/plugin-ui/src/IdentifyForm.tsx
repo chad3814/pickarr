@@ -194,6 +194,13 @@ export function IdentifyForm({ pluginId, rssItemId, identify, onDone, onCancel }
         onChange={onInput}
         onKeyDown={onKey}
         onBlur={() => {
+          // Leaving the box settles it the way a choice does (#111): a lookup
+          // still on its timer is dropped and one in flight is ignored, so a
+          // late answer cannot reopen the list on an input nothing will blur
+          // again.
+          clearTimeout(debounce.current);
+          debounce.current = undefined;
+          requestSeq.current += 1;
           setOpen(false);
         }}
         {...activeProps}

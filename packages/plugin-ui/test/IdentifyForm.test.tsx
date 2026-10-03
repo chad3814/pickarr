@@ -411,6 +411,40 @@ test('choosing an option inside the debounce window cancels the pending lookup',
   assert.equal(combobox().getAttribute('aria-expanded'), 'false');
 });
 
+test('a suggest response landing after a blur does not reopen the list', async () => {
+  // #111: blur closes the list, and a request still in flight must not undo
+  // that on an unfocused input, where no further blur would close it again.
+  const resolvers = new Map<string, (found: readonly Candidate[]) => void>();
+  const stub = stubIdentify(
+    (term) =>
+      new Promise<readonly Candidate[]>((resolve) => {
+        resolvers.set(term, resolve);
+      }),
+  );
+  renderForm(stub.identify);
+  await type(stub, 'dune', 1);
+  fireEvent.blur(combobox());
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false');
+  await act(async () => {
+    resolvers.get('dune')?.(DUNE);
+    await Promise.resolve();
+  });
+
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false', 'the late answer does not reopen the list');
+  assert.equal(optionTexts().length, 0, 'and lists nothing');
+});
+
+test('a blur inside the debounce window cancels the pending lookup', async () => {
+  const stub = stubIdentify(() => Promise.resolve(DUNE));
+  renderForm(stub.identify);
+  fireEvent.change(combobox(), { target: { value: 'dune' } });
+  fireEvent.blur(combobox());
+  await new Promise((resolve) => realSetTimeout(resolve, SUGGEST_DEBOUNCE_MS * 2));
+
+  assert.equal(stub.suggestCalls.length, 0, 'the timer that was pending never asked');
+  assert.equal(combobox().getAttribute('aria-expanded'), 'false');
+});
+
 test('Escape with the list already closed leaves the form, the text and onCancel alone', () => {
   let cancelled = 0;
   renderForm(stubIdentify(() => Promise.resolve([])).identify, {
