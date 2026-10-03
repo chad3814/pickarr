@@ -8,8 +8,10 @@ import { createSyncRegistry } from '../../src/sync/registry.ts';
 import { redactUrl } from '../../src/clients/redact.ts';
 import type {
   DownloadClientSyncRead,
+  ArtworkSyncRead,
   FilepathMappingSyncRead,
   MediaItemSyncRead,
+  PersonImageSyncRead,
   PluginDestinationSyncRead,
   NzbDownloadSyncRead,
   PersonSyncRead,
@@ -48,7 +50,7 @@ test('no credential-bearing table is synced', () => {
   }
 });
 
-test('download_client is one of the ten host synced tables', () => {
+test('download_client is one of the host synced tables', () => {
   // The bootstrap assertion for the download-clients slice, and the first
   // comment here was
   // wrong about why -- recorded because the wrong version is the plausible
@@ -68,8 +70,8 @@ test('download_client is one of the ten host synced tables', () => {
   // one first written down here.
   assert.ok(HOST_SYNCED_TABLES.includes('download_client'),
     'download_client must be synced -- a settings list reads it from the replica');
-  assert.equal(HOST_SYNCED_TABLES.length, 10,
-    'the host syncs ten of its own tables; an eleventh needs a read shape, a migration and a decision');
+  assert.equal(HOST_SYNCED_TABLES.length, 14,
+    'the host syncs fourteen of its own tables; a fifteenth needs a read shape, a migration and a decision');
 });
 
 test('filepath_mapping is the ninth host synced table', () => {
@@ -109,6 +111,39 @@ test('plugin_destination is the tenth host synced table', () => {
   // contract`.
   assert.ok(HOST_SYNCED_TABLES.includes('plugin_destination'),
     'plugin_destination must be synced -- the settings screen reads each library root from the replica');
+});
+
+test('person_image is the fourteenth host synced table', () => {
+  // The artwork slice (#79) brought the four artwork tables in at the end,
+  // in migration 27. Listing all fourteen in order pins both the set and the
+  // order, and catches an entry that is missing, which the tests iterating
+  // this list cannot.
+  assert.deepEqual([...HOST_SYNCED_TABLES], [
+    'media_item', 'rss_item', 'torrent_download', 'nzb_download', 'person', 'role', 'rss_feed',
+    'download_client', 'filepath_mapping', 'plugin_destination',
+    'poster', 'background', 'logo', 'person_image',
+  ]);
+});
+
+test('the artwork projections carry neither url nor path', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  raw.exec(`
+    INSERT INTO media_item (id, plugin_id, title, created_at, updated_at) VALUES (1, 'tv', 'A', 1, 1);
+    INSERT INTO person (id, name, provider_ref, created_at, updated_at) VALUES (1, 'P', 'tmdb:1', 1, 1);
+    INSERT INTO poster (id, media_item_id, url, width, height, created_at, path, rank, language) VALUES (3, 1, 'http://secret/p?k=1', 10, 15, 5, '/data/p.bin', 2, 'en');
+    INSERT INTO background (id, media_item_id, url, width, height, created_at, path, rank) VALUES (3, 1, 'http://secret/b?k=1', 10, 15, 5, '/data/b.bin', 2);
+    INSERT INTO logo (id, media_item_id, url, width, height, created_at, path, rank) VALUES (3, 1, 'http://secret/l?k=1', 10, 15, 5, '/data/l.bin', 2);
+    INSERT INTO person_image (id, person_id, url, width, height, created_at, path, rank) VALUES (3, 1, 'http://secret/i?k=1', 10, 15, 5, '/data/i.bin', 2);
+  `);
+  for (const table of ['poster', 'background', 'logo']) {
+    assert.deepEqual(readHostRows(raw, table, [3])[3], {
+      id: 3, mediaItemId: 1, width: 10, height: 15, language: table === 'poster' ? 'en' : null, rank: 2, createdAt: 5,
+    }, table);
+  }
+  assert.deepEqual(readHostRows(raw, 'person_image', [3])[3], {
+    id: 3, personId: 1, width: 10, height: 15, language: null, rank: 2, createdAt: 5,
+  });
 });
 
 test('every synced table has an integer primary key named id', () => {
@@ -713,6 +748,16 @@ function seedOneRowPerSyncedTable(raw: ReturnType<typeof openTestDatabase>['raw'
     INSERT INTO plugin_destination (id, plugin_id, root, shape, unmatched_dir, created_at, updated_at)
     VALUES (1, 'tv', '/library/tv', '{series}/Season {season}/{series} - S{season}E{episode}.{ext}', '_unmatched', 10, 20)
   `).run();
+  for (const table of ['poster', 'background', 'logo']) {
+    raw.prepare(`
+      INSERT INTO ${table} (id, media_item_id, url, width, height, created_at, path, rank)
+      VALUES (1, 1, 'https://images.test/${table}.png', 10, 15, 10, '/artwork/${table}.bin', 0)
+    `).run();
+  }
+  raw.prepare(`
+    INSERT INTO person_image (id, person_id, url, width, height, created_at, path, rank)
+    VALUES (1, 1, 'https://images.test/person.png', 10, 15, 10, '/artwork/person.bin', 0)
+  `).run();
 }
 
 /** The projection of row 1 from each host synced table, keyed by table name. */
@@ -767,12 +812,17 @@ test('the media item a row belongs to has one name across every table that names
   }
 });
 
+/** The three media-item artwork tables share one shape (`ArtworkSyncRead`). */
+const ARTWORK_FIELDS = {
+  id: true, mediaItemId: true, width: true, height: true, language: true, rank: true, createdAt: true,
+} satisfies Record<keyof ArtworkSyncRead, true>;
+
 /**
  * One witness object per host read shape: `Record<keyof T, true>`, which the
  * compiler makes exhaustive in both directions for an object literal -- a
  * missing key is an error, and an extra one is an excess property. So the
- * *names* in these ten objects are `@pickarr/contract`'s ten host shapes,
- * mechanically, and the test below compares them against what the ten
+ * *names* in these fourteen objects are `@pickarr/contract`'s fourteen host shapes,
+ * mechanically, and the test below compares them against what the fourteen
  * `SELECT`s actually project.
  *
  * This is `test/db/schema.test.ts`'s pattern applied to the other pair that
@@ -839,6 +889,12 @@ const HOST_READ_SHAPE_FIELDS: Readonly<Record<string, Readonly<Record<string, tr
     id: true, pluginId: true, root: true, shape: true, unmatchedDir: true,
     createdAt: true, updatedAt: true,
   } satisfies Record<keyof PluginDestinationSyncRead, true>,
+  poster: ARTWORK_FIELDS,
+  background: ARTWORK_FIELDS,
+  logo: ARTWORK_FIELDS,
+  person_image: {
+    id: true, personId: true, width: true, height: true, language: true, rank: true, createdAt: true,
+  } satisfies Record<keyof PersonImageSyncRead, true>,
 };
 
 test('every host synced table has a read shape in the contract', () => {

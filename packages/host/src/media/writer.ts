@@ -318,12 +318,13 @@ export function createMediaWriter(
       // very index, so a re-attach resolves to the same file and this
       // `path` update is a no-op in practice.
       raw.prepare(`
-        INSERT INTO poster (media_item_id, title, language, url, width, height, path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO poster (media_item_id, title, language, url, width, height, path, rank, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (media_item_id, url) DO UPDATE
           SET title = excluded.title, language = excluded.language,
-              width = excluded.width, height = excluded.height, path = excluded.path
-      `).run(mediaItemId, poster.title, poster.language, poster.url, width, height, path, at);
+              width = excluded.width, height = excluded.height, path = excluded.path,
+              rank = excluded.rank
+      `).run(mediaItemId, poster.title, poster.language, poster.url, width, height, path, poster.rank, at);
       await keepOnly('poster', mediaItemId, poster.url);
     },
 
@@ -336,12 +337,13 @@ export function createMediaWriter(
       // whatever it already was, which for every row this method has ever
       // written is null.
       raw.prepare(`
-        INSERT INTO background (media_item_id, title, language, url, width, height, path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO background (media_item_id, title, language, url, width, height, path, rank, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (media_item_id, url) DO UPDATE
           SET title = excluded.title, language = excluded.language,
-              width = excluded.width, height = excluded.height, path = excluded.path
-      `).run(mediaItemId, background.title, background.language, background.url, width, height, path, at);
+              width = excluded.width, height = excluded.height, path = excluded.path,
+              rank = excluded.rank
+      `).run(mediaItemId, background.title, background.language, background.url, width, height, path, background.rank, at);
       await keepOnly('background', mediaItemId, background.url);
     },
 
@@ -355,12 +357,13 @@ export function createMediaWriter(
       // `migrate.ts`; without it this `ON CONFLICT` clause has nothing to
       // conflict on and a re-run would duplicate rows instead of updating.
       raw.prepare(`
-        INSERT INTO logo (media_item_id, title, language, url, width, height, path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO logo (media_item_id, title, language, url, width, height, path, rank, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (media_item_id, url) DO UPDATE
           SET title = excluded.title, language = excluded.language,
-              width = excluded.width, height = excluded.height, path = excluded.path
-      `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, at);
+              width = excluded.width, height = excluded.height, path = excluded.path,
+              rank = excluded.rank
+      `).run(mediaItemId, logo.title, logo.language, logo.url, width, height, path, logo.rank, at);
       await keepOnly('logo', mediaItemId, logo.url);
     },
 
@@ -380,12 +383,13 @@ export function createMediaWriter(
       // handler re-run by crash recovery is the same row and the same file,
       // not a second of either.
       raw.prepare(`
-        INSERT INTO person_image (person_id, title, language, url, width, height, path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO person_image (person_id, title, language, url, width, height, path, rank, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (person_id, url) DO UPDATE
           SET title = excluded.title, language = excluded.language,
-              width = excluded.width, height = excluded.height, path = excluded.path
-      `).run(personId, image.title, image.language, image.url, width, height, path, at);
+              width = excluded.width, height = excluded.height, path = excluded.path,
+              rank = excluded.rank
+      `).run(personId, image.title, image.language, image.url, width, height, path, image.rank, at);
       await keepOnly('person_image', personId, image.url);
     },
 

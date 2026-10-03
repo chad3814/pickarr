@@ -54,6 +54,8 @@ export interface ImageInit {
   language: string | null;
   /** Measured by the writer; never supplied. */
   bytes: Uint8Array;
+  /** The image's position in the job's ranking for its owner and kind, 0 best; written on every attach. */
+  rank: number;
 }
 
 export interface PersonInit {

@@ -1316,15 +1316,11 @@ ALTER TABLE rss_item ADD COLUMN lookup_json TEXT;
  * item -- the two id spaces are separate tables' `INTEGER PRIMARY KEY`s and
  * can (and eventually will) name the same integer for unrelated rows.
  *
- * **No `installSyncTriggers` and no `seedSyncLog`, unlike every table added
- * since migration 15.** Artwork is not replicated: a client fetches it by
- * url through `/api/artwork/...` and holds no artwork row of any kind --
- * `web/src/store/gather.ts`, and issue #79 records the decision. Triggers
- * here would copy every image row into `sync_log` and from there into every
- * browser's replica, for bytes no client reads through sync at all. The
- * three existing artwork tables already sit outside `HOST_SYNCED_TABLES`
- * for the same reason; this one joins them rather than the replicated
- * tables that happened to land nearby in migration order.
+ * **Created without `installSyncTriggers` or `seedSyncLog`; migration 27
+ * is where replication begins.** This migration predates the decision to
+ * replicate artwork rows (#79), and it is frozen, so the triggers and the
+ * seed for this table arrive with the other three artwork tables' in 27
+ * rather than as an edit here.
  *
  * `UNIQUE (person_id, url)` for the reason `poster_media_item_url` gives:
  * one image is one row however many times a handler re-runs.
@@ -1436,6 +1432,32 @@ CREATE INDEX jobs_done_updated ON jobs (updated_at) WHERE state = 'done';
 `;
 
 /**
+ * Several images per kind (design spec 2026-10-02, #79). `rank` is the
+ * job's ordering, 0 best; existing rows default to 0, and each kind held
+ * one row until now, so nothing ties until the next job reranks.
+ *
+ * `ADD COLUMN` only -- no rebuild, so no trigger is lost
+ * (`docs/database-migrations.md`). The four tables start replicating here:
+ * triggers for every later write, and a seeded log so a replica receives
+ * what the host already holds. Both calls are the last statements, after
+ * the columns exist, and the table list is a frozen literal for
+ * `migration15`'s reason.
+ */
+const MIGRATION_27_TABLES = ['poster', 'background', 'logo', 'person_image'] as const;
+const MIGRATION_27 = `
+ALTER TABLE poster       ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE background   ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE logo         ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE person_image ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;
+`;
+
+function migration27(db: DatabaseSync): void {
+  db.exec(MIGRATION_27);
+  installSyncTriggers(db, [...MIGRATION_27_TABLES]);
+  seedSyncLog(db, [...MIGRATION_27_TABLES]);
+}
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1467,6 +1489,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 24, up: (db) => migration24(db) },
   { version: 25, up: (db) => db.exec(MIGRATION_25) },
   { version: 26, up: (db) => db.exec(MIGRATION_26) },
+  { version: 27, up: (db) => migration27(db) },
 ];
 
 /**

@@ -28,13 +28,13 @@ const lookup: JobHandler = async (job, ctx) => {
   // caller-supplied width or height.
   const bytes = new Uint8Array([0]);
   await ctx.media.attachPoster(claim.kept, {
-    title: null, language: null, url: 'https://example.com/poster.jpg', bytes,
+    title: null, language: null, url: 'https://example.com/poster.jpg', bytes, rank: 0,
   });
   await ctx.media.attachBackground(claim.kept, {
-    title: null, language: null, url: 'https://example.com/bg.jpg', bytes,
+    title: null, language: null, url: 'https://example.com/bg.jpg', bytes, rank: 0,
   });
   await ctx.media.attachLogo(claim.kept, {
-    title: null, language: null, url: 'https://example.com/logo.jpg', bytes,
+    title: null, language: null, url: 'https://example.com/logo.jpg', bytes, rank: 0,
   });
   const personId = await ctx.media.upsertPerson({ name: 'Someone', providerRef: 'p1' });
   await ctx.media.attachRole(claim.kept, { personId, role: 'cast', name: null, billingOrder: 0 });

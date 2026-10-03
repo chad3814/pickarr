@@ -8,8 +8,9 @@ import { redactUrl } from '../clients/redact.ts';
  * **In:** the group (`media_item`), the releases under it (`rss_item`), what
  * was submitted for them (`torrent_download`, `nzb_download`), who is in them
  * (`person`, `role`), the feeds that produce the releases (`rss_feed`), the
- * clients those releases are submitted to (`download_client`), and the path
- * translations configured under each client (`filepath_mapping`).
+ * clients those releases are submitted to (`download_client`), the path
+ * translations configured under each client (`filepath_mapping`), and the
+ * four artwork tables.
  * `rss_feed` and `download_client` are the only two whose projection is not
  * purely a `SELECT` -- see the paragraphs below on why each joined this
  * list, and `readHostRows`'s own doc for the extra step each of their rows
@@ -20,19 +21,16 @@ import { redactUrl } from '../clients/redact.ts';
  * credential leaves this process. `jobs` is machinery a client has no use for,
  * and so are `host_migrations` (schema bookkeeping), `sync_log` (this
  * mechanism's own log) and `sqlite_sequence` (SQLite's, and present only
- * because `sync_log` is `AUTOINCREMENT`). `poster`, `background` and `logo`
- * describe files already reachable at `/api/artwork/:kind/:mediaItemId`,
- * and `person_image` files reachable at `/api/artwork/person/:personId` --
- * the same route and the same handler, a different `:kind`, over a
- * different id space. `api/artwork-route.ts`'s own docblock is where that
- * decision is written down: `person` is "one more entry" in
- * `ArtworkKind`/`ARTWORK_QUERY`, not a parallel handler, and the id in
- * that second segment is a person id for it and a media item id for the
- * other three. Spelled out here because a sentence that named only
- * `:mediaItemId` for all four conflated two id spaces this branch is
- * otherwise careful to keep apart. Either way a client asks for the image
- * and handles a 404 rather than replicating rows about files it cannot
- * read.
+ * because `sync_log` is `AUTOINCREMENT`).
+ *
+ * **`poster`, `background`, `logo` and `person_image` are in, from migration
+ * 27 (#79).** They used to be out on the reasoning that artwork describes
+ * files already reachable at `/api/artwork/:kind/:mediaItemId`, so a client
+ * needs no rows. With several images per kind the rows are what tell a card
+ * how many images exist and in what order (`rank`), so they replicate -- the
+ * rows, not the bytes. The URL is now per row, `/api/artwork/<kind>/<id>`
+ * (`person` for `person_image`), and a client learns the ids from the
+ * replicated rows. Their projections carry neither `url` nor `path`.
  * `alias` and `external_reference` have no
  * consumer. `deleted_media_item` is slice E's
  * tombstone table: the log's delete ops supersede it, and it stays because
@@ -253,6 +251,10 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
   'download_client',
   'filepath_mapping',
   'plugin_destination',
+  'poster',
+  'background',
+  'logo',
+  'person_image',
 ];
 
 /**
@@ -272,14 +274,14 @@ export const HOST_SYNCED_TABLES: readonly string[] = [
  * builds its `ON ${table}` (safe there because it never reads a column),
  * makes this check fail closed and demand `CREDENTIAL_ALLOW_LIST` grow a
  * third entry, which the project's global constraints fix at exactly two.
- * Ten short, literal, unremarkable `SELECT`s cost less than that entry
+ * Fourteen short, literal, unremarkable `SELECT`s cost less than that entry
  * would.
  *
  * **The aliases are the wire's naming convention, and they exist for one
  * concrete reason.** A column name reaches a client verbatim: `readHostRows`
  * spreads the row `node:sqlite` hands back, and the result is serialised as
  * an op's `value` with no mapping step anywhere between. Unaliased, these
- * ten tables would speak snake_case while all six plugin read shapes
+ * tables would speak snake_case while all six plugin read shapes
  * (`packages/contract/src/sync.ts`) speak camelCase, so the same logical
  * field was `media_item_id` on three host tables and `mediaItemId` on three
  * plugin ones. The client's storage provider is designed (and not yet
@@ -431,6 +433,27 @@ function selectSql(table: string, placeholders: string): string | undefined {
                       unmatched_dir AS unmatchedDir,
                       created_at AS createdAt, updated_at AS updatedAt
                  FROM plugin_destination WHERE id IN (${placeholders})`;
+    // The four artwork tables (#79): rows replicate so a card knows how many
+    // images exist and in what order; the bytes do not, and are reached at
+    // `/api/artwork/<kind>/<id>`. `url` (a provider address, the
+    // `rss_item.link` rule) and `path` (a local filename) are left out, and
+    // so are `title`, which no client reads.
+    case 'poster':
+      return `SELECT id, media_item_id AS mediaItemId, width, height, language, rank,
+                      created_at AS createdAt
+                 FROM poster WHERE id IN (${placeholders})`;
+    case 'background':
+      return `SELECT id, media_item_id AS mediaItemId, width, height, language, rank,
+                      created_at AS createdAt
+                 FROM background WHERE id IN (${placeholders})`;
+    case 'logo':
+      return `SELECT id, media_item_id AS mediaItemId, width, height, language, rank,
+                      created_at AS createdAt
+                 FROM logo WHERE id IN (${placeholders})`;
+    case 'person_image':
+      return `SELECT id, person_id AS personId, width, height, language, rank,
+                      created_at AS createdAt
+                 FROM person_image WHERE id IN (${placeholders})`;
     case 'download_client':
       // `url` travels raw out of this `SELECT` and is rebuilt by
       // `readHostRows`, the same division of labour `rss_feed` above uses
@@ -497,12 +520,12 @@ function clientAddress(url: string): string {
  * is a normal outcome of that walk rather than a case worth a round trip --
  * so this returns `{}` before ever touching `raw`.
  *
- * `table` decides *which* of `selectSql`'s ten literal statements runs; it
+ * `table` decides *which* of `selectSql`'s fourteen literal statements runs; it
  * never reaches SQL text itself. A name outside `HOST_SYNCED_TABLES` throws
  * rather than reading `undefined` columns or silently returning nothing.
  *
  * **Two tables get one extra step after the row comes back, and the other
- * seven get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
+ * twelve get none.** `rss_feed`'s `url` is redacted by `clients/redact.ts`'s
  * `redactText`; `download_client`'s is rebuilt from its origin and path by
  * `clientAddress`. Both happen on the spread copy this function already
  * makes -- not in `selectSql`, which cannot run JavaScript, and not in

@@ -70,6 +70,8 @@ export type {
   PersonSyncRead,
   PluginDestinationSyncRead,
   RoleSyncRead,
+  ArtworkSyncRead,
+  PersonImageSyncRead,
   RssFeedSyncRead,
   RssItemSyncRead,
   SyncedTable,

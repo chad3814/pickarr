@@ -1,6 +1,6 @@
 /**
- * Serves artwork bytes for one media item's poster, background or logo, or
- * one person's picture. Separate from the server (`server.ts`, Task 6) so it
+ * Serves artwork bytes for one artwork row: a media item's poster,
+ * background or logo, or a person's picture, each addressed by its own row id. Separate from the server (`server.ts`, Task 6) so it
  * is testable without a socket -- everything here is a plain function over
  * an injected `readFile` and `stat`, never a real filesystem -- and so the
  * server itself stays routing: parse the request, call `readArtwork`, write
@@ -9,14 +9,12 @@
  * **`person` is a widening of this module, not a second one.** All four
  * kinds serve the identical shape once a path is known: stat it, honour
  * `If-None-Match`, sniff the content type, read it. What differs between a
- * media item's three kinds and a person's one is only which table and which
- * id column `ARTWORK_QUERY[kind]` names -- and that was already the axis
+ * media item's three kinds and a person's one is only which table
+ * `ARTWORK_QUERY[kind]` names -- and that was already the axis
  * `ArtworkKind`/`ARTWORK_QUERY` vary on, so `person` is one more entry in
  * each rather than a reason to duplicate the stat/etag/sniff logic below in
- * a parallel `readPersonArtwork`. `readArtwork`'s id parameter is named
- * generically for the same reason: it is a media item id for three kinds and
- * a person id for the fourth, and no kind's query ever sees the other kinds'
- * ids.
+ * a parallel `readPersonArtwork`. `readArtwork`'s `id` is a row id in
+ * whichever table `kind` names, and no kind's query sees another's ids.
  *
  * **No content type is stored, and none should be added.**
  * `packages/host/src/artwork/store.ts`'s `put` names the file
@@ -62,62 +60,27 @@ export type ArtworkKind = 'poster' | 'background' | 'logo' | 'person';
  * though `kind`'s type already restricts it to these four words. Same
  * convention `reads.ts` follows for `qualify`'s table aliases.
  *
- * `ORDER BY id ASC LIMIT 1`: the `UNIQUE (media_item_id, url)` index on each
- * media-item table (and `UNIQUE (person_id, url)` on `person_image`) permits
- * several rows of one kind per owner, so "which one" needs an answer that
- * does not depend on SQLite's own unspecified row order. Lowest `id` is the
- * row written first and is stable across calls -- an arbitrary choice, but a
- * fixed one, which is what a cacheable response needs. Leaving the clause
- * off is not a laxer version of the same thing: the owner-id equality is
- * served by that very unique index, so the rows arrive in *url* order, and
- * which row is served then changes the moment a second url is recorded for
- * the owner -- measured, not supposed, for the three media-item kinds, and
- * true of `person_image` for the identical structural reason.
+ * **Keyed by the artwork row's own `id`**, not by its owner: an owner has
+ * several images of a kind, and the URL names the one wanted. A client
+ * learns the ids from the replicated artwork rows (`sync/tables.ts`).
  *
- * `AND path IS NOT NULL` is what keeps lowest-id-wins from composing with
- * "a null `path` is 404" into a permanent 404 for an owner that *does* have
- * bytes. `path` is nullable on every one of the four tables, so a row
- * recorded before its bytes were ever fetched, carrying a lower `id` than a
- * fetched row of the same kind, would otherwise be the row picked -- and
- * answered 404 for as long as both rows exist. Nothing in this tree writes
- * that pair today (`media/writer.ts` sets `path` from `artwork.put` or
- * `artwork.putPerson` on every insert), but `PluginContext.db` hands a
- * plugin the raw connection, so "no writer does this" is not a claim about
- * the rows this query will meet. An owner whose only rows of a kind are
- * null-path is still a 404, now because no row matches rather than because
- * the matched row had nothing to serve.
+ * `AND path IS NOT NULL`: `path` is nullable on every one of the four
+ * tables, so a row recorded before its bytes were fetched is a 404 by its
+ * own id rather than a `stat` of the string `'null'`.
  *
- * **Exported for the same reason `reads.ts` exports `SYNC_QUERIES`.** These
- * four sat outside that record, so they sat outside the "every exported
- * query needs a plan expectation" assertion the plan test makes -- and
- * nothing measured them at all. They are not in `SYNC_QUERIES` itself
+ * **Exported for the same reason `reads.ts` exports `SYNC_QUERIES`**, so a
+ * test can measure each statement. They are not in `SYNC_QUERIES` itself
  * because that record is keyed by the `reads.ts` function that runs each
- * statement and these four have no function there -- and putting them in
- * it would make `reads.ts` import this module, which its own doc says it
- * does not do ("nothing else from the project"). No cycle either way; the
- * two modules simply do not know about each other. So they get the same
- * test one file over instead, with its own completeness assertion over
- * these four keys. Measured, and they do not all agree:
- * each seeks its owner id by an equality on a unique index, but `poster` and
- * `background` then sort a temp B-tree for `ORDER BY id` while `logo` does
- * not -- `logo_media_item` is a plain index on `media_item_id` alone, so its
- * entries already end in the rowid, where the other two have only the
- * `UNIQUE (media_item_id, url)` index and come back in url order. `person`
- * has no plain-index counterpart to `logo_media_item` -- `person_image` only
- * ever gained `person_image_person_url` -- so it sorts a temp B-tree the same
- * way `poster` and `background` do. Both shapes are bounded by one owner's
- * rows either way; the test pins which kind is which, so `logo_media_item` is
- * not mistaken for a redundant prefix of the unique index and dropped.
+ * statement and these four have no function there, and putting them in it
+ * would make `reads.ts` import this module, which its own doc says it does
+ * not do. The plan test makes its own completeness assertion over these
+ * four keys: each query seeks the table's primary key and none sorts.
  */
 export const ARTWORK_QUERY: Record<ArtworkKind, string> = {
-  poster:
-    'SELECT path FROM poster WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
-  background:
-    'SELECT path FROM background WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
-  logo:
-    'SELECT path FROM logo WHERE media_item_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
-  person:
-    'SELECT path FROM person_image WHERE person_id = ? AND path IS NOT NULL ORDER BY id ASC LIMIT 1',
+  poster: 'SELECT path FROM poster WHERE id = ? AND path IS NOT NULL',
+  background: 'SELECT path FROM background WHERE id = ? AND path IS NOT NULL',
+  logo: 'SELECT path FROM logo WHERE id = ? AND path IS NOT NULL',
+  person: 'SELECT path FROM person_image WHERE id = ? AND path IS NOT NULL',
 };
 
 /**
@@ -182,15 +145,11 @@ export function sniffImageType(bytes: Uint8Array): string {
 const NOT_FOUND: ArtworkResponse = { status: 404, headers: {}, body: null };
 
 /**
- * Answers one artwork request: which owner, which kind, and (via
+ * Answers one artwork request: which kind, which row of it, and (via
  * `ifNoneMatch`) which cached copy the caller already holds.
  *
- * `ownerId` is a media item id for `poster`/`background`/`logo` and a
- * person id for `person` -- one parameter, not two, because exactly one of
- * `ARTWORK_QUERY[kind]`'s two possible id columns is ever bound against it,
- * and `kind` alone decides which. Named for what it is across every kind
- * rather than `mediaItemId`, which would be a claim this function does not
- * make once `kind` is `'person'`.
+ * `id` is the artwork row's own id in the table `kind` names (`person_image`
+ * for `person`), not the id of the media item or person that owns it.
  *
  * `ifNoneMatch` is not part of the brief's four-parameter signature for this
  * function, but is required by the behaviour the same brief describes --
@@ -201,34 +160,31 @@ const NOT_FOUND: ArtworkResponse = { status: 404, headers: {}, body: null };
  * request header is not one of those.
  *
  * Two situations answer 404 identically, and deliberately do not
- * distinguish themselves in the response: no row of `kind` for this owner
- * at all, and rows of `kind` that all still have a null `path`. Both mean
- * "no bytes exist to serve" -- the second because the artwork was recorded
- * before it was ever fetched -- and a zero-length `200` for either would be
- * cached by a browser as a real (empty) image, staying broken until the
- * cache entry expires long after the bytes finally arrive. *All* the rows,
- * note: `ARTWORK_QUERY` skips null-path rows rather than letting one stand
- * for its kind, so an owner with a null-path row and a fetched one serves
- * the fetched one -- see that constant for why it must.
+ * distinguish themselves in the response: no row of `kind` with this id,
+ * and a row whose `path` is still null. Both mean "no bytes exist to serve"
+ * -- the second because the artwork was recorded before it was ever
+ * fetched -- and a zero-length `200` for either would be cached by a
+ * browser as a real (empty) image, staying broken until the cache entry
+ * expires long after the bytes finally arrive.
  *
  * A file that the row's `path` names but that is no longer readable (the
  * artwork directory cleared by hand, say) gets the same 404: the row and the
  * disk have disagreed, and that is not this caller's fault to see as a 500.
  * Neither 404 names the path that was, or was not, found -- only a missing
- * row's `kind` and `ownerId` are known outside this function, and this
+ * row's `kind` and `id` are known outside this function, and this
  * function never returns the path either.
  */
 export async function readArtwork(
   raw: DatabaseSync,
   kind: ArtworkKind,
-  ownerId: number,
+  id: number,
   deps: {
     readFile: (path: string) => Promise<Uint8Array>;
     stat: (path: string) => Promise<{ mtimeMs: number; size: number }>;
   },
   ifNoneMatch?: string,
 ): Promise<ArtworkResponse> {
-  const row = raw.prepare(ARTWORK_QUERY[kind]).get(ownerId);
+  const row = raw.prepare(ARTWORK_QUERY[kind]).get(id);
   if (row === undefined) return NOT_FOUND;
 
   const path = pathOf(row);

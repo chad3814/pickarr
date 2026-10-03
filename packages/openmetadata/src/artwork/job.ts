@@ -197,7 +197,8 @@ interface Slot {
  * bytes, so a caller cannot supply a dimension that disagrees with the file.
  */
 function imageInit(image: ProviderImage, bytes: Uint8Array): ImageInit {
-  return { url: image.url, title: null, language: image.language, bytes };
+  // Task 2 supplies the real rank; every image is rank 0 until then.
+  return { url: image.url, title: null, language: image.language, bytes, rank: 0 };
 }
 
 /**

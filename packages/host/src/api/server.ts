@@ -715,7 +715,7 @@ function isArtworkKind(value: string): value is ArtworkKind {
 }
 
 /**
- * `/api/artwork/:kind/:mediaItemId`, or the unknown-route 404 for anything
+ * `/api/artwork/:kind/:id`, where `:id` is the artwork row's own id, or the unknown-route 404 for anything
  * shaped differently.
  *
  * Every segment is read by index and checked, never `!`-asserted:
@@ -738,12 +738,12 @@ async function artworkAnswer(
   if (kind === undefined || id === undefined) return UNKNOWN_ROUTE;
   if (!isArtworkKind(kind) || !DIGITS.test(id)) return UNKNOWN_ROUTE;
 
-  const ownerId = Number(id);
-  if (!Number.isSafeInteger(ownerId)) return UNKNOWN_ROUTE;
+  const rowId = Number(id);
+  if (!Number.isSafeInteger(rowId)) return UNKNOWN_ROUTE;
 
   return {
     kind: 'artwork',
-    artwork: await readArtwork(raw, kind, ownerId, ARTWORK_FILES, ifNoneMatch),
+    artwork: await readArtwork(raw, kind, rowId, ARTWORK_FILES, ifNoneMatch),
   };
 }
 
@@ -846,7 +846,7 @@ interface Route {
   /**
    * The path, with `:name` for a segment the route reads back rather than
    * matches. Compared segment by segment, so `/api/artwork/poster/1` matches
-   * `/api/artwork/:kind/:mediaItemId` and `/api/artwork/poster` -- one
+   * `/api/artwork/:kind/:id` and `/api/artwork/poster` -- one
    * segment short -- matches nothing and is an unknown route.
    */
   readonly path: string;
@@ -975,10 +975,13 @@ export const ROUTES: readonly Route[] = [
     },
   },
   {
-    path: '/api/artwork/:kind/:mediaItemId',
+    path: '/api/artwork/:kind/:id',
     methods: ['GET'],
     open: false,
-    // No `type`, and no ownership check on the media item id: an accepted
+    // `:id` is the artwork row's own id; a client learns ids from the
+    // replicated artwork rows (`sync/tables.ts`).
+    //
+    // No `type`, and no ownership check on the row: an accepted
     // consequence rather than an omission, and slice E's §5 records it.
     // Scoping it would confine nobody -- artwork is not on `MediaReader` at
     // all, and `ctx.db` is the raw connection. What it adds is a
@@ -1049,7 +1052,7 @@ export const ROUTES: readonly Route[] = [
     // shadowed by the route above: `matchesPath` compares segment *counts*
     // first, so a three-segment request never matches this four-segment
     // template and a four-segment request never matches that three-segment
-    // one. `/api/artwork/:kind/:mediaItemId` is the existing precedent for a
+    // one. `/api/artwork/:kind/:id` is the existing precedent for a
     // multi-segment path coexisting with shorter ones in this same table.
     answer: ({ deps, params }) => {
       const answer = backfillAnswer(
@@ -1316,7 +1319,7 @@ export const ROUTES: readonly Route[] = [
     //
     // The `:id` is read back off the pathname by `mappingIdFrom`, never
     // bound by the router: `Route.path` declares the segment only so the
-    // count matches. `/api/artwork/:kind/:mediaItemId` is the precedent.
+    // count matches. `/api/artwork/:kind/:id` is the precedent.
     answer: async ({ deps, request, pathname, body }) => {
       const id = mappingIdFrom(pathname);
       // The same 404 a path naming no route gets. An id that is not digits,
@@ -1367,7 +1370,7 @@ export const ROUTES: readonly Route[] = [
     open: false,
     // Four segments, so `matchesPath`'s segment-count comparison keeps this
     // from colliding with anything -- the same arrangement
-    // `/api/mappings/:id` and `/api/artwork/:kind/:mediaItemId` have. The
+    // `/api/mappings/:id` and `/api/artwork/:kind/:id` have. The
     // `:pluginId` is read back off the pathname by `pluginIdFrom`, never
     // bound by the router.
     answer: async ({ deps, pathname, body }) => {

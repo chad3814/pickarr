@@ -547,7 +547,7 @@ test('attaching a poster stores the row with the measured width and height', asy
     // The caller supplies no width or height at all -- `ImageInit` has none
     // to give. Whatever lands in the row must be what the bytes measure to.
     await writer.attachPoster(mediaItemId, {
-      title: 'front', language: 'en', url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450),
+      title: 'front', language: 'en', url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450), rank: 0,
     });
 
     const row = raw.prepare('SELECT title, language, url, width, height, path FROM poster WHERE media_item_id = ?')
@@ -569,7 +569,7 @@ test('attaching a logo stores a row, which slice A had no way to do', async () =
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
     await writer.attachLogo(mediaItemId, {
-      title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128),
+      title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128), rank: 0,
     });
 
     const row = raw.prepare('SELECT url, width, height, path FROM logo WHERE media_item_id = ?')
@@ -590,7 +590,7 @@ test('attaching a person\'s picture stores the row with the measured width and h
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
 
     await writer.attachPersonImage(personId, {
-      title: null, language: null, url: 'https://images.test/headshot.gif', bytes: gifBytes(300, 450),
+      title: null, language: null, url: 'https://images.test/headshot.gif', bytes: gifBytes(300, 450), rank: 0,
     });
 
     const row = raw.prepare('SELECT url, width, height, path FROM person_image WHERE person_id = ?')
@@ -611,10 +611,10 @@ test('attaching a person\'s picture twice leaves one row and one file', async ()
     const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:1' });
     const url = 'https://images.test/headshot.gif';
 
-    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
     // Crash recovery re-runs a handler that already ran once, the same
     // reason `attachPoster` has to be idempotent.
-    await writer.attachPersonImage(personId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450) });
+    await writer.attachPersonImage(personId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450), rank: 0 });
 
     const rows = raw.prepare('SELECT title FROM person_image WHERE person_id = ?')
       .all(personId) as { title: unknown }[];
@@ -642,11 +642,11 @@ test('attaching a person\'s picture at a NEW url replaces the old one, row and f
 
     await writer.attachPersonImage(personId, {
       title: null, language: null,
-      url: 'https://images.test/500x500/smart/headshot.gif', bytes: gifBytes(500, 500),
+      url: 'https://images.test/500x500/smart/headshot.gif', bytes: gifBytes(500, 500), rank: 0,
     });
     await writer.attachPersonImage(personId, {
       title: null, language: null,
-      url: 'https://images.test/full/headshot.gif', bytes: gifBytes(633, 950),
+      url: 'https://images.test/full/headshot.gif', bytes: gifBytes(633, 950), rank: 0,
     });
 
     const rows = raw.prepare('SELECT url, width, height FROM person_image WHERE person_id = ? ORDER BY id ASC')
@@ -676,10 +676,10 @@ test('attaching a poster at a new url replaces the old one too', async () => {
     });
 
     await writer.attachPoster(mediaItemId, {
-      title: null, language: null, url: 'https://images.test/old.gif', bytes: gifBytes(300, 450),
+      title: null, language: null, url: 'https://images.test/old.gif', bytes: gifBytes(300, 450), rank: 0,
     });
     await writer.attachPoster(mediaItemId, {
-      title: null, language: null, url: 'https://images.test/new.gif', bytes: gifBytes(600, 900),
+      title: null, language: null, url: 'https://images.test/new.gif', bytes: gifBytes(600, 900), rank: 0,
     });
 
     const rows = raw.prepare('SELECT url FROM poster WHERE media_item_id = ? ORDER BY id ASC')
@@ -706,8 +706,8 @@ test('a person and a media item that share an id and a url get two files, not on
     assert.equal(personId, mediaItemId, 'the fixture only proves the point if the two ids coincide');
 
     const url = 'https://images.test/shared.gif';
-    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
-    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
+    await writer.attachPersonImage(personId, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
 
     const posterPath = (raw.prepare('SELECT path FROM poster WHERE media_item_id = ?').get(mediaItemId) as { path: unknown }).path;
     const personPath = (raw.prepare('SELECT path FROM person_image WHERE person_id = ?').get(personId) as { path: unknown }).path;
@@ -726,11 +726,11 @@ test('attaching the same url twice leaves one row and one file', async () => {
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
     const url = 'https://images.test/poster.gif';
 
-    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
     // Crash recovery re-runs a handler that already ran once; a second
     // attach of the same url must be the same row and the same file, not a
     // second of either.
-    await writer.attachPoster(mediaItemId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450) });
+    await writer.attachPoster(mediaItemId, { title: 'front', language: 'en', url, bytes: gifBytes(300, 450), rank: 0 });
 
     const rows = raw.prepare('SELECT title, language FROM poster WHERE media_item_id = ?')
       .all(mediaItemId) as { title: unknown; language: unknown }[];
@@ -742,6 +742,38 @@ test('attaching the same url twice leaves one row and one file', async () => {
   });
 });
 
+test('every attach writes the image\'s rank, and a re-attach corrects it', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
+    const personId = await writer.upsertPerson({ name: 'An Actor', providerRef: 'tmdb:person:rank' });
+    const init = (name: string, rank: number) => ({ title: null, language: null, url: `https://images.test/${name}.gif`, bytes: gifBytes(300, 450), rank });
+
+    await writer.attachPoster(mediaItemId, init('p', 3));
+    await writer.attachBackground(mediaItemId, init('b', 2));
+    await writer.attachLogo(mediaItemId, init('l', 1));
+    await writer.attachPersonImage(personId, init('i', 4));
+    const rankOf = (table: 'poster' | 'background' | 'logo' | 'person_image'): unknown =>
+      (raw.prepare(`SELECT rank FROM ${table}`).get() as { rank: unknown }).rank;
+    assert.deepEqual(
+      [rankOf('poster'), rankOf('background'), rankOf('logo'), rankOf('person_image')],
+      [3, 2, 1, 4],
+    );
+
+    await writer.attachPoster(mediaItemId, init('p', 0));
+    await writer.attachBackground(mediaItemId, init('b', 0));
+    await writer.attachLogo(mediaItemId, init('l', 0));
+    await writer.attachPersonImage(personId, init('i', 0));
+    assert.deepEqual(
+      [rankOf('poster'), rankOf('background'), rankOf('logo'), rankOf('person_image')],
+      [0, 0, 0, 0],
+      'the conflict update rewrites rank',
+    );
+  });
+});
+
 test('dropping a media item deletes its artwork rows and their files', async () => {
   await withArtworkStore(async (artwork, dir) => {
     const { raw, db } = openTestDatabase();
@@ -749,9 +781,9 @@ test('dropping a media item deletes its artwork rows and their files', async () 
     const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
     const mediaItemId = await writer.createMediaItem({ pluginId: 'alpha', title: 't', releaseDate: null, description: null });
 
-    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450) });
-    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/bg.gif', bytes: gifBytes(1920, 1080) });
-    await writer.attachLogo(mediaItemId, { title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128) });
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/poster.gif', bytes: gifBytes(300, 450), rank: 0 });
+    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/bg.gif', bytes: gifBytes(1920, 1080), rank: 0 });
+    await writer.attachLogo(mediaItemId, { title: null, language: null, url: 'https://images.test/logo.gif', bytes: gifBytes(512, 128), rank: 0 });
     assert.equal((await readdir(dir)).length, 3, 'three cached files must exist before the drop');
 
     await writer.dropMediaItem(mediaItemId);
@@ -781,8 +813,8 @@ test('the same url on two different media items gets two files, and dropping one
     // alone would collide the two items onto one file, and dropping either
     // one would unlink the file the other's row still names.
     const url = 'https://images.test/shared-poster.gif';
-    await writer.attachPoster(itemA, { title: null, language: null, url, bytes: gifBytes(300, 450) });
-    await writer.attachPoster(itemB, { title: null, language: null, url, bytes: gifBytes(300, 450) });
+    await writer.attachPoster(itemA, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
+    await writer.attachPoster(itemB, { title: null, language: null, url, bytes: gifBytes(300, 450), rank: 0 });
     assert.equal((await readdir(dir)).length, 2, 'two media items sharing a url must produce two files');
 
     const pathOf = (mediaItemId: number) => (
@@ -817,8 +849,8 @@ test('a portrait image and a landscape image are stored as given, not reclassifi
     // as a background. The caller chose the method; measuring only supplies
     // dimensions, it never moves an image between tables the way
     // packages/core/src/media/classify.ts's classifyArtwork does.
-    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/wide.gif', bytes: gifBytes(1920, 1080) });
-    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/tall.gif', bytes: gifBytes(300, 450) });
+    await writer.attachPoster(mediaItemId, { title: null, language: null, url: 'https://images.test/wide.gif', bytes: gifBytes(1920, 1080), rank: 0 });
+    await writer.attachBackground(mediaItemId, { title: null, language: null, url: 'https://images.test/tall.gif', bytes: gifBytes(300, 450), rank: 0 });
 
     const poster = raw.prepare('SELECT width, height FROM poster WHERE media_item_id = ?')
       .get(mediaItemId) as { width: unknown; height: unknown };
