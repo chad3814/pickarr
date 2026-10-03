@@ -85,10 +85,11 @@ export interface ListByTableOptions {
  * `media_item`, `rss_item`, `torrent_download` and `nzb_download`
  * project `updatedAt` because the sync protocol's read shapes for them do;
  * `person` does too, and so do `rss_feed`, `download_client` and
- * `filepath_mapping`. `role`
- * projects only `createdAt`, and none of the six plugin read shapes
+ * `filepath_mapping`. `role` and the four picture tables (`poster`,
+ * `background`, `logo`, `person_image`)
+ * project only `createdAt`, and none of the six plugin read shapes
  * (`tv_release`, `tv_season`, `tv_series`, `movie_detail`, `xxx_scene`,
- * `xxx_site`) carries either. Asking `listByTable` for one of those seven
+ * `xxx_site`) carries either. Asking `listByTable` for one of those eleven
  * is a programming error and throws (see below) rather than returning an
  * empty page, which would read as "this table is empty" -- a lie a caller
  * has no way to catch.
@@ -149,8 +150,9 @@ export interface ListByTableOptions {
  * lists permanently, invisibly empty.
  *
  * So the throw's message is true of every table it can name again: the
- * seven this set excludes are `role`, which projects only `createdAt`, and
- * the six plugin read shapes, which carry neither. The paragraph this
+ * eleven this set excludes are `role` and the four picture tables
+ * (`poster`, `background`, `logo`, `person_image`), which project only
+ * `createdAt`, and the six plugin read shapes, which carry neither. The paragraph this
  * replaces recorded a deliberate, bounded inaccuracy in that sentence for
  * the one table that carried the column and was excluded anyway; nothing
  * here needs it now.
@@ -420,8 +422,10 @@ function drain(cursorRequest: IDBRequest<IDBCursorWithValue | null>, limit: numb
 
 /**
  * `table` in modification order, walking `by_table_updated`. Throws for any
- * of the seven tables {@link TABLES_WITH_UPDATED_AT} excludes, every one of
- * which carries no `updatedAt` at all. See that constant's doc for the
+ * of the eleven tables {@link TABLES_WITH_UPDATED_AT} excludes (twenty the
+ * replica can hold -- the fourteen in `HOST_SYNCED_TABLES` plus six plugin
+ * read shapes -- less its nine members), every one of which carries no
+ * `updatedAt` at all. See that constant's doc for the
  * per-table measurements and for why an empty page would be worse than a
  * throw.
  */

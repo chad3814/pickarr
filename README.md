@@ -305,7 +305,7 @@ Eight routes, all `GET`, all under `/api`.
 | `/api/rss-items` | A page of feed items. Not type-scoped: a feed's `plugin_id` says who polls it, not who may read what it found. |
 | `/api/downloads` | A page across both download tables, so its cursor names which table a row came from. |
 | `/api/deletions?type=` | Tombstone ids for one plugin. Type-scoped, because a tombstone has no media item left to join to. |
-| `/api/artwork/:kind/:mediaItemId` | An image, with `ETag` handling. |
+| `/api/artwork/:kind/:id` | An image, with `ETag` handling. `:id` is the artwork row's own id (a `poster`, `background`, `logo` or `person_image` row), not the media item's. |
 | `/api/sync?since=` | The tail of the invalidation log: what has changed since a cursor. |
 | `/api/sync/backfill?before=` | Current state walked backwards, newest media item first, for a client that has nothing yet. |
 

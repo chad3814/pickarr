@@ -6,8 +6,8 @@
  * (`../engine.ts`) relinks the release, writes the plugin's rows and records
  * the resolution, and anything that throws between those strands state.
  * Artwork is the worst thing to put there: one provider call and then a
- * binary download per image kept -- three for the item plus one per cast
- * member -- from a CDN this host does not control. A slow image server
+ * binary download per image kept -- up to `ARTWORK_KEEP` of each of the
+ * item's three kinds (fifteen) plus up to `ARTWORK_KEEP` per cast member -- from a CDN this host does not control. A slow image server
  * would make the lookup's duration depend on it, and a failing one would
  * fail the identification and re-run the whole thing on retry. Here, the
  * release stays identified whatever its pictures do.
@@ -500,9 +500,13 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
     // never rejects, so the line above is a barrier, and a keep call that
     // ran earlier could delete a row an in-flight attach is about to name.
     // A kind with nothing stored is skipped rather than told to keep
-    // nothing: naming no survivors deletes every image the item has, and
-    // "the provider offered none" or "every download failed" is not a
-    // reason to wipe what a previous run stored.
+    // nothing: naming no survivors deletes every image the item has, and an
+    // empty list is also what a run with no usable answer produces.
+    // The job proceeds with `EMPTY_MEDIA_IMAGES` when the answer carries
+    // `noCredential` or a provider soft-misses (`tmdb.ts`'s and `tvdb.ts`'s
+    // `mediaImages` return it when no target can be built), so acting on
+    // an empty list would wipe every stored image when an operator removes
+    // an API key or a provider ref stops resolving.
     if (kept.poster.length > 0) await ctx.media.keepArtwork('poster', payload.mediaItemId, kept.poster);
     if (kept.background.length > 0) await ctx.media.keepArtwork('background', payload.mediaItemId, kept.background);
     if (kept.logo.length > 0) await ctx.media.keepArtwork('logo', payload.mediaItemId, kept.logo);

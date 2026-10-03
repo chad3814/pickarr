@@ -1,5 +1,6 @@
 /**
- * A modal over one subject's images -- a media item's, or one person's.
+ * A modal over one card's images -- the media item's own and each cast
+ * member's, walked as one list.
  *
  * **It shows whatever list it is handed, not a fixed number of pictures.**
  * The artwork job keeps up to five posters, backgrounds and logos per media
@@ -7,9 +8,10 @@
  * (`GatheredArtworkView`, issue #79). This component takes whatever list it
  * is handed, so widening what a gallery shows needs no change here.
  *
- * **A 404 is ordinary.** Most items have a poster and neither of the other
- * two, so an image that fails to load is dropped rather than shown broken,
- * the same way `MediaItemCard` drops its browse poster. A subject whose
+ * **A 404 is ordinary.** A ranked image's file can be missing or gone (a
+ * deleted row, a file cleaned up, a CDN that never served it), so an image
+ * that fails to load is dropped rather than shown broken,
+ * the same way `MediaItemCard` drops its browse poster. A card whose
  * every image fails asks to be closed: an empty frame under a caption
  * reads as a bug, and there is nothing to look at.
  */

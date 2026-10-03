@@ -742,12 +742,12 @@ const BARE_ITEM_TITLE = 'No Art Tonight';
  * on the same page in the same run: one image survives, one does not, and
  * the disappearance is observed here rather than quoted from a docblock.
  *
- * **`GET /api/artwork/person/:personId` deliberately has no spec here.**
+ * **`GET /api/artwork/person/:id` deliberately has no spec here.**
  * It is the fourth `ArtworkKind` and it is reachable, but no screen in
  * this build renders a person, so there is no card for a browser to
  * assert against -- and a Playwright test that only issued a bare
  * `page.request.get` would be a slower copy of `a person's picture is
- * served over /api/artwork/person/:personId` in
+ * served over /api/artwork/person/:id, the person_image row id` in
  * `packages/host/test/api/server.test.ts`, which already drives the real
  * `createReadServer` over a real socket with a real session cookie.
  * Mutating `ARTWORK_QUERY.person` reds that test and the two in
