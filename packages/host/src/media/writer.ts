@@ -139,7 +139,9 @@ export function createMediaWriter(
     const placeholders = urls.length === 0 ? "''" : urls.map(() => '?').join(', ');
     const sql = KEEP_TOP_SQL[table](placeholders);
     const stale = raw.prepare(sql.paths).all(ownerId, ...urls);
-    if (stale.length === 0) return;
+    // The drop runs whether or not `paths` found anything: `paths` skips a
+    // row with no file (`path IS NULL`), and such a stale row must still go.
+    // `stale` only decides which files to unlink.
     raw.prepare(sql.drop).run(ownerId, ...urls);
     await Promise.all(stale.map((row) => artwork.remove(String(row['path']))));
   }

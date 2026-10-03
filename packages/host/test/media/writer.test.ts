@@ -1084,3 +1084,43 @@ test('a media item id reused after a drop is tombstoned again, not collided with
   assert.equal(tombstone.plugin_id, 'beta', 'the tombstone must name the second owner, not the first');
   assert.equal(tombstone.deleted_at, 2000, 'and carry the second deletion\'s time, so a client sees it move');
 });
+
+test('keepArtwork deletes a stale row that has no file, even when it is the only stale row', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('keep', 0));
+    await writer.attachPoster(mediaItemId, imageNamed('no-file', 1));
+    // A row with no cached file: the `paths` query skips it, so it is the
+    // only stale row and `paths` finds nothing -- but the row must still go.
+    raw.prepare('UPDATE poster SET path = NULL WHERE url = ?').run('https://images.test/no-file.gif');
+
+    await writer.keepArtwork('poster', mediaItemId, ['https://images.test/keep.gif']);
+
+    const urls = raw.prepare('SELECT url FROM poster WHERE media_item_id = ?').all(mediaItemId)
+      .map((row) => row['url']);
+    assert.deepEqual(urls, ['https://images.test/keep.gif']);
+  });
+});
+
+test('dropMediaItemRows leaves a delete entry in sync_log for each artwork row it removes', async () => {
+  await withArtworkStore(async (artwork) => {
+    const { raw, db } = openTestDatabase();
+    migrateHost(raw);
+    const writer = createMediaWriter(db, () => 1000, artwork, noHooks);
+    const mediaItemId = await writer.createMediaItem({ pluginId: 'movie', title: 'A Film', releaseDate: null, description: null });
+    await writer.attachPoster(mediaItemId, imageNamed('p', 0));
+    await writer.attachBackground(mediaItemId, imageNamed('b', 0));
+    const posterId = Number((raw.prepare('SELECT id FROM poster WHERE media_item_id = ?').get(mediaItemId) as { id: unknown }).id);
+    const backgroundId = Number((raw.prepare('SELECT id FROM background WHERE media_item_id = ?').get(mediaItemId) as { id: unknown }).id);
+
+    writer.dropMediaItemRows(mediaItemId);
+
+    const deletes = raw.prepare(
+      "SELECT table_name, row_id FROM sync_log WHERE op = 'delete' AND table_name IN ('poster', 'background') ORDER BY table_name",
+    ).all().map((row) => [row['table_name'], row['row_id']]);
+    assert.deepEqual(deletes, [['background', backgroundId], ['poster', posterId]]);
+  });
+});

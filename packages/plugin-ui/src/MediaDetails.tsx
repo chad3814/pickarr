@@ -101,8 +101,13 @@ function galleryImages(
 export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsProps): ReactElement {
   // Which image the gallery opened on, or `undefined` for closed.
   const [openAt, setOpenAt] = useState<string | undefined>(undefined);
-  const [posterFailed, setPosterFailed] = useState(false);
+  // The url that failed, not a flag: the top poster's url changes on a
+  // re-rank or a deletion, and a latched boolean would keep the placeholder
+  // up for the valid new image until remount. Comparing to the current url
+  // lets a different one render at once.
+  const [failedPosterUrl, setFailedPosterUrl] = useState<string | undefined>(undefined);
   const posterUrl = gathered.artwork.posters[0]?.url;
+  const posterFailed = posterUrl !== undefined && failedPosterUrl === posterUrl;
   // Where the poster button opens: the top poster, or the top background
   // when the item has none. Neither means a gallery with nothing to show,
   // which would close the instant it opened, so the button is disabled.
@@ -132,7 +137,7 @@ export function MediaDetails({ item, gathered, extraLinks = [] }: MediaDetailsPr
               src={posterUrl}
               alt={item.title}
               onError={() => {
-                setPosterFailed(true);
+                setFailedPosterUrl(posterUrl);
               }}
             />
           )}
@@ -207,8 +212,11 @@ function CastMember({
   provider: string | null;
   onOpen: (url: string) => void;
 }): ReactElement {
-  const [failed, setFailed] = useState(false);
+  // The url that failed, not a flag, for the reason `MediaDetails` keeps
+  // `failedPosterUrl`: a re-rank changes the top picture's url.
+  const [failedUrl, setFailedUrl] = useState<string | undefined>(undefined);
   const imageUrl = role.images[0]?.url;
+  const failed = imageUrl !== undefined && failedUrl === imageUrl;
   const name = role.person?.name ?? '';
   const href = role.person === undefined ? undefined : personLink(provider, role.person.providerRef);
 
@@ -227,7 +235,7 @@ function CastMember({
             src={imageUrl}
             alt={name}
             onError={() => {
-              setFailed(true);
+              setFailedUrl(imageUrl);
             }}
           />
         </button>

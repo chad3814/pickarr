@@ -167,6 +167,11 @@ export interface ArtworkSource {
  * Answers `[]` for an empty list: a provider having nothing for this item is
  * ordinary, not a failure this function should throw over. The sort is
  * stable, so two images equal on every key keep the provider's order.
+ *
+ * **A url appears once.** After sorting, a later image with a url already
+ * seen is dropped, so a provider listing one url twice (under two language
+ * tags, say) takes one of the caller's slots rather than two, and the copy
+ * that ranks best is the one that stays.
  */
 export function rankImages(
   images: readonly ProviderImage[],
@@ -178,12 +183,18 @@ export function rankImages(
     return 2;
   }
 
-  return images.toSorted((a, b) => {
+  const sorted = images.toSorted((a, b) => {
     const tierDelta = tier(a) - tier(b);
     if (tierDelta !== 0) return tierDelta;
     if (a.score !== b.score) return b.score - a.score;
     if (a.url === b.url) return 0;
     return a.url < b.url ? -1 : 1;
+  });
+  const seen = new Set<string>();
+  return sorted.filter((image) => {
+    if (seen.has(image.url)) return false;
+    seen.add(image.url);
+    return true;
   });
 }
 

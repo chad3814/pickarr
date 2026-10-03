@@ -404,3 +404,38 @@ test('when the only poster fails the button still opens on the background, and w
   fireEvent.error(within(screen.getByRole('dialog')).getByAltText('Blockers'));
   assert.ok(!screen.queryByRole('dialog'), 'every image failed, so the gallery closed');
 });
+
+test('a poster that failed is retried when the top poster becomes a different url', () => {
+  const view = (url: string): GatheredItemView => gathered({
+    artwork: {
+      posters: [{ id: 1, url, width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [],
+      logos: [],
+    },
+  });
+  const { rerender } = render(<MediaDetails item={item()} gathered={view('/api/artwork/poster/1')} />);
+
+  fireEvent.error(screen.getByAltText('Blockers'));
+  assert.ok(!screen.queryByAltText('Blockers'), 'the failed poster gives way to the placeholder');
+  assert.ok(screen.getByLabelText('No poster for Blockers'));
+
+  rerender(<MediaDetails item={item()} gathered={view('/api/artwork/poster/2')} />);
+
+  const img = screen.getByAltText('Blockers');
+  assert.equal(img.getAttribute('src'), '/api/artwork/poster/2');
+});
+
+test('a cast picture that failed is retried when their top picture becomes a different url', () => {
+  const alice = person(7, 'Alice');
+  const withPicture = (url: string): GatheredItemView => gathered({
+    roles: [role(1, 7, 0, alice, [{ id: 1, url, width: 10, height: 15, language: null, rank: 0 }])],
+  });
+  const { rerender } = render(<MediaDetails item={item()} gathered={withPicture('/api/artwork/person/1')} />);
+
+  fireEvent.error(screen.getByAltText('Alice'));
+  assert.ok(!screen.queryByAltText('Alice'), 'the failed picture gives way to the placeholder');
+
+  rerender(<MediaDetails item={item()} gathered={withPicture('/api/artwork/person/2')} />);
+
+  assert.equal(screen.getByAltText('Alice').getAttribute('src'), '/api/artwork/person/2');
+});

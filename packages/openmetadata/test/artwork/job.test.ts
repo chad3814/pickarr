@@ -284,6 +284,30 @@ test('a resolved item gets up to ARTWORK_KEEP of each kind, ranked', async () =>
   assert.deepEqual(rankImages(posters, 'en').slice(0, ARTWORK_KEEP).map((entry) => entry.url), topFivePosters);
 });
 
+test('a url the provider lists twice is attached once and kept once, and does not take a second slot', async () => {
+  const posters = [
+    image('https://cdn.test/dup.jpg', { language: 'en', score: 9 }),
+    image('https://cdn.test/dup.jpg', { language: 'en', score: 9 }),
+    image('https://cdn.test/next.jpg', { language: 'en', score: 1 }),
+  ];
+  const { source } = scriptedSource(answer({ posters }));
+  const { fetch } = bytesFetch({ 'https://cdn.test/dup.jpg': BYTES, 'https://cdn.test/next.jpg': BYTES });
+  const writer = attachWriter();
+  const { ctx } = contextWith(fetch, writer.writer);
+
+  const handler = createArtworkJob({ resolveSecret: async () => 'unused', sources: registryOf({ tmdb: source }) });
+  await handler(jobRecord(payloadFor({ mediaItemId: 42 })), ctx);
+
+  assert.deepEqual(
+    writer.attached.filter((entry) => entry.what === 'poster').toSorted((a, b) => a.init.rank - b.init.rank)
+      .map((entry) => [entry.init.url, entry.init.rank]),
+    [['https://cdn.test/dup.jpg', 0], ['https://cdn.test/next.jpg', 1]],
+  );
+  const keptPosters = writer.kept.filter((entry) => entry.what === 'poster');
+  assert.equal(keptPosters.length, 1);
+  assert.deepEqual(keptPosters[0]?.urls.toSorted(), ['https://cdn.test/dup.jpg', 'https://cdn.test/next.jpg']);
+});
+
 test('each person gets up to ARTWORK_KEEP pictures, and one keepPersonImages', async () => {
   const faces = descending('a', 3);
   const { source, asked } = scriptedSource(answer({

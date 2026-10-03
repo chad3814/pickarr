@@ -94,14 +94,30 @@ test('bestImage is the first of rankImages', () => {
   assert.equal(bestImage(images, 'en')?.url, 'https://example.test/a.jpg');
 });
 
-test('rankImages is stable on a full tie', () => {
+test('rankImages is stable on a full tie, and a url listed twice keeps only its first occurrence', () => {
   // Same url, language and score: only identity tells them apart, and the
-  // provider's order must survive.
+  // provider's order must survive -- which is visible as *which* of the two
+  // is kept, since a repeated url takes one slot, not two.
   const first: ProviderImage = { url: 'https://example.test/same.jpg', language: 'en', score: 5 };
   const second: ProviderImage = { url: 'https://example.test/same.jpg', language: 'en', score: 5 };
   const ranked = rankImages([first, second], 'en');
+  assert.equal(ranked.length, 1);
   assert.equal(ranked[0], first);
-  assert.equal(ranked[1], second);
+});
+
+test('rankImages keeps the best-ranked copy of a url a provider lists twice', () => {
+  // The same url under a foreign tag and again under the configured
+  // language: after sorting, the configured-language entry comes first and
+  // is the one kept; the other images keep their places around it.
+  const images: readonly ProviderImage[] = [
+    { url: 'https://example.test/dup.jpg', language: 'ja', score: 9 },
+    { url: 'https://example.test/other.jpg', language: 'en', score: 1 },
+    { url: 'https://example.test/dup.jpg', language: 'en', score: 5 },
+  ];
+  assert.deepEqual(rankImages(images, 'en').map((image) => [image.url, image.language]), [
+    ['https://example.test/dup.jpg', 'en'],
+    ['https://example.test/other.jpg', 'en'],
+  ]);
 });
 
 test('createArtworkSources registers every provider openmetadata emits', () => {
