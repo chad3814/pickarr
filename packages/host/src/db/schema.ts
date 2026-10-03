@@ -438,6 +438,8 @@ export const poster = sqliteTable('poster', {
   // Nullable: set once the artwork writer has fetched the file to disk: rows
   // written before that (or before this column existed) have none yet.
   path: text('path'),
+  // Migration 27: the job's ordering within one owner and kind, 0 best.
+  rank: integer('rank').notNull().default(0),
 }, (t) => [
   // Unique on the url for the same reason as `role_media_item_person_role`:
   // one image is one row however many times a handler re-runs.
@@ -455,6 +457,8 @@ export const background = sqliteTable('background', {
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
   path: text('path'),
+  // Migration 27: the job's ordering within one owner and kind, 0 best.
+  rank: integer('rank').notNull().default(0),
 }, (t) => [
   uniqueIndex('background_media_item_url').on(t.mediaItemId, t.url),
 ]);
@@ -476,6 +480,8 @@ export const logo = sqliteTable('logo', {
   height: integer('height').notNull(),
   createdAt: integer('created_at').notNull(),
   path: text('path'),
+  // Migration 27: the job's ordering within one owner and kind, 0 best.
+  rank: integer('rank').notNull().default(0),
 }, (t) => [
   index('logo_media_item').on(t.mediaItemId),
   // Unique to match `poster`/`background`: this is what makes a re-run of
@@ -491,12 +497,8 @@ export const logo = sqliteTable('logo', {
  * is not a media item and the two id spaces are separate `INTEGER PRIMARY
  * KEY`s that can name the same integer for unrelated rows. Migration 23.
  *
- * Unlike every table added since migration 15, this one carries no sync
- * triggers and is not in `HOST_SYNCED_TABLES`: artwork is not replicated --
- * a client fetches it by url through `/api/artwork/...` and holds no
- * artwork row at all (`web/src/store/gather.ts`, #79) -- and it joins
- * `poster`/`background`/`logo` in staying outside that set rather than the
- * tables added around it in time.
+ * Created without sync triggers; migration 27 installs them, and this
+ * table joins `poster`/`background`/`logo` in `HOST_SYNCED_TABLES` (#79).
  */
 export const personImage = sqliteTable('person_image', {
   id: integer('id').primaryKey(),
@@ -510,6 +512,8 @@ export const personImage = sqliteTable('person_image', {
   // Nullable: set once the artwork writer has fetched the file to disk --
   // matches `poster.path`'s reasoning exactly.
   path: text('path'),
+  // Migration 27: the job's ordering within one owner and kind, 0 best.
+  rank: integer('rank').notNull().default(0),
 }, (t) => [
   // Unique on the url for the same reason as `poster_media_item_url`: one
   // image is one row however many times a handler re-runs.

@@ -40,8 +40,23 @@ export interface GatheredReleaseView {
   readonly downloads: readonly GatheredDownloadView[];
 }
 
-/** Mirrors `ArtworkUrls` in `web/src/store/gather.ts`. Urls, never rows -- artwork is not replicated (#79). */
-export type ArtworkUrlsView = Readonly<Record<'poster' | 'background' | 'logo', string>>;
+/** Mirrors `GatheredImage` in `web/src/store/gather.ts`: one replicated artwork row and the url that serves it. */
+export interface GatheredImageView {
+  readonly id: number;
+  readonly url: string;
+  readonly width: number;
+  readonly height: number;
+  readonly language: string | null;
+  /** Position in the host's preference order, 0 best. */
+  readonly rank: number;
+}
+
+/** Mirrors `GatheredArtwork` in `web/src/store/gather.ts`. Each list is best first and may be empty. */
+export interface GatheredArtworkView {
+  readonly posters: readonly GatheredImageView[];
+  readonly backgrounds: readonly GatheredImageView[];
+  readonly logos: readonly GatheredImageView[];
+}
 
 /** Mirrors `GatheredRole` in `web/src/store/gather.ts`. */
 export interface GatheredRoleView {
@@ -52,7 +67,8 @@ export interface GatheredRoleView {
    * log order is not group order, so a role can land before its person.
    */
   readonly person: PersonSyncRead | undefined;
-  readonly imageUrl: string;
+  /** This person's pictures, best first; empty when the replica holds none. */
+  readonly images: readonly GatheredImageView[];
 }
 
 /**
@@ -70,7 +86,7 @@ export interface GatheredRoleView {
 export interface GatheredItemView {
   readonly releases: readonly GatheredReleaseView[];
   readonly roles: readonly GatheredRoleView[];
-  readonly artwork: ArtworkUrlsView;
+  readonly artwork: GatheredArtworkView;
 }
 
 /**

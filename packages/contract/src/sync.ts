@@ -418,6 +418,37 @@ export interface RoleSyncRead {
 }
 
 /**
+ * One poster, background or logo of a media item, as the replica holds it.
+ * Replicated so a card can know how many images exist and in what order
+ * (`rank`, 0 best); the browser reaches the bytes through
+ * `/api/artwork/<kind>/<id>`, where `<id>` is this row's `id`.
+ *
+ * **No `url` and no `path`.** The `url` is a provider's address for the
+ * image -- the same reason `rss_item.link` stays on the host -- and the
+ * `path` is a local filename.
+ */
+export interface ArtworkSyncRead {
+  id: number;
+  mediaItemId: number;
+  width: number;
+  height: number;
+  language: string | null;
+  rank: number;
+  createdAt: number;
+}
+
+/** One picture of a person; `ArtworkSyncRead`'s rules apply, with the bytes at `/api/artwork/person/<id>`. */
+export interface PersonImageSyncRead {
+  id: number;
+  personId: number;
+  width: number;
+  height: number;
+  language: string | null;
+  rank: number;
+  createdAt: number;
+}
+
+/**
  * A feed configured on the host, as the replica holds it -- the seventh host
  * synced table, and the first added since the other six shipped
  * (`sync/tables.ts`'s top docblock has the whole story).

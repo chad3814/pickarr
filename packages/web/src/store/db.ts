@@ -138,8 +138,10 @@ export function openStore(name: string, version: number = SCHEMA_VERSION): Promi
       rows.createIndex('by_table_plugin_updated', ['table', 'value.pluginId', 'value.updatedAt', 'id']);
       rows.createIndex('by_table', 'table');
       // Who appears where, for the catalog's person-rename path
-      // (`store/catalog-apply.ts`): only `role` carries `value.personId`, so
-      // this index is self-filtering the way `by_table_plugin_updated` is.
+      // (`store/catalog-apply.ts`): both `role` and `person_image` rows carry
+      // `value.personId` and enter this index. It does not filter by table;
+      // the catalog filters by shape, reading `mediaItemId` off each hit and
+      // skipping the picture rows, which have none.
       rows.createIndex('by_person', 'value.personId');
       // Live downloads for the Activities page (`store/rows.ts`'s
       // `activeDownloads`): one range per `[table, status]`, so the read

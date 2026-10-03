@@ -156,22 +156,23 @@ function gathered({
     releases: mappedReleases,
     roles: [],
     artwork: {
-      poster: `/api/artwork/poster/${String(id)}`,
-      background: `/api/artwork/background/${String(id)}`,
-      logo: `/api/artwork/logo/${String(id)}`,
+      posters: [{ id, url: `/api/artwork/poster/${String(id)}`, width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [{ id, url: `/api/artwork/background/${String(id)}`, width: 15, height: 10, language: null, rank: 0 }],
+      logos: [],
     },
     feedIds: [...new Set(mappedReleases.map((release) => release.row.feedId))].toSorted((a, b) => a - b),
   };
 }
 
 /**
- * `useGatheredItem`'s two download-insert members, defaulted: no card in
- * this file exercises a pick arriving, so an insert subscription nothing
- * fires and a replica holding no row are what they should see. That hook's
+ * `useGatheredItem`'s insert, touch and row-read members, defaulted: no card
+ * in this file exercises a pick or a picture arriving, so a subscription
+ * nothing fires and a replica holding no row are what they should see. That hook's
  * own test file drives both properly.
  */
 const quietInserts = {
   subscribeInserts: (): (() => void) => () => {},
+  subscribeTouched: (): (() => void) => () => {},
   getRows: async (): Promise<Map<number, unknown>> => new Map(),
 };
 
@@ -273,9 +274,10 @@ test('closing a card tears its subscriptions down, and reopening gathers again b
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
   assert.equal(gathers, 1);
-  // One on `media_item`, one per download table (`useGatheredItem`'s own
-  // `DOWNLOAD_TABLES`, which holds two).
-  assert.equal(liveSubscriptions, 3, 'an open card watches its own row and both download tables');
+  // One on `media_item`, one insert channel per download table
+  // (`DOWNLOAD_TABLES`, two) and one per artwork table (`ARTWORK_TABLES`,
+  // four). This stub's `subscribeTouched` is quiet and not counted.
+  assert.equal(liveSubscriptions, 7, 'an open card watches its own row, both download tables and the four artwork ones');
 
   // `{ expanded: true }`, not just the name: `MediaDetails` now renders a
   // poster `<button>` whose accessible name is also "The Thing" (from its
@@ -292,7 +294,7 @@ test('closing a card tears its subscriptions down, and reopening gathers again b
     assert.ok(screen.getByRole('list', { name: /releases/i }));
   });
   assert.equal(gathers, 2, 'reopening re-gathers behind the cache, since the collapsed window was unwatched');
-  assert.equal(liveSubscriptions, 3, 'and watches again');
+  assert.equal(liveSubscriptions, 7, 'and watches again');
 });
 
 test("a TV item's card is the tv plugin's, and its headline names the series and the episode", async () => {

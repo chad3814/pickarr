@@ -173,7 +173,7 @@ async function reassignWithPoster(dropRows: ReassignDeps['dropRows']): Promise<{
     const writer = createMediaWriter(db, () => NOW, counting, { dropRows });
     const feedId = insertFeed(raw, 'http://feed.invalid/a');
     seedItem(raw, 1); seedItem(raw, 2); seedRelease(raw, 10, feedId, 1);
-    await writer.attachPoster(1, { title: null, language: null, url: 'https://images.test/p.gif', bytes: gifBytes(300, 450) });
+    await writer.attachPoster(1, { title: null, language: null, url: 'https://images.test/p.gif', bytes: gifBytes(300, 450), rank: 0 });
     const row = raw.prepare('SELECT path FROM poster WHERE media_item_id = 1').get();
     const posterPath = String(row?.['path']);
     captured = { raw, removed, inTransactionAtUnlink, posterPath };

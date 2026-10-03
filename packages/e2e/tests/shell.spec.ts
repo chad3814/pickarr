@@ -718,7 +718,7 @@ const BARE_ITEM_TITLE = 'No Art Tonight';
 /*
  * **The end-to-end proof that a cached poster reaches the screen.** A
  * `poster` row, the bytes its `path` names, `GET
- * /api/artwork/poster/:mediaItemId`, and Chromium decoding the response --
+ * /api/artwork/poster/:posterId` (the poster row's id), and Chromium decoding the response --
  * four links, and no smaller test can hold more than one of them at a
  * time. Nothing exercised the whole chain before this slice: the `<img>`
  * in every browse card 404'd from the day it was written.
@@ -742,12 +742,12 @@ const BARE_ITEM_TITLE = 'No Art Tonight';
  * on the same page in the same run: one image survives, one does not, and
  * the disappearance is observed here rather than quoted from a docblock.
  *
- * **`GET /api/artwork/person/:personId` deliberately has no spec here.**
+ * **`GET /api/artwork/person/:id` deliberately has no spec here.**
  * It is the fourth `ArtworkKind` and it is reachable, but no screen in
  * this build renders a person, so there is no card for a browser to
  * assert against -- and a Playwright test that only issued a bare
  * `page.request.get` would be a slower copy of `a person's picture is
- * served over /api/artwork/person/:personId` in
+ * served over /api/artwork/person/:id, the person_image row id` in
  * `packages/host/test/api/server.test.ts`, which already drives the real
  * `createReadServer` over a real socket with a real session cookie.
  * Mutating `ARTWORK_QUERY.person` reds that test and the two in
@@ -785,7 +785,7 @@ test('a cached poster is decoded in the browser, and an item with none shows a p
   // **Both cards have to be expanded, and that is new.** A browse row
   // carried a poster until the detail section landed; `MediaItemCard`
   // renders no artwork now, so the only `<img>` that loads from
-  // `/api/artwork/poster/:id` is the detail section's, inside the
+  // `/api/artwork/poster/:posterId` is the detail section's, inside the
   // expanded body. This spec is the only place in the suite that proves
   // that route serves real bytes end to end --
   // `media-details.spec.ts` intercepts it with a fixture -- so the proof

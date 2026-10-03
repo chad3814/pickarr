@@ -16,11 +16,14 @@ function role(
   personId: number,
   billingOrder: number | null,
   who: PersonSyncRead | undefined,
+  images: GatheredRoleView['images'] = [{
+    id: personId, url: `/api/artwork/person/${String(personId)}`, width: 10, height: 15, language: null, rank: 0,
+  }],
 ): GatheredRoleView {
   const row: RoleSyncRead = {
     id, mediaItemId: 1, personId, role: 'actor', name: null, billingOrder, createdAt: 0,
   };
-  return { id, row, person: who, imageUrl: `/api/artwork/person/${String(personId)}` };
+  return { id, row, person: who, images };
 }
 
 function item(overrides: Partial<MediaItemSyncRead> = {}): MediaItemSyncRead {
@@ -37,9 +40,9 @@ function gathered(overrides: Partial<GatheredItemView> = {}): GatheredItemView {
     releases: [],
     roles: [],
     artwork: {
-      poster: '/api/artwork/poster/1',
-      background: '/api/artwork/background/1',
-      logo: '/api/artwork/logo/1',
+      posters: [{ id: 1, url: '/api/artwork/poster/1', width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [{ id: 1, url: '/api/artwork/background/1', width: 15, height: 10, language: null, rank: 0 }],
+      logos: [],
     },
     ...overrides,
   };
@@ -249,7 +252,7 @@ test('re-opening the gallery at another image starts it fresh, not with the last
 });
 
 test('a person\'s picture is in the card\'s gallery, reachable from the poster', () => {
-  // The gallery is one set per card -- three media slots then each cast
+  // The gallery is one set per card -- the media item's images then each cast
   // member -- so walking forward from the poster arrives at the cast
   // rather than running out after the media images.
   const alice = person(7, 'Alice');
@@ -263,7 +266,7 @@ test('a person\'s picture is in the card\'s gallery, reachable from the poster',
 
   fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
 
-  // Two media slots, not three: the logo is fetched and stored but kept
+  // One poster and one background: the logo is fetched and stored but kept
   // out of the carousel -- a wordmark is not a picture anyone opens a
   // lightbox for.
   assert.ok(screen.getByText('1 of 4'), 'poster and background plus two people');
@@ -272,4 +275,167 @@ test('a person\'s picture is in the card\'s gallery, reachable from the poster',
   assert.ok(screen.getByRole('heading', { name: 'Alice' }), 'the third image is the first cast member');
   fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
   assert.ok(screen.getByRole('heading', { name: 'Bob' }), 'and the fourth is the second');
+});
+
+function picture(kind: string, id: number, rank: number) {
+  return { id, url: `/api/artwork/${kind}/${String(id)}`, width: 10, height: 15, language: null, rank };
+}
+
+test('the detail image is the rank-0 poster, and with no poster row the placeholder renders at once', () => {
+  const two = gathered({
+    artwork: { posters: [picture('poster', 11, 0), picture('poster', 12, 1)], backgrounds: [], logos: [] },
+  });
+  const { unmount } = render(<MediaDetails item={item()} gathered={two} />);
+  assert.equal(screen.getByAltText('Blockers').getAttribute('src'), '/api/artwork/poster/11');
+  unmount();
+
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({ artwork: { posters: [], backgrounds: [picture('background', 5, 0)], logos: [] } })}
+    />,
+  );
+  assert.ok(!screen.queryByAltText('Blockers'), 'no poster img');
+  assert.ok(screen.getByRole('img', { name: 'No poster for Blockers' }), 'the placeholder is shown at once');
+
+  fireEvent.click(screen.getByRole('button', { name: 'No poster for Blockers' }));
+  const dialog = screen.getByRole('dialog', { name: 'Blockers' });
+  assert.equal(within(dialog).getByAltText('Blockers').getAttribute('src'), '/api/artwork/background/5');
+});
+
+test('the poster button is disabled when there is neither a poster nor a background', () => {
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({ artwork: { posters: [], backgrounds: [], logos: [picture('logo', 1, 0)] } })}
+    />,
+  );
+
+  const button = screen.getByRole('button', { name: 'No poster for Blockers' });
+  assert.equal(button.hasAttribute('disabled'), true);
+  fireEvent.click(button);
+  assert.ok(!screen.queryByRole('dialog'), 'nothing to open, and the logo is not a gallery image');
+});
+
+test('the gallery walks every poster, then every background, then each cast member\'s pictures, in rank order', () => {
+  const alice = person(7, 'Alice');
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({
+        artwork: {
+          posters: [picture('poster', 21, 0), picture('poster', 22, 1)],
+          backgrounds: [picture('background', 31, 0), picture('background', 32, 1)],
+          logos: [picture('logo', 41, 0)],
+        },
+        roles: [role(1, 7, 0, alice, [picture('person', 51, 0), picture('person', 52, 1)])],
+      })}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Blockers' }));
+  const dialog = screen.getByRole('dialog');
+  const shown = (): string | null => dialog.querySelector('img')?.getAttribute('src') ?? null;
+  const caption = (): string => within(dialog).getByRole('heading').textContent;
+
+  const walked: Array<[string | null, string, boolean]> = [];
+  for (let n = 1; n <= 6; n += 1) {
+    walked.push([shown(), caption(), screen.queryByText(`${String(n)} of 6`) !== null]);
+    if (n < 6) fireEvent.click(screen.getByRole('button', { name: 'Next image' }));
+  }
+  assert.deepEqual(walked, [
+    ['/api/artwork/poster/21', 'Blockers', true],
+    ['/api/artwork/poster/22', 'Blockers', true],
+    ['/api/artwork/background/31', 'Blockers', true],
+    ['/api/artwork/background/32', 'Blockers', true],
+    ['/api/artwork/person/51', 'Alice', true],
+    ['/api/artwork/person/52', 'Alice', true],
+  ]);
+});
+
+test('a cast thumbnail is the person\'s rank-0 picture and opens the gallery there', () => {
+  const alice = person(7, 'Alice');
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({ roles: [role(1, 7, 0, alice, [picture('person', 51, 0), picture('person', 52, 1)])] })}
+    />,
+  );
+
+  assert.equal(screen.getByAltText('Alice').getAttribute('src'), '/api/artwork/person/51');
+  fireEvent.click(screen.getByRole('button', { name: 'Alice' }));
+
+  const dialog = screen.getByRole('dialog', { name: 'Alice' });
+  assert.equal(within(dialog).getByAltText('Alice').getAttribute('src'), '/api/artwork/person/51');
+  assert.ok(screen.getByText('3 of 4'), 'poster, background, then her two pictures');
+});
+
+test('a cast member with no pictures gets the placeholder and no button', () => {
+  const alice = person(7, 'Alice');
+  render(<MediaDetails item={item()} gathered={gathered({ roles: [role(1, 7, 0, alice, [])] })} />);
+
+  assert.ok(screen.getByRole('img', { name: 'No picture of Alice' }), 'the placeholder is shown');
+  assert.ok(!screen.queryByRole('button', { name: 'Alice' }), 'no button');
+  assert.ok(!screen.queryByRole('button', { name: 'No picture of Alice' }), 'no button on the placeholder');
+  assert.ok(screen.getByText('Alice'), 'the name survives');
+});
+
+test('when the only poster fails the button still opens on the background, and when every image fails the gallery closes', () => {
+  render(
+    <MediaDetails
+      item={item()}
+      gathered={gathered({
+        artwork: { posters: [picture('poster', 1, 0)], backgrounds: [picture('background', 2, 0)], logos: [] },
+      })}
+    />,
+  );
+
+  fireEvent.error(screen.getByAltText('Blockers'));
+  fireEvent.click(screen.getByRole('button', { name: 'No poster for Blockers' }));
+
+  const dialog = screen.getByRole('dialog', { name: 'Blockers' });
+  fireEvent.error(within(dialog).getByAltText('Blockers'));
+  assert.equal(
+    within(screen.getByRole('dialog')).getByAltText('Blockers').getAttribute('src'),
+    '/api/artwork/background/2',
+    'the failed poster is skipped and the background shows',
+  );
+
+  fireEvent.error(within(screen.getByRole('dialog')).getByAltText('Blockers'));
+  assert.ok(!screen.queryByRole('dialog'), 'every image failed, so the gallery closed');
+});
+
+test('a poster that failed is retried when the top poster becomes a different url', () => {
+  const view = (url: string): GatheredItemView => gathered({
+    artwork: {
+      posters: [{ id: 1, url, width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [],
+      logos: [],
+    },
+  });
+  const { rerender } = render(<MediaDetails item={item()} gathered={view('/api/artwork/poster/1')} />);
+
+  fireEvent.error(screen.getByAltText('Blockers'));
+  assert.ok(!screen.queryByAltText('Blockers'), 'the failed poster gives way to the placeholder');
+  assert.ok(screen.getByLabelText('No poster for Blockers'));
+
+  rerender(<MediaDetails item={item()} gathered={view('/api/artwork/poster/2')} />);
+
+  const img = screen.getByAltText('Blockers');
+  assert.equal(img.getAttribute('src'), '/api/artwork/poster/2');
+});
+
+test('a cast picture that failed is retried when their top picture becomes a different url', () => {
+  const alice = person(7, 'Alice');
+  const withPicture = (url: string): GatheredItemView => gathered({
+    roles: [role(1, 7, 0, alice, [{ id: 1, url, width: 10, height: 15, language: null, rank: 0 }])],
+  });
+  const { rerender } = render(<MediaDetails item={item()} gathered={withPicture('/api/artwork/person/1')} />);
+
+  fireEvent.error(screen.getByAltText('Alice'));
+  assert.ok(!screen.queryByAltText('Alice'), 'the failed picture gives way to the placeholder');
+
+  rerender(<MediaDetails item={item()} gathered={withPicture('/api/artwork/person/2')} />);
+
+  assert.equal(screen.getByAltText('Alice').getAttribute('src'), '/api/artwork/person/2');
 });

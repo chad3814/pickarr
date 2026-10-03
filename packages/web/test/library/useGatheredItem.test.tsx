@@ -2,9 +2,14 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
-import type { NzbDownloadSyncRead, RssItemSyncRead, TorrentDownloadSyncRead } from '@pickarr/contract';
+import type {
+  NzbDownloadSyncRead,
+  RoleSyncRead,
+  RssItemSyncRead,
+  TorrentDownloadSyncRead,
+} from '@pickarr/contract';
 import { useGatheredItem, type GatheredSource } from '../../src/library/useGatheredItem.ts';
-import type { GatheredDownload, GatheredItem, GatheredRelease } from '../../src/store/gather.ts';
+import type { GatheredDownload, GatheredImage, GatheredItem, GatheredRelease, GatheredRole } from '../../src/store/gather.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -22,7 +27,7 @@ function settle(): Promise<void> {
 }
 
 /**
- * The two members the download-insert tests below drive, defaulted for every
+ * The members the insert and touch tests below drive, defaulted for every
  * test that does not: an insert subscription nothing ever fires, and a
  * replica holding no row. Spelled once here rather than in each stub, so a
  * test that cares overrides exactly the member it cares about and a reader
@@ -30,6 +35,7 @@ function settle(): Promise<void> {
  */
 const quietInserts = {
   subscribeInserts: (): (() => void) => () => {},
+  subscribeTouched: (): (() => void) => () => {},
   getRows: async (): Promise<Map<number, unknown>> => new Map(),
 };
 
@@ -110,7 +116,7 @@ function stubItem(id: number, title: string, releases: readonly GatheredRelease[
     pluginId: 'tv',
     releases,
     roles: [],
-    artwork: { poster: '', background: '', logo: '' },
+    artwork: { posters: [], backgrounds: [], logos: [] },
     feedIds: [],
   };
 }
@@ -350,6 +356,7 @@ function pickHarness(
       return stubItem(id, 'Title', [release(3, gathers === 1 ? [] : [arrival])]);
     },
     subscribe: () => () => {},
+    subscribeTouched: () => () => {},
     subscribeInserts: (table: string, cb: (ids: readonly number[]) => void) => {
       callbacks.set(table, cb);
       return () => {
@@ -446,6 +453,13 @@ test('unmounting takes down the download insert subscriptions as well as the row
         live.delete(key);
       };
     },
+    subscribeTouched: (table: string) => {
+      const key = `touched:${table}`;
+      live.add(key);
+      return () => {
+        live.delete(key);
+      };
+    },
     getRows: async () => new Map(),
   };
   const { unmount } = render(<Harness source={source} mediaItemId={7} enabled />);
@@ -454,12 +468,16 @@ test('unmounting takes down the download insert subscriptions as well as the row
   });
   assert.deepEqual(
     [...live].toSorted(),
-    ['inserts:nzb_download', 'inserts:torrent_download', 'media_item:7'],
-    'all three channels are up while the card is open',
+    [
+      'inserts:background', 'inserts:logo', 'inserts:nzb_download', 'inserts:person_image', 'inserts:poster',
+      'inserts:torrent_download', 'media_item:7',
+      'touched:background', 'touched:logo', 'touched:person_image', 'touched:poster',
+    ],
+    'every channel is up while the card is open, the artwork ones included',
   );
 
   unmount();
-  assert.deepEqual([...live], [], 'and all three are down again, leaving nothing to touch a closed store');
+  assert.deepEqual([...live], [], 'and all of them are down again, leaving nothing to touch a closed store');
 });
 
 /**
@@ -582,4 +600,143 @@ test("an update to a release this item already shows re-gathers, so a requery's 
     assert.equal(screen.getByTestId('progress').textContent, 'downloading:55');
   });
   assert.equal(gathers(), 2);
+});
+
+/** A picture row as `GatheredImage`, defaulted but for its id. */
+function image(id: number): GatheredImage {
+  return { id, url: `/api/artwork/poster/${String(id)}`, width: 10, height: 15, language: null, rank: 0 };
+}
+
+function role(id: number, personId: number, images: readonly GatheredImage[]): GatheredRole {
+  const row: RoleSyncRead = { id, mediaItemId: 7, personId, role: 'actor', name: null, billingOrder: 1, createdAt: 0 };
+  return { id, row, person: undefined, images };
+}
+
+/**
+ * A source whose first gather shows poster 20 and a cast of person 9 with
+ * picture 50, and whose later gathers show `after`. `fireInsert` and
+ * `fireTouched` call the listener the hook registered for a table, and
+ * `stored` is what `getRows` answers with for an inserted id.
+ */
+function artworkHarness(stored: ReadonlyMap<string, ReadonlyMap<number, unknown>>): {
+  source: GatheredSource;
+  gathers: () => number;
+  fireInsert: (table: string, ids: readonly number[]) => void;
+  fireTouched: (table: string, ids: readonly number[]) => void;
+} {
+  let gathers = 0;
+  const inserts = new Map<string, (ids: readonly number[]) => void>();
+  const touched = new Map<string, (ids: readonly number[]) => void>();
+  const source: GatheredSource = {
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return {
+        ...stubItem(id, 'Title'),
+        artwork: { posters: [image(20)], backgrounds: [], logos: [] },
+        roles: [role(1, 9, [image(50)])],
+      };
+    },
+    subscribe: () => () => {},
+    subscribeInserts: (table: string, cb: (ids: readonly number[]) => void) => {
+      inserts.set(table, cb);
+      return () => {
+        inserts.delete(table);
+      };
+    },
+    subscribeTouched: (table: string, cb: (ids: readonly number[]) => void) => {
+      touched.set(table, cb);
+      return () => {
+        touched.delete(table);
+      };
+    },
+    getRows: async (table: string, ids: readonly number[]) =>
+      new Map(ids.flatMap((id): [number, unknown][] => {
+        const value = stored.get(table)?.get(id);
+        return value === undefined ? [] : [[id, value]];
+      })),
+  };
+  const listener = (
+    channel: ReadonlyMap<string, (ids: readonly number[]) => void>,
+    table: string,
+  ): ((ids: readonly number[]) => void) => {
+    const cb = channel.get(table);
+    assert.ok(cb !== undefined, `nothing is subscribed to ${table}`);
+    return cb;
+  };
+  return {
+    source,
+    gathers: () => gathers,
+    fireInsert: (table, ids) => {
+      listener(inserts, table)(ids);
+    },
+    fireTouched: (table, ids) => {
+      listener(touched, table)(ids);
+    },
+  };
+}
+
+test("a poster row inserted for this item re-gathers", async () => {
+  const { source, gathers, fireInsert } = artworkHarness(new Map([['poster', new Map([[21, { mediaItemId: 7 }]])]]));
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+
+  fireInsert('poster', [21]);
+  await waitFor(() => {
+    assert.equal(gathers(), 2);
+  });
+});
+
+test("a poster row inserted for another item does not re-gather", async () => {
+  const { source, gathers, fireInsert } = artworkHarness(new Map([['poster', new Map([[21, { mediaItemId: 8 }]])]]));
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+
+  fireInsert('poster', [21]);
+  await settle();
+  assert.equal(gathers(), 1, "a stranger's poster woke nothing");
+});
+
+test("a person_image row inserted for a person in the gathered cast re-gathers, and one for a stranger does not", async () => {
+  const { source, gathers, fireInsert } = artworkHarness(
+    new Map([['person_image', new Map([[51, { personId: 9 }], [52, { personId: 10 }]])]]),
+  );
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+
+  fireInsert('person_image', [52]);
+  await settle();
+  assert.equal(gathers(), 1, 'a person outside this cast woke nothing');
+
+  fireInsert('person_image', [51]);
+  await waitFor(() => {
+    assert.equal(gathers(), 2);
+  });
+});
+
+test('a touch on an artwork row the gather showed re-gathers; a touch on one it did not show does not', async () => {
+  const { source, gathers, fireTouched } = artworkHarness(new Map());
+  render(<Harness source={source} mediaItemId={7} enabled />);
+  await waitFor(() => {
+    assert.equal(resultText(), 'Title');
+  });
+
+  fireTouched('poster', [99]);
+  fireTouched('person_image', [20]);
+  await settle();
+  assert.equal(gathers(), 1, 'an unknown poster id, and a poster id under the wrong table, woke nothing');
+
+  fireTouched('poster', [99, 20]);
+  await waitFor(() => {
+    assert.equal(gathers(), 2);
+  });
+  fireTouched('person_image', [50]);
+  await waitFor(() => {
+    assert.equal(gathers(), 3);
+  });
 });

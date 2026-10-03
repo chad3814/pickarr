@@ -1321,12 +1321,14 @@ test('artwork is served from the real filesystem with its type read from the byt
   try {
     const path = join(dir, 'a.bin');
     await writeFile(path, PNG_BYTES);
-    raw.prepare('INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
-      .run(mediaItemId, 'https://images.test/a.png', path);
+    const posterId = Number(
+      raw.prepare('INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
+        .run(mediaItemId, 'https://images.test/a.png', path).lastInsertRowid,
+    );
 
     const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
     try {
-      const response = await get(server, `/api/artwork/poster/${mediaItemId}`, cookie);
+      const response = await get(server, `/api/artwork/poster/${posterId}`, cookie);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('content-type'), 'image/png', 'sniffed from the bytes, not from the .bin suffix');
       assert.deepEqual(new Uint8Array(await response.arrayBuffer()), PNG_BYTES, 'the bytes on disk, by value');
@@ -1334,11 +1336,11 @@ test('artwork is served from the real filesystem with its type read from the byt
       const etag = response.headers.get('etag');
       assert.ok(etag !== null && etag.startsWith('W/'), 'a weak etag, since the cached path is not a hash of the content');
 
-      const cached = await get(server, `/api/artwork/poster/${mediaItemId}`, cookie, { 'if-none-match': etag });
+      const cached = await get(server, `/api/artwork/poster/${posterId}`, cookie, { 'if-none-match': etag });
       assert.equal(cached.status, 304, 'the header the request carried reaches readArtwork');
       assert.equal((await cached.arrayBuffer()).byteLength, 0);
 
-      const missing = await get(server, `/api/artwork/logo/${mediaItemId}`, cookie);
+      const missing = await get(server, `/api/artwork/logo/${posterId}`, cookie);
       assert.equal(missing.status, 404, 'no logo row is a 404, not an empty 200');
       assert.equal((await missing.arrayBuffer()).byteLength, 0);
     } finally {
@@ -1349,7 +1351,7 @@ test('artwork is served from the real filesystem with its type read from the byt
   }
 });
 
-test('a person\'s picture is served over /api/artwork/person/:personId', async () => {
+test('a person\'s picture is served over /api/artwork/person/:id, the person_image row id', async () => {
   // Guards against the exact failure mode this route once had: `isArtworkKind`
   // was a hand-written `poster|background|logo` disjunction that stayed
   // well-typed after `ArtworkKind` grew a fourth member, so `person` reached
@@ -1363,12 +1365,14 @@ test('a person\'s picture is served over /api/artwork/person/:personId', async (
   try {
     const path = join(dir, 'headshot.bin');
     await writeFile(path, PNG_BYTES);
-    raw.prepare('INSERT INTO person_image (person_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
-      .run(personId, 'https://images.test/headshot.png', path);
+    const imageId = Number(
+      raw.prepare('INSERT INTO person_image (person_id, url, width, height, created_at, path) VALUES (?, ?, 100, 100, 1, ?)')
+        .run(personId, 'https://images.test/headshot.png', path).lastInsertRowid,
+    );
 
     const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
     try {
-      const response = await get(server, `/api/artwork/person/${personId}`, cookie);
+      const response = await get(server, `/api/artwork/person/${imageId}`, cookie);
       assert.equal(response.status, 200, 'the person kind must be reachable, not swallowed by the kind guard');
       assert.equal(response.headers.get('content-type'), 'image/png');
       assert.deepEqual(new Uint8Array(await response.arrayBuffer()), PNG_BYTES);

@@ -57,6 +57,6 @@ export type {
   MediaImages,
   ProviderImage,
 } from './artwork/source.ts';
-export { bestImage, createArtworkSources } from './artwork/source.ts';
+export { bestImage, createArtworkSources, rankImages } from './artwork/source.ts';
 export type { ArtworkJobDeps, ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
 export { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';

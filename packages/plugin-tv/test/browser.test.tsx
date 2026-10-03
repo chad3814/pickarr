@@ -48,9 +48,9 @@ function gathered(): GatheredItemView {
     releases: [],
     roles: [],
     artwork: {
-      poster: '/api/artwork/poster/1',
-      background: '/api/artwork/background/1',
-      logo: '/api/artwork/logo/1',
+      posters: [{ id: 1, url: '/api/artwork/poster/1', width: 10, height: 15, language: null, rank: 0 }],
+      backgrounds: [{ id: 1, url: '/api/artwork/background/1', width: 15, height: 10, language: null, rank: 0 }],
+      logos: [],
     },
   };
 }

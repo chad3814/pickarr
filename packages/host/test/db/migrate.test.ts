@@ -1826,23 +1826,47 @@ test('migration 22 adds lookup_json without rebuilding rss_item, so its sync tri
   raw.close();
 });
 
-test('migration 23 adds person_image, and does not replicate it', () => {
-  // Artwork is not synced -- `web/src/store/gather.ts` fetches it by url
-  // and holds no artwork rows (#79). Installing triggers here would push
-  // every image row into `sync_log` and into every browser's replica, for
-  // data no client reads. Asserted as the absence of triggers, because
-  // adding them is the habit this table has to resist.
+test('migration 23 adds person_image, which migration 27 then replicates', () => {
+  // Migration 23 created the table without triggers (#79 first decided
+  // artwork stayed unreplicated); migration 27 reversed that for all four
+  // artwork tables. A full migrate therefore ends with three triggers, and
+  // the column list carries migration 27's `rank`.
   const { raw } = openTestDatabase();
   migrateHost(raw);
 
   const columns = raw.prepare("SELECT name FROM pragma_table_info('person_image')").all()
     .map((row) => String((row as { name: unknown }).name));
-  assert.deepEqual(columns.sort(), ['created_at', 'height', 'id', 'language', 'path', 'person_id', 'title', 'url', 'width']);
+  assert.deepEqual(columns.sort(), ['created_at', 'height', 'id', 'language', 'path', 'person_id', 'rank', 'title', 'url', 'width']);
 
   const triggers = raw.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'person_image'",
-  ).all();
-  assert.deepEqual(triggers, [], 'artwork is not replicated, so this table has no sync triggers');
+  ).all().map((row) => String((row as { name: unknown }).name)).toSorted();
+  assert.deepEqual(triggers, ['person_image_sync_del', 'person_image_sync_ins', 'person_image_sync_upd']);
+  raw.close();
+});
+
+test('migration 27 adds rank to the four artwork tables, replicates them, and seeds their existing rows', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 26));
+  raw.exec(`
+    INSERT INTO media_item (id, plugin_id, title, created_at, updated_at) VALUES (1, 'tv', 'A', 1, 1);
+    INSERT INTO poster (media_item_id, url, width, height, created_at, path) VALUES (1, 'http://x/p.png', 10, 15, 1, '/tmp/p.bin');
+  `);
+  migrateHost(raw);
+  for (const table of ['poster', 'background', 'logo', 'person_image']) {
+    const cols = raw.prepare(`SELECT name FROM pragma_table_info('${table}')`).all()
+      .map((r) => String((r as { name: unknown }).name));
+    assert.ok(cols.includes('rank'), `${table}.rank`);
+    const triggers = raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?").all(table)
+      .map((r) => String((r as { name: unknown }).name)).toSorted();
+    assert.deepEqual(triggers, [`${table}_sync_del`, `${table}_sync_ins`, `${table}_sync_upd`]);
+  }
+  assert.equal((raw.prepare('SELECT rank FROM poster WHERE id = 1').get() as { rank: unknown }).rank, 0, 'existing rows default to rank 0');
+  assert.equal(
+    (raw.prepare("SELECT count(*) AS n FROM sync_log WHERE table_name = 'poster' AND op = 'upsert'").get() as { n: unknown }).n,
+    1,
+    'the existing row was seeded into the log',
+  );
   raw.close();
 });
 

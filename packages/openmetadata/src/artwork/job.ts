@@ -6,8 +6,8 @@
  * (`../engine.ts`) relinks the release, writes the plugin's rows and records
  * the resolution, and anything that throws between those strands state.
  * Artwork is the worst thing to put there: one provider call and then a
- * binary download per image kept -- three for the item plus one per cast
- * member -- from a CDN this host does not control. A slow image server
+ * binary download per image kept -- up to `ARTWORK_KEEP` of each of the
+ * item's three kinds (fifteen) plus up to `ARTWORK_KEEP` per cast member -- from a CDN this host does not control. A slow image server
  * would make the lookup's duration depend on it, and a failing one would
  * fail the identification and re-run the whole thing on retry. Here, the
  * release stays identified whatever its pictures do.
@@ -23,7 +23,14 @@
 import type { HostFetch, ImageInit, JobHandler, PluginContext } from '@pickarr/contract';
 import type { SecretResolver } from '../types.ts';
 import type { ArtworkParent, ArtworkSource, ArtworkSourceDeps, ProviderImage } from './source.ts';
-import { bestImage, createArtworkSources } from './source.ts';
+import { createArtworkSources, rankImages } from './source.ts';
+
+/**
+ * How many images the job keeps of each kind, per media item and per person.
+ * The five best by {@link rankImages}; a row's `rank` is its index in that
+ * order, 0 best.
+ */
+export const ARTWORK_KEEP = 5;
 
 /** The job kind. `../engine.ts` registers the handler under it and enqueues it. */
 export const ARTWORK_JOB = 'artwork';
@@ -56,7 +63,7 @@ export const ARTWORK_JOB = 'artwork';
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /**
- * The language `bestImage` prefers.
+ * The language `rankImages` prefers.
  *
  * A constant because there is no host-level language setting to read:
  * nothing in `packages/host/src/config/` names one, and every `language`
@@ -196,8 +203,9 @@ interface Slot {
  * `height` are absent from `ImageInit` by design -- the writer measures the
  * bytes, so a caller cannot supply a dimension that disagrees with the file.
  */
-function imageInit(image: ProviderImage, bytes: Uint8Array): ImageInit {
-  return { url: image.url, title: null, language: image.language, bytes };
+function imageInit(image: ProviderImage, bytes: Uint8Array, rank: number): ImageInit {
+  // `rank` is the image's index in `rankImages`' order, 0 best.
+  return { url: image.url, title: null, language: image.language, bytes, rank };
 }
 
 /**
@@ -421,35 +429,46 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
       });
     }
 
-    // One image per slot, chosen by `bestImage`: one poster, one background,
-    // one logo, one picture per person. Not every image the provider
-    // offered -- `host/src/api/artwork-route.ts` selects
-    // `ORDER BY id ASC LIMIT 1` for each kind, so anything past the first
-    // row is disk nothing can serve. Widening that is issue #79 and out of
-    // this slice's scope.
+    // The `ARTWORK_KEEP` best images of each kind, in `rankImages`' order:
+    // an image's `rank` is its index, so the first poster is rank 0. The
+    // same cut applies to each person's pictures, and anything past it is
+    // never downloaded.
+    //
+    // `kept` collects the urls whose attach *succeeded*, because the keep
+    // calls below delete every other row: a url whose download failed must
+    // not be named, and a row an earlier run stored for it is dropped along
+    // with the ones this run's ranking no longer includes.
     const slots: Slot[] = [];
-    const poster = bestImage(answer.media.posters, language);
-    if (poster !== undefined) {
+    const kept = { poster: [] as string[], background: [] as string[], logo: [] as string[] };
+    const people = new Map<number, string[]>();
+    for (const [index, image] of rankImages(answer.media.posters, language).slice(0, ARTWORK_KEEP).entries()) {
       slots.push({
-        what: 'poster',
-        image: poster,
-        attach: (bytes) => ctx.media.attachPoster(payload.mediaItemId, imageInit(poster, bytes)),
+        what: `poster ${String(index)}`,
+        image,
+        attach: async (bytes) => {
+          await ctx.media.attachPoster(payload.mediaItemId, imageInit(image, bytes, index));
+          kept.poster.push(image.url);
+        },
       });
     }
-    const background = bestImage(answer.media.backgrounds, language);
-    if (background !== undefined) {
+    for (const [index, image] of rankImages(answer.media.backgrounds, language).slice(0, ARTWORK_KEEP).entries()) {
       slots.push({
-        what: 'background',
-        image: background,
-        attach: (bytes) => ctx.media.attachBackground(payload.mediaItemId, imageInit(background, bytes)),
+        what: `background ${String(index)}`,
+        image,
+        attach: async (bytes) => {
+          await ctx.media.attachBackground(payload.mediaItemId, imageInit(image, bytes, index));
+          kept.background.push(image.url);
+        },
       });
     }
-    const logo = bestImage(answer.media.logos, language);
-    if (logo !== undefined) {
+    for (const [index, image] of rankImages(answer.media.logos, language).slice(0, ARTWORK_KEEP).entries()) {
       slots.push({
-        what: 'logo',
-        image: logo,
-        attach: (bytes) => ctx.media.attachLogo(payload.mediaItemId, imageInit(logo, bytes)),
+        what: `logo ${String(index)}`,
+        image,
+        attach: async (bytes) => {
+          await ctx.media.attachLogo(payload.mediaItemId, imageInit(image, bytes, index));
+          kept.logo.push(image.url);
+        },
       });
     }
     for (const person of payload.people) {
@@ -457,13 +476,18 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
       // ordinary, not an error, per `ArtworkAnswer.people`.
       const found = answer.people.get(person.providerRef);
       if (found === undefined) continue;
-      const picture = bestImage(found, language);
-      if (picture === undefined) continue;
-      slots.push({
-        what: `person ${person.personId}`,
-        image: picture,
-        attach: (bytes) => ctx.media.attachPersonImage(person.personId, imageInit(picture, bytes)),
-      });
+      const urls: string[] = [];
+      people.set(person.personId, urls);
+      for (const [index, image] of rankImages(found, language).slice(0, ARTWORK_KEEP).entries()) {
+        slots.push({
+          what: `person ${person.personId} ${String(index)}`,
+          image,
+          attach: async (bytes) => {
+            await ctx.media.attachPersonImage(person.personId, imageInit(image, bytes, index));
+            urls.push(image.url);
+          },
+        });
+      }
     }
 
     // Concurrently, because `HostFetch` queues per hostname and decides how
@@ -471,5 +495,23 @@ export function createArtworkJob(deps: ArtworkJobDeps): JobHandler {
     // (`host/src/fetch/queue.ts`). So this hands the host's own limiter a
     // list rather than firing a burst at whichever CDN these urls name.
     await Promise.all(slots.map((slot) => store(slot, ctx, signal)));
+
+    // Once per kind, after every attach of that kind has settled -- `store`
+    // never rejects, so the line above is a barrier, and a keep call that
+    // ran earlier could delete a row an in-flight attach is about to name.
+    // A kind with nothing stored is skipped rather than told to keep
+    // nothing: naming no survivors deletes every image the item has, and an
+    // empty list is also what a run with no usable answer produces.
+    // The job proceeds with `EMPTY_MEDIA_IMAGES` when the answer carries
+    // `noCredential` or a provider soft-misses (`tmdb.ts`'s and `tvdb.ts`'s
+    // `mediaImages` return it when no target can be built), so acting on
+    // an empty list would wipe every stored image when an operator removes
+    // an API key or a provider ref stops resolving.
+    if (kept.poster.length > 0) await ctx.media.keepArtwork('poster', payload.mediaItemId, kept.poster);
+    if (kept.background.length > 0) await ctx.media.keepArtwork('background', payload.mediaItemId, kept.background);
+    if (kept.logo.length > 0) await ctx.media.keepArtwork('logo', payload.mediaItemId, kept.logo);
+    for (const [personId, urls] of people) {
+      if (urls.length > 0) await ctx.media.keepPersonImages(personId, urls);
+    }
   };
 }

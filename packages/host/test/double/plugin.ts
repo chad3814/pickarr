@@ -701,7 +701,7 @@ export function createDoublePlugin(deps: { now: () => number }): MediaPlugin {
     const { mediaItemId, images } = readArtworkPayload(job.payload);
     const settled = await Promise.allSettled(images.map(async (image) => {
       const bytes = await ctx.fetch.bytes(image.url);
-      const init: ImageInit = { url: image.url, title: image.title, language: image.language, bytes };
+      const init: ImageInit = { url: image.url, title: image.title, language: image.language, bytes, rank: 0 };
       if (image.role === 'poster') {
         await ctx.media.attachPoster(mediaItemId, init);
       } else if (image.role === 'background') {
