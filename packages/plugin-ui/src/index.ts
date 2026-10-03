@@ -13,7 +13,8 @@ export {
 export { IdentifyForm } from './IdentifyForm.tsx';
 export type { IdentifyFormProps } from './IdentifyForm.tsx';
 export type {
-  ArtworkUrlsView,
+  GatheredArtworkView,
+  GatheredImageView,
   GatheredDownloadView,
   GatheredItemView,
   GatheredReleaseView,
