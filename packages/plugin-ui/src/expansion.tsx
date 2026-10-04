@@ -78,8 +78,8 @@ export interface Expansion {
  * `onExpandedChange` prop they were given, and web's unmatched screen
  * passes a module-level constant for the same reason.
  */
-export function useExpansion(onExpandedChange: (expanded: boolean) => void): Expansion {
-  const [expanded, setExpanded] = useState(false);
+export function useExpansion(onExpandedChange: (expanded: boolean) => void, initiallyExpanded = false): Expansion {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
 
   const toggle = useCallback(() => {
     setExpanded((current) => {

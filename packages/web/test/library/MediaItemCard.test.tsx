@@ -229,6 +229,34 @@ test('a card gathers nothing until it is opened, and opening it gathers once', a
   assert.equal(gathers, 1);
 });
 
+test('a card asked to open expanded gathers on mount, before anyone clicks', async () => {
+  let gathers = 0;
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return gathered({ id, title: 'The Thing' });
+    },
+    subscribe: () => () => {},
+  };
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} initiallyExpanded />);
+  await waitFor(() => {
+    assert.equal(gathers, 1);
+  });
+});
+
+// One card per shipped plugin, because the prop travels two hops that each
+// need pinning: web hands it to `plugin.Card`, and the card hands it to
+// `useExpansion`. Dropping either leaves web's own mirrored state seeded, so
+// the gather above still happens while the heading stays collapsed.
+for (const pluginId of ['tv', 'movie', 'xxx']) {
+  test(`a ${pluginId} card asked to open expanded renders open, with no click`, () => {
+    const item: MediaItemSyncRead = { ...summary({ id: 7, title: 'The Thing' }), pluginId };
+    render(<MediaItemCard source={stubSource} item={item} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} initiallyExpanded />);
+    assert.equal(screen.getByRole('button', { name: /The Thing/ }).getAttribute('aria-expanded'), 'true');
+  });
+}
+
 test('closing a card tears its subscriptions down, and reopening gathers again behind the cache', async () => {
   // **The behaviour `CardProps.onExpandedChange` exists to make possible.**
   // The seam first shipped with only an `onExpand`, so web could not learn
