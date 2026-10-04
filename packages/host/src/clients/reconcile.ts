@@ -350,7 +350,11 @@ const RECOVERABLE_STATUSES: readonly DownloadStatus[] = ['submitting'];
  * incomplete snapshot would be indistinguishable from one on a page that
  * never loaded, so "exactly one match" can never be established against a
  * partial picture -- the same reasoning `ClientSnapshot.complete`'s doc
- * comment states for absence.
+ * comment states for absence. Since #107 an adapter may stop paging early
+ * and still answer `complete`, so this pass depends on `reconcile-job.ts`
+ * setting `SnapshotAsk.everything` whenever a candidate row exists: a
+ * `submitting` row with no ref is in `SWEPT_STATUSES`, which is exactly the
+ * set the ask is built from, and a null ref there is what sets the flag.
  *
  * Two or more candidates recover nothing and are only logged: an ambiguous
  * match resolved arbitrarily could attach the wrong job's ref to this row,
@@ -475,7 +479,7 @@ const TERMINAL_STATUSES: ReadonlySet<DownloadRow['status']> = new Set(['delivere
  * `rows.ts` is swept unless it is also named terminal, which is the safe
  * direction -- the alternative silently stops sweeping it.
  */
-const SWEPT_STATUSES: readonly DownloadStatus[] =
+export const SWEPT_STATUSES: readonly DownloadStatus[] =
   DOWNLOAD_STATUSES.filter((status) => !TERMINAL_STATUSES.has(status));
 
 /**
@@ -513,7 +517,10 @@ function accountedForRefs(snapshot: ClientSnapshot): Set<string> {
  * missing from a partial picture is indistinguishable from one on a page
  * that failed to load, so nothing here may read that absence as
  * meaningful. An incomplete snapshot neither stamps nor clears anything,
- * and `result.absent` stays zero.
+ * and `result.absent` stays zero. The rows swept here are the rows whose
+ * refs `reconcile-job.ts` put in the `SnapshotAsk` -- the same
+ * `SWEPT_STATUSES` query -- so an adapter that stopped paging early (#107)
+ * stopped only after seeing every ref this pass could call absent.
  *
  * A row already stamped keeps its original stamp: the stamp records when
  * the row was *first* missed, and overwriting it on a later tick would

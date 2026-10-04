@@ -9,7 +9,7 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import { createHost, HOST_PLUGIN_ID } from '../../src/host.ts';
 import type { Host } from '../../src/host.ts';
 import { scheduleKnownDownloadClients } from '../../src/main.ts';
-import { buildReconcileAdapter, createReconcileHandler, RECONCILE_INTERVAL_S } from '../../src/clients/reconcile-job.ts';
+import { buildReconcileAdapter, createReconcileHandler, RECONCILE_INTERVAL_S, snapshotAskFor } from '../../src/clients/reconcile-job.ts';
 import { readClientConfig } from '../../src/clients/config.ts';
 import { createSecrets } from '../../src/secrets/instance.ts';
 import type { Secrets } from '../../src/secrets/instance.ts';
@@ -1083,6 +1083,13 @@ test('the same unreadable values on two consecutive ticks produce one log line',
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const clientId = insertClient(raw);
+  // A `submitting` row with no ref yet: since #107 the history is paged
+  // only for the refs the tick asks about, and a client with no rows in
+  // flight reads none of it, so this row is what makes the slot below get
+  // read at all -- a candidate for recovery sets `SnapshotAsk.everything`.
+  // Its filename differs from the slot's so recovery attaches nothing and
+  // the row stays ref-less across both ticks.
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'unrelated'), downloadClientId: clientId, clientRef: null, status: 'submitting' });
 
   const historySlots: Record<string, unknown>[] = [{ nzo_id: 'ref-1', name: 'x.mkv', status: 'weird-status' }];
   const fetch = fakeQueuedFetch(async (url) => {
@@ -1114,6 +1121,13 @@ test('a new unreadable value logs again', async () => {
   const { raw } = openTestDatabase();
   migrateHost(raw);
   const clientId = insertClient(raw);
+  // A `submitting` row with no ref yet: since #107 the history is paged
+  // only for the refs the tick asks about, and a client with no rows in
+  // flight reads none of it, so this row is what makes the slot below get
+  // read at all -- a candidate for recovery sets `SnapshotAsk.everything`.
+  // Its filename differs from the slot's so recovery attaches nothing and
+  // the row stays ref-less across both ticks.
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'unrelated'), downloadClientId: clientId, clientRef: null, status: 'submitting' });
 
   let historySlots: Record<string, unknown>[] = [{ nzo_id: 'ref-1', name: 'x.mkv', status: 'weird-status' }];
   const fetch = fakeQueuedFetch(async (url) => {
@@ -1140,4 +1154,56 @@ test('a new unreadable value logs again', async () => {
     (l) => l.message === 'client reported status or state values this adapter could not interpret',
   );
   assert.equal(unreadableLines.length, 2, 'a changed set of values must log again');
+});
+
+test('the tick asks the snapshot about its non-terminal rows, and for everything when one has no ref (#107)', () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  const other = insertClient(raw, { name: 'other' });
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'a'), downloadClientId: clientId, clientRef: 'ref-a', status: 'submitted' });
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'b'), downloadClientId: clientId, clientRef: 'ref-b', status: 'downloading' });
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'c'), downloadClientId: clientId, clientRef: 'ref-c', status: 'completed' });
+  // Terminal rows are not asked about: nothing sweeps or advances them.
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'd'), downloadClientId: clientId, clientRef: 'ref-d', status: 'delivered' });
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'e'), downloadClientId: clientId, clientRef: 'ref-e', status: 'failed' });
+  // Another client's row is another client's ask.
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'f'), downloadClientId: other, clientRef: 'ref-f', status: 'submitted' });
+
+  const ask = snapshotAskFor(raw, clientId);
+  assert.deepEqual([...ask.refs].toSorted(), ['ref-a', 'ref-b', 'ref-c']);
+  assert.equal(ask.everything, false);
+
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'g'), downloadClientId: clientId, clientRef: null, status: 'submitting' });
+  assert.equal(snapshotAskFor(raw, clientId).everything, true, 'a ref-less submitting row is a recovery candidate and needs the whole list');
+});
+
+test('a tick whose in-flight rows are all in the queue requests no history page at all (#107)', async () => {
+  const { raw } = openTestDatabase();
+  migrateHost(raw);
+  const clientId = insertClient(raw);
+  insertNzbRow(raw, { rssItemId: seedRssItem(raw, 'x'), downloadClientId: clientId, clientRef: 'ref-1', status: 'submitted' });
+
+  let historyRequests = 0;
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) {
+      return { queue: { noofslots: 1, slots: [{ nzo_id: 'ref-1', filename: 'x.mkv', percentage: '10', cat: 'movies' }] } };
+    }
+    historyRequests += 1;
+    // A long history that would take every page to read; none of it is asked about.
+    return { history: { noofslots: 5000, slots: [] } };
+  });
+  const { log } = captureLog();
+  const handler = createReconcileHandler({
+    raw,
+    fetch,
+    secrets: makeSecrets(raw),
+    now: () => 900,
+    log,
+    deliver: async () => { throw new Error('deliver: not used by this test'); },
+  });
+
+  await handler({ id: 7, kind: 'reconcile', payload: { clientId }, attempts: 1 }, fakeContext({ enqueue: async () => 1 }));
+
+  assert.equal(historyRequests, 0, 'the one in-flight ref was in the queue, so the history had nothing to answer');
 });
