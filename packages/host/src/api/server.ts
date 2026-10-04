@@ -166,7 +166,7 @@ import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
 import { json } from './answer.ts';
 import type { Answer } from './answer.ts';
-import { readBody } from './body.ts';
+import { MAX_BODY_BYTES, PAYLOAD_TOO_LARGE, readBody } from './body.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
 import { DIGITS, feedIdFrom, identifyIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
@@ -1671,6 +1671,17 @@ async function handle(serving: Serving, request: IncomingMessage, response: Serv
     if (request.method !== 'GET') {
       const read = await readBody(request);
       if ('refusal' in read) {
+        // A body over the cap is drained rather than cut off (`body.ts`'s own
+        // doc on why), which is why it needs a line here (#91): without one a
+        // session repeatedly overrunning the limit left no trace at all. The
+        // route is the path with no query string, as the abort branch below
+        // logs it; the cap is the number, never the bytes.
+        if (read.refusal === PAYLOAD_TOO_LARGE) {
+          deps.log('request body refused: over the cap', {
+            route: targetOf(request.url)?.pathname ?? '(unparseable)',
+            cap: MAX_BODY_BYTES,
+          });
+        }
         write(response, read.refusal);
         return;
       }

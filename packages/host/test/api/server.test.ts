@@ -1769,14 +1769,24 @@ test('the request timeout node is given bounds the headers too', () => {
   }
 });
 
-test('a body larger than the cap is refused before it is parsed', async () => {
+test('a body larger than the cap is refused before it is parsed, and the refusal is logged without the body', async () => {
   const { raw, db } = setup();
-  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  const { server, cookie, logs } = await startSignedIn(raw, db, moviesOnly);
   try {
     const huge = JSON.stringify({ name: 'x'.repeat(MAX_BODY_BYTES + 1_000) });
-    const answer = await postRaw(server, '/api/feeds', cookie, huge);
+    const answer = await postRaw(server, '/api/feeds?token=SECRET-QUERY', cookie, huge);
     assert.equal(answer.status, 413, 'an oversized body is refused');
     assert.ok(!answer.text.includes('x'.repeat(50)), 'and is not echoed back');
+    // #91: a session repeatedly overrunning the cap used to leave no trace.
+    // One line per refusal, naming the route the way the abort branch does
+    // (the path with no query string) and the cap -- never the body.
+    assert.equal(logs.length, 1, 'exactly one line is written for one refusal');
+    const line = logs[0];
+    assert.ok(line, 'a log line was recorded');
+    assert.equal(line.message, 'request body refused: over the cap');
+    assert.deepEqual(line.detail, { route: '/api/feeds', cap: MAX_BODY_BYTES });
+    assert.ok(!JSON.stringify(line).includes('xxxxx'), 'no body bytes in the line');
+    assert.ok(!JSON.stringify(line).includes('SECRET-QUERY'), 'no query string in the line');
   } finally {
     await server.close();
   }
