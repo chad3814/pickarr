@@ -126,3 +126,27 @@ test('an empty result says so, and a page that is not done shows the sentinel an
   assert.ok(screen.getByTestId('load-more-sentinel'));
   assert.ok(screen.getByRole('button', { name: 'Load more' }));
 });
+
+test('a tile is captioned by its plugin from the page\'s rows, and carries the caption as its title for when the column truncates it', async () => {
+  // A television item whose tv_release row is on the page: the caption is
+  // the series, the number and the title, not the bare title.
+  const withRows: GridSource = {
+    ...source,
+    pluginRowsByMediaItems: () => Promise.resolve({
+      rows: new Map([[2, { tv_release: [{ mediaItemId: 2, kind: 'episode', seriesTitle: 'Severance', seriesRef: '1', seasonNumber: 1, episodeNumber: 2 }] }]]),
+      heldIds: new Map(),
+    }),
+  };
+  render(<ItemGrid store={withRows} pluginId="tv" tables={['tv_release']} submit={acceptsPick} identify={neverIdentify} result={resultOf([mediaItem(2, 'tv', 'Good News About Hell')], [recordOf(2, 'tv', 'Good News About Hell', null, null)])} emptyMessage="x" />);
+  const tile = await screen.findByRole('button', { name: 'Severance S01E02 Good News About Hell' });
+  assert.equal(tile.getAttribute('title'), 'Severance S01E02 Good News About Hell');
+  assert.equal(tile.querySelector('span')?.textContent, 'Severance S01E02 Good News About Hell');
+  assert.ok(within(tile).getByRole('img', { name: 'No background for Severance S01E02 Good News About Hell' }), 'the placeholder names the caption too');
+});
+
+test('a film tile carries the year, from the item alone', () => {
+  const item: MediaItemSyncRead = { ...mediaItem(1, 'movie', 'Arrival'), releaseDate: '2016-11-11' };
+  renderGrid('movie', resultOf([item], [recordOf(1, 'movie', 'Arrival', 41, null)]));
+  const tile = screen.getByRole('button', { name: 'Arrival (2016)' });
+  assert.equal(tile.getAttribute('title'), 'Arrival (2016)');
+});

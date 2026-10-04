@@ -62,7 +62,9 @@ test('a television tile shows the background, opens the card in a dialog, takes 
   const grid = page.getByTestId('category-tv').getByRole('list');
   await expect(grid).toHaveAttribute('data-tile', 'background', { timeout: 15_000 });
 
-  const tile = grid.getByRole('button', { name: 'A Show' });
+  // A regex: the tile's caption is the plugin's, so a tv_release row on the
+  // item would prepend the series and the episode number.
+  const tile = grid.getByRole('button', { name: /A Show/ });
   const image = tile.locator('img');
   await expect(image).toHaveAttribute('src', `/api/artwork/background/${String(backgroundId)}`, { timeout: 15_000 });
   // Real bytes decoded, not merely a src attribute: the route served the file.
@@ -76,7 +78,7 @@ test('a television tile shows the background, opens the card in a dialog, takes 
   expect(borderTopColor).toBe(lineTokenColor);
 
   await tile.click();
-  const dialog = page.getByRole('dialog', { name: 'A Show' });
+  const dialog = page.getByRole('dialog', { name: /A Show/ });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading', { name: /A Show/ })).toBeVisible();
 

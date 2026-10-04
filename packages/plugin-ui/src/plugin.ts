@@ -89,6 +89,16 @@ export interface BrowserPlugin {
    */
   readonly tile: 'poster' | 'background';
   /**
+   * The words a grid tile shows under its image, built from the same item
+   * and plugin rows the card's heading is built from -- a film's
+   * `Title (Year)`, a series' `Series S01E02 Title`, a scene's `Site Title`.
+   * Web renders it as the tile's caption, its accessible name and its
+   * `title` attribute, so a caption the column truncates is still
+   * readable on hover. Falls back to the item's title when the rows that
+   * would decorate it have not replicated.
+   */
+  readonly caption: (item: MediaItemSyncRead, rows: PluginRows) => string;
+  /**
    * The card body, rendered into the `<article>` web holds
    * (`web/src/library/MediaItemCard.tsx`).
    *

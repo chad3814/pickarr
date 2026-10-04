@@ -269,3 +269,13 @@ test('pluginFor returns the registry entry itself, not a copy', () => {
   assert.equal(pluginFor(first.id), first);
   assert.equal(pluginFor(first.id)?.tables, first.tables);
 });
+
+test('each plugin supplies a caption for its grid tiles, built from the item and its own rows', () => {
+  for (const plugin of BROWSER_PLUGINS) {
+    assert.equal(typeof plugin.caption, 'function', `${plugin.id} declares no caption`);
+    // With no rows at all every plugin falls back to the title, so a tile
+    // is never blank while a plugin's rows are still replicating.
+    const item = { id: 1, pluginId: plugin.id, createdAt: 1, updatedAt: 1, provider: null, providerRef: null, title: 'Bare Title', releaseDate: null, description: null };
+    assert.equal(plugin.caption(item, {}), 'Bare Title');
+  }
+});

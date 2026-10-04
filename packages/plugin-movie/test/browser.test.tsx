@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import type { GatheredItemView, IdentifySubmit, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
-import { movieBrowser, movieHeadline } from '../src/browser.tsx';
+import { movieBrowser, movieCaption, movieHeadline } from '../src/browser.tsx';
 
 afterEach(cleanup);
 
@@ -198,4 +198,11 @@ test('every expand and every collapse is reported, with the state the card moved
   fireEvent.click(button);
   fireEvent.click(button);
   assert.deepEqual(reported, [true, false, true], 'open, close, open -- each reported once, in order');
+});
+
+test('the grid caption is the film-library headline, and the plugin declares it', () => {
+  // Spelled literally: the grid shows and announces exactly this string.
+  assert.equal(movieCaption(mediaItem({ title: 'Arrival', releaseDate: '2016-11-11' })), 'Arrival (2016)');
+  assert.equal(movieCaption(mediaItem({ title: 'Arrival', releaseDate: null })), 'Arrival');
+  assert.equal(movieBrowser.caption, movieCaption, 'the registry entry hands web the same function');
 });

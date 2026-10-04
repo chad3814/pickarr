@@ -23,6 +23,7 @@
  * `media_item` column and arrives on `CardProps.item`. See {@link movieHeadline}.
  */
 import type { ReactElement } from 'react';
+import type { MediaItemSyncRead } from '@pickarr/contract';
 import {
   CardHeading,
   MediaDetails,
@@ -74,6 +75,11 @@ export function movieHeadline(title: string, releaseDate: string | null): string
   return /^[0-9]{4}$/.test(year) ? `${title} (${year})` : title;
 }
 
+/** `BrowserPlugin.caption` for a film: the headline the card already shows, `Title (Year)`. `rows` carry nothing a film's name needs. */
+export function movieCaption(item: MediaItemSyncRead): string {
+  return movieHeadline(item.title, item.releaseDate);
+}
+
 function MovieCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange, initiallyExpanded);
 
@@ -85,7 +91,7 @@ function MovieCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, 
 
   return (
     <>
-      <CardHeading headline={movieHeadline(item.title, item.releaseDate)} expanded={expanded} onToggle={toggle} />
+      <CardHeading headline={movieCaption(item)} expanded={expanded} onToggle={toggle} />
       {expanded && gathered !== undefined && (
         <>
           <MediaDetails item={item} gathered={gathered} extraLinks={extraLinks} />
@@ -101,5 +107,6 @@ export const movieBrowser: BrowserPlugin = {
   label: 'Movies',
   tables: ['movie_detail'],
   tile: 'poster',
+  caption: movieCaption,
   Card: MovieCard,
 };
