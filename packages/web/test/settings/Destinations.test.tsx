@@ -40,15 +40,19 @@ afterEach(cleanup);
  * moment a plugin changed -- the same copy-inheritance defect an earlier
  * slice found in the refusal codes and had to fix.
  *
- * `packages/plugin-*` are **devDependencies** of `packages/web`, never
- * dependencies: node's resolver reaches them under `npm run test:web`, and
- * they must never reach the browser bundle. Measured, not assumed: adding
- * `@pickarr/plugin-tv` to `dependencies` and importing `TV_TOKENS` from a
- * module `src/main.tsx` reaches fails `npm run build` outright, on
- * `import { DatabaseSync } from "node:sqlite"` -- `@pickarr/plugin-tv`
- * imports `@pickarr/openmetadata`, which depends on `drizzle-orm`, which
- * reaches node's SQLite driver. `Settings.tsx` therefore builds its list
- * from `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN`, which carries no node
+ * `packages/plugin-*` are dependencies of `packages/web` for their
+ * `/browser` subpaths alone, which is all `src/plugins/registry.ts`
+ * imports. Their **package roots** must never reach the browser bundle.
+ * Measured 2026-10-03, not assumed (#104): importing `TV_TOKENS` from
+ * `@pickarr/plugin-tv` in `Settings.tsx` fails `npm run build -w
+ * @pickarr/web` outright with `"DatabaseSync" is not exported by
+ * "__vite-browser-external"`, raised from `drizzle-orm/node-sqlite/driver.js`
+ * -- the root entry imports `@pickarr/openmetadata`, which depends on
+ * `drizzle-orm`, which reaches node's SQLite driver. (An earlier version
+ * of this paragraph said the plugins were devDependencies; that stopped
+ * being true when the `/browser` seam arrived.) `Settings.tsx` therefore
+ * builds its list from `@pickarr/contract`'s `TOKEN_NAMES_BY_PLUGIN`, which
+ * carries no node
  * import. The plugin *ids* in that map are the one pair the compiler cannot
  * lock -- `host/test/plugins/tokens.test.ts` compares them against the
  * plugins `main` actually builds, which is why the ids below still come
