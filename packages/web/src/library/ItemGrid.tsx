@@ -19,9 +19,12 @@
  * **One dialog, the same card.** Activating a tile opens `MediaItemCard`
  * with `initiallyExpanded`, so picking, retrying and identifying inside the
  * dialog are the card's own behaviour against the same `submit` and
- * `identify`. If the open item leaves the page -- a filter no longer
- * matches it, or it was tombstoned -- the dialog closes and focus goes to
- * the list, since the tile that would take it back is gone.
+ * `identify`. If the open item drops out of the records -- its row was
+ * tombstoned, or a catalog rewrite on a wake no longer holds it -- the
+ * dialog closes and focus goes to the list, since the tile that would take
+ * it back is gone. A filter or search change does not reach this path:
+ * `Category` keys the grid on it, so the whole grid remounts and the dialog
+ * goes with it.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
@@ -102,7 +105,8 @@ export function ItemGrid({ store, pluginId, tables, submit, identify, result, em
   const listRef = useRef<HTMLUListElement>(null);
   const openItem = openId === null ? undefined : items.find((item) => item.id === openId);
 
-  // The open item left the page: close, and put focus somewhere real.
+  // The open item was tombstoned or dropped out of the catalog on a wake:
+  // close, and put focus somewhere real.
   useEffect(() => {
     if (openId !== null && openItem === undefined) {
       setOpenId(null);

@@ -224,9 +224,10 @@ and `Dialog` returns focus to the tile that opened it. The gallery opened from
 inside the dialog is a second `Dialog` over the first; Escape closes the
 topmost, which the gallery's own handler already stops from propagating.
 
-If the open item leaves the page's records, because a filter no longer matches
-it or its row was tombstoned, the dialog closes and focus returns to the grid's
-list element, since the tile is gone.
+If the open item leaves the page's records, because its row was tombstoned or a
+catalog rewrite on a wake dropped it, the dialog closes and focus returns to the
+grid's list element, since the tile is gone. A filter or search change remounts
+the grid (`Category` keys it on them), so the dialog is gone with it.
 
 ## 4. Edge cases
 

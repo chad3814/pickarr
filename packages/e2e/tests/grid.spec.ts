@@ -13,6 +13,27 @@ import { test } from '../src/harness-2.ts';
 const PASSWORD = 'correct horse battery staple, not a real credential';
 const FILENAME = 'a.show.s01e01.1080p.web-dl.h265-GRP.mkv';
 
+/**
+ * A local copy of `shell.spec.ts`'s `borderTopAgainstLineToken`, which is not
+ * exported: the computed `border-top-color` of the first element matching
+ * the selector, beside `--color-line` resolved through a throwaway element.
+ * The token is resolved in the browser rather than spelled as an `rgb(...)`
+ * literal because it has a different value in each of `tokens.css`'s two
+ * palettes and nothing here pins which one a run is in.
+ */
+async function borderTopAgainstLineToken(page: Page, selector: string): Promise<{ borderTopColor: string; lineTokenColor: string }> {
+  return page.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    if (element === null) throw new Error(`no element matched ${sel} to read a border colour from`);
+    const probe = document.createElement('div');
+    probe.style.color = 'var(--color-line)';
+    document.body.appendChild(probe);
+    const lineTokenColor = getComputedStyle(probe).color;
+    probe.remove();
+    return { borderTopColor: getComputedStyle(element).borderTopColor, lineTokenColor };
+  }, selector);
+}
+
 async function claimInstall(page: Page, email: string, claimToken: string): Promise<void> {
   await page.getByRole('button', { name: 'First time here? Claim this install' }).click();
   await page.getByLabel('Email').fill(email);
@@ -49,6 +70,10 @@ test('a television tile shows the background, opens the card in a dialog, takes 
 
   // The grid is laid out by `.tiles`, not by the UA's list defaults.
   await expect(grid).toHaveCSS('display', 'grid');
+  // And the tile rules apply: `.tiles button` draws its border with the line
+  // token, which a gutted stylesheet would not.
+  const { borderTopColor, lineTokenColor } = await borderTopAgainstLineToken(page, '.tiles button');
+  expect(borderTopColor).toBe(lineTokenColor);
 
   await tile.click();
   const dialog = page.getByRole('dialog', { name: 'A Show' });
