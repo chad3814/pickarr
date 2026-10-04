@@ -292,6 +292,48 @@ test('spec 5: a destination that appears *during* the copy is refused, and the f
   });
 });
 
+test('#100: two overlapping place() calls for one target run one at a time, and the loser is refused rather than clobbering', async () => {
+  await withHarness({}, async (h) => {
+    h.destination({});
+    const final = join(h.root, 'Severance', 'Season 02', 'Severance - S02E03.mkv');
+    // A second download, from another client, resolving to the same path:
+    // two releases of one episode finishing in the same tick.
+    const second = join(h.dir, 'downloads', 'second-release.mkv');
+    const SECOND_BYTES = "the other client's copy of the same episode";
+    await writeFile(second, SECOND_BYTES);
+
+    // A copy that yields once part-way, which is all a real copy does between
+    // the first presence check and the rename. Measured before the chain
+    // existed (#100): both callers passed the first check, both wrote the
+    // same temporary, the bytes of the two sources interleaved in it, one
+    // rename reported `{ placed: 'library' }` over the corrupt file and the
+    // other answered `copy-failed` with `ENOENT`. `inFlight` is what shows
+    // the overlap: it reached 2.
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const place = h.withCopyFile(async (source, temporary) => {
+      inFlight += 1;
+      mostInFlight = Math.max(mostInFlight, inFlight);
+      await new Promise((settle) => setImmediate(settle));
+      await writeFile(temporary, await readFile(source));
+      inFlight -= 1;
+    });
+
+    const [first, secondOutcome] = await Promise.all([
+      place(h.file(), TV_VALUES),
+      place(h.file({ path: second, sizeBytes: SECOND_BYTES.length, rssItemId: 8 }), TV_VALUES),
+    ]);
+
+    assert.equal(mostInFlight, 1, 'two copies were in flight at once, so the chain is not serialising place()');
+    assert.deepEqual(first, { placed: 'library' }, 'the first caller places');
+    assertRefusal(secondOutcome, 'destination-exists');
+    // Byte for byte the winner's, not a splice of both: this is the line
+    // the corrupt file reddened.
+    assert.equal(await readFile(final, 'utf8'), SOURCE_BYTES, 'the library file is not the first caller\'s bytes');
+    assert.equal(await readFile(second, 'utf8'), SECOND_BYTES, 'the loser\'s source was touched');
+  });
+});
+
 test('spec 5: a dangling symlink at the destination is something already there, and is not replaced', async () => {
   await withHarness({}, async (h) => {
     h.destination({});
