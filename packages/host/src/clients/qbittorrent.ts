@@ -2,7 +2,7 @@ import type { QbittorrentBearerConfig, QbittorrentLoginConfig } from './config.t
 import { FetchFailedError } from '../fetch/queue.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
 import { redactFormBody, redactHeaders } from './redact.ts';
-import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
+import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot, SnapshotAsk } from './snapshot.ts';
 import { normalizeClientCategory } from './snapshot.ts';
 import type { SubmitResult } from './types.ts';
 
@@ -556,7 +556,8 @@ export function createQbittorrentClient(
   loginFetch: typeof globalThis.fetch = globalThis.fetch,
 ): {
   submit(link: string, name: string): Promise<SubmitResult>;
-  snapshot(): Promise<ClientSnapshot>;
+  /** The ask (`SnapshotAsk`) is accepted for the adapter interface and ignored: `torrents/info` is one request for the whole list. */
+  snapshot(ask?: SnapshotAsk): Promise<ClientSnapshot>;
 } {
   const authHeaders = createAuthHeadersResolver(config, loginFetch);
 

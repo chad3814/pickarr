@@ -89,8 +89,9 @@ import type { Secrets } from '../secrets/instance.ts';
 import { createQbittorrentClient } from './qbittorrent.ts';
 import { createSabnzbdClient } from './sabnzbd.ts';
 import { normalizeClientCategory } from './snapshot.ts';
-import type { ClientSnapshot } from './snapshot.ts';
-import { walkSnapshot } from './reconcile.ts';
+import type { ClientSnapshot, SnapshotAsk } from './snapshot.ts';
+import { rowsForClientByStatus } from './rows.ts';
+import { SWEPT_STATUSES, walkSnapshot } from './reconcile.ts';
 import type { ReconcileResult } from './reconcile.ts';
 import { deliverCompleted } from './deliver.ts';
 import type { DeliverDeps, DeliverResult } from './deliver.ts';
@@ -151,14 +152,35 @@ function clientRowExists(raw: DatabaseSync, clientId: number): boolean {
 type ReconcileAdapter =
   | {
     transport: 'nzb';
-    snapshot(): Promise<ClientSnapshot>;
+    snapshot(ask: SnapshotAsk): Promise<ClientSnapshot>;
     /** Present only on this arm -- an nzb client's history delete costs nothing but the history entry. */
     remove(ref: string): Promise<void>;
   }
   | {
     transport: 'torrent';
-    snapshot(): Promise<ClientSnapshot>;
+    snapshot(ask: SnapshotAsk): Promise<ClientSnapshot>;
   };
+
+/**
+ * What this tick will ask the snapshot about (#107): the refs of the
+ * client's non-terminal rows, and whether any of them has no ref yet.
+ *
+ * The same `SWEPT_STATUSES` query `sweepAbsent` runs, deliberately: the
+ * sweep is the pass that reads absence, so the set it reads absence for is
+ * the set the adapter must have looked for before it may stop paging. A
+ * row in that set with a null ref is a `recoverRefs` candidate, which
+ * needs the whole list, and sets `everything`. Read before the snapshot,
+ * which is the only ordering that can inform it.
+ */
+export function snapshotAskFor(raw: DatabaseSync, clientId: number): SnapshotAsk {
+  const refs = new Set<string>();
+  let everything = false;
+  for (const row of rowsForClientByStatus(raw, clientId, SWEPT_STATUSES)) {
+    if (row.clientRef === null) everything = true;
+    else refs.add(row.clientRef);
+  }
+  return { refs, everything };
+}
 
 /**
  * Builds the adapter this tick talks to, from the config `readClientConfig`
@@ -178,12 +200,12 @@ export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch):
   switch (kind) {
     case 'sabnzbd': {
       const client = createSabnzbdClient(config, fetch);
-      return { transport: 'nzb', snapshot: () => client.snapshot(), remove: (ref: string) => client.remove(ref) };
+      return { transport: 'nzb', snapshot: (ask) => client.snapshot(ask), remove: (ref: string) => client.remove(ref) };
     }
     case 'qbittorrent-bearer':
     case 'qbittorrent-login': {
       const client = createQbittorrentClient(config, fetch);
-      return { transport: 'torrent', snapshot: () => client.snapshot() };
+      return { transport: 'torrent', snapshot: (ask) => client.snapshot(ask) };
     }
     default: {
       // Unreachable given today's three-member `ClientConfig['kind']` union
@@ -350,7 +372,7 @@ async function runTick(
     config = await readClientConfig(deps.raw, clientId, deps.secrets);
     category = normalizeClientCategory(config.category);
     adapter = buildReconcileAdapter(config, deps.fetch);
-    snapshot = await adapter.snapshot();
+    snapshot = await adapter.snapshot(snapshotAskFor(deps.raw, clientId));
   } catch (error) {
     const failures = recordContactFailure(deps.raw, clientId, deps.now());
     deps.log('could not reach the download client, will try again', {

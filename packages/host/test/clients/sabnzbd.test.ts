@@ -435,6 +435,96 @@ test('history is paged until noofslots is satisfied', async () => {
   assert.equal(snapshot.complete, true);
 });
 
+/** Two history pages, 501 slots, refs `SABnzbd_nzo_p<i>`; records every history request's `start`. */
+function twoPageHistory(): { fetch: QueuedFetch; starts: number[]; queue: Record<string, unknown>[] } {
+  const starts: number[] = [];
+  const queue: Record<string, unknown>[] = [];
+  const page1 = Array.from({ length: 500 }, (_, i) => ({ nzo_id: `SABnzbd_nzo_p${i}`, name: `Job ${i}`, status: 'completed' }));
+  const page2 = [{ nzo_id: 'SABnzbd_nzo_p500', name: 'Job 500', status: 'completed' }];
+  const fetch = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) return { queue: { noofslots: queue.length, slots: queue } };
+    const start = Number(new URL(url).searchParams.get('start'));
+    starts.push(start);
+    return { history: { noofslots: 501, slots: start === 0 ? page1 : page2 } };
+  });
+  return { fetch, starts, queue };
+}
+
+test('history paging stops once every asked ref has been seen, and the snapshot is complete for that ask (#107)', async () => {
+  const { fetch, starts } = twoPageHistory();
+  const client = createSabnzbdClient(makeConfig({ id: 30 }), fetch);
+
+  const snapshot = await client.snapshot({ refs: new Set(['SABnzbd_nzo_p3', 'SABnzbd_nzo_p499']), everything: false });
+
+  assert.deepEqual(starts, [0], 'both asked refs are on the first page, so the second is never requested');
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.history.length, 500);
+});
+
+test('a ref seen in the queue is not paged for in the history (#107)', async () => {
+  const { fetch, starts, queue } = twoPageHistory();
+  queue.push({ nzo_id: 'SABnzbd_nzo_q1', filename: 'Queued', percentage: '5', cat: 'tv' });
+  const client = createSabnzbdClient(makeConfig({ id: 31 }), fetch);
+
+  const snapshot = await client.snapshot({ refs: new Set(['SABnzbd_nzo_q1']), everything: false });
+
+  assert.deepEqual(starts, [], 'the only asked ref is downloading, so no history page is requested');
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.queue.length, 1);
+});
+
+test('an asked ref on no page reads the history to the end, as every snapshot did before (#107)', async () => {
+  const { fetch, starts } = twoPageHistory();
+  const client = createSabnzbdClient(makeConfig({ id: 32 }), fetch);
+
+  const snapshot = await client.snapshot({ refs: new Set(['SABnzbd_nzo_gone']), everything: false });
+
+  assert.deepEqual(starts, [0, 500], 'only the whole list can call the ref absent');
+  assert.equal(snapshot.complete, true);
+  assert.equal(snapshot.history.length, 501);
+});
+
+test('an ask for everything pages to the end even when its refs are on the first page (#107)', async () => {
+  const { fetch, starts } = twoPageHistory();
+  const client = createSabnzbdClient(makeConfig({ id: 33 }), fetch);
+
+  await client.snapshot({ refs: new Set(['SABnzbd_nzo_p3']), everything: true });
+
+  assert.deepEqual(starts, [0, 500], 'recovery needs the whole picture, whatever else was asked');
+});
+
+test('an ask with no refs and nothing to recover requests no history (#107)', async () => {
+  const { fetch, starts } = twoPageHistory();
+  const client = createSabnzbdClient(makeConfig({ id: 34 }), fetch);
+
+  const snapshot = await client.snapshot({ refs: new Set(), everything: false });
+
+  assert.deepEqual(starts, []);
+  assert.equal(snapshot.complete, true);
+  assert.deepEqual(snapshot.history, []);
+});
+
+test('a failed queue call still reads the history, so a client down entirely is still a rejection (#107)', async () => {
+  // The early stop must not satisfy an empty ask with no request when the
+  // queue failed: `snapshot` tells "down" from "half-answered" by whether
+  // the first history page answered, and an ask the stop would have met
+  // with nothing would turn a dead client into a reachable, empty one.
+  const down = fakeQueuedFetch(async () => { throw new Error('connection refused'); });
+  await assert.rejects(
+    () => createSabnzbdClient(makeConfig({ id: 35 }), down).snapshot({ refs: new Set(), everything: false }),
+    /could not be reached/,
+  );
+
+  const { fetch, starts } = twoPageHistory();
+  const queueDown = fakeQueuedFetch(async (url) => {
+    if (isQueueRequest(url)) throw new Error('queue unreachable');
+    return fetch.json(url);
+  });
+  const snapshot = await createSabnzbdClient(makeConfig({ id: 36 }), queueDown).snapshot({ refs: new Set(), everything: false });
+  assert.deepEqual(starts, [0, 500], 'with the queue unknown the whole history is read, as before');
+  assert.equal(snapshot.complete, false, 'and a failed queue call still leaves the snapshot incomplete');
+});
+
 test('hitting the page cap reports an incomplete snapshot rather than a whole one', async () => {
   const config = makeConfig({ id: 25 });
   let historyCalls = 0;

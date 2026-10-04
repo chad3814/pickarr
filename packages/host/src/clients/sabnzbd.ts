@@ -1,6 +1,6 @@
 import type { SabnzbdConfig } from './config.ts';
 import type { QueuedFetch } from '../fetch/queue.ts';
-import type { ClientHistoryEntry, ClientQueueEntry, ClientSnapshot } from './snapshot.ts';
+import { ASK_EVERYTHING, type ClientHistoryEntry, type ClientQueueEntry, type ClientSnapshot, type SnapshotAsk } from './snapshot.ts';
 import { normalizeClientCategory } from './snapshot.ts';
 import { redactText, redactUrl } from './redact.ts';
 import type { SubmitResult } from './types.ts';
@@ -322,9 +322,32 @@ function toHistoryEntry(
 
 /**
  * Requests one history page at a time, starting after whatever
- * `collected` already holds, until the response's own `noofslots` is
- * satisfied, a page comes back with no slots at all, or `MAX_HISTORY_PAGES`
- * is reached.
+ * `collected` already holds, until every ref in `ask.refs` has been seen
+ * (unless `ask.everything`), the response's own `noofslots` is satisfied,
+ * a page comes back with no slots at all, or `MAX_HISTORY_PAGES` is
+ * reached.
+ *
+ * **Stopping early is what #107 asked for.** Every tick re-paged the whole
+ * history -- up to twenty requests every `RECONCILE_INTERVAL_S` on an
+ * install with a long one -- to answer questions about the handful of rows
+ * still in flight. The caller now says which refs it will ask about
+ * (`SnapshotAsk`), and once each has been seen in the queue or the pages so
+ * far the rest of the history cannot change the answer for any of them, so
+ * it is not fetched. `complete` stays `true` on that stop, and
+ * `ClientSnapshot.complete`'s doc says what that does and does not
+ * license. A ref that is never seen pages to the end exactly as before,
+ * since only the whole list can call it absent. An ask with no refs and
+ * nothing to recover requests no history at all.
+ *
+ * How much this saves depends on SABnzbd listing newest first, which its
+ * API documentation does not state and this adapter does not assume: if it
+ * does, the in-flight refs sit on the first page; if it does not, this
+ * costs what it cost before. The same documentation (5.1) lists an
+ * `nzo_ids` filter on `mode=history` that would make this one request; it
+ * is not used because what `noofslots` reports under the filter, and what
+ * an older server does with the parameter, have not been measured against
+ * a live client, and a server that ignored it would turn an early stop into
+ * a wrong absence. Measure that first.
  *
  * Recursive rather than a `for`/`while` loop with an `await` in its body:
  * each page's `start` genuinely depends on how much the previous page
@@ -339,7 +362,15 @@ async function fetchHistoryPages(
   fetch: QueuedFetch,
   collected: HistorySlot[],
   page: number,
+  stillWanted: ReadonlySet<string>,
+  everything: boolean,
 ): Promise<{ slots: HistorySlot[]; complete: boolean; firstPageError: unknown }> {
+  if (!everything && stillWanted.size === 0) {
+    // Everything the caller will ask about has been seen. The pages after
+    // this one cannot change any of those answers, and nothing reads
+    // absence for a ref outside the ask -- see `ClientSnapshot.complete`.
+    return { slots: collected, complete: true, firstPageError: undefined };
+  }
   if (page >= MAX_HISTORY_PAGES) {
     // The cap means "cannot verify the rest," never "this is everything" --
     // see `ClientSnapshot.complete`'s own doc comment.
@@ -370,7 +401,9 @@ async function fetchHistoryPages(
   // on to the cap for nothing.
   if (pageSlots.length === 0) return { slots: next, complete: false, firstPageError: undefined };
 
-  return fetchHistoryPages(config, fetch, next, page + 1);
+  const remaining = new Set(stillWanted);
+  for (const slot of pageSlots) if (slot.nzo_id !== undefined) remaining.delete(slot.nzo_id);
+  return fetchHistoryPages(config, fetch, next, page + 1, remaining, everything);
 }
 
 /**
@@ -384,7 +417,7 @@ export function createSabnzbdClient(
   fetch: QueuedFetch,
 ): {
   submit(link: string, name: string): Promise<SubmitResult>;
-  snapshot(): Promise<ClientSnapshot>;
+  snapshot(ask?: SnapshotAsk): Promise<ClientSnapshot>;
   remove(ref: string): Promise<void>;
 } {
   return {
@@ -423,7 +456,7 @@ export function createSabnzbdClient(
       return { ref: first };
     },
 
-    async snapshot(): Promise<ClientSnapshot> {
+    async snapshot(ask: SnapshotAsk = ASK_EVERYTHING): Promise<ClientSnapshot> {
       const queuePromise = fetch.json<QueueResponse>(buildQueueUrl(config));
       // Attached immediately, not at the `await queuePromise` further down:
       // the history paging below runs several real awaits (real event-loop
@@ -435,13 +468,15 @@ export function createSabnzbdClient(
       // error and is what actually routes it into `queueBody = null`.
       queuePromise.catch(() => {});
 
-      const { slots: historySlots, complete: historyComplete, firstPageError: historyError } = await fetchHistoryPages(
-        config,
-        fetch,
-        [],
-        0,
-      );
-
+      // The queue is read first so that a ref still downloading is struck
+      // from the ask before the history is paged for it: a job in the queue
+      // is not in the history, and paging to the end looking for it there
+      // would be the whole cost #107 names, every tick, for every download
+      // in flight. A failed queue call strikes nothing and forces the whole
+      // history instead: the contact decision below needs the first page's
+      // answer to tell "down" from "half-answered", and an ask the early
+      // stop would have satisfied with no request at all must not turn a
+      // dead client into a reachable one with an empty picture.
       let queueBody: QueueResponse | null;
       let queueError: unknown;
       try {
@@ -455,6 +490,19 @@ export function createSabnzbdClient(
         queueBody = null;
         queueError = error;
       }
+
+      const stillWanted = new Set(ask.refs);
+      for (const slot of queueBody?.queue?.slots ?? []) {
+        if (slot.nzo_id !== undefined) stillWanted.delete(slot.nzo_id);
+      }
+      const { slots: historySlots, complete: historyComplete, firstPageError: historyError } = await fetchHistoryPages(
+        config,
+        fetch,
+        [],
+        0,
+        stillWanted,
+        ask.everything || queueError !== undefined,
+      );
 
       // Rejects only when the client gave no answer at all: the queue call
       // AND the first history page both failed. Either one alone is a

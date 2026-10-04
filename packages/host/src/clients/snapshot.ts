@@ -44,6 +44,18 @@ export interface ClientHistoryEntry {
  * from an incomplete snapshot might simply be on a page that failed to
  * load, not gone from the client. Only a `complete: true` snapshot licenses
  * "this ref is not here, therefore treat it as gone."
+ *
+ * **Complete relative to the {@link SnapshotAsk} the caller made (#107).**
+ * An adapter that pages may stop once every ref the caller asked about has
+ * been seen, and answer `complete: true` for a history it did not read to
+ * the end. That is still the licence above, for the refs that were asked
+ * about: each one is present, so none is being called absent. What it is
+ * *not* is a census of the client -- an entry nobody asked about may sit on
+ * a page that was never requested, so `untracked` and `foreign` counts
+ * taken over a snapshot cover the pages read, not the client. Every
+ * consumer that reads absence from `complete` asks about exactly the rows
+ * `reconcile-job.ts` puts in the ask, and `reconcile.ts`'s three gates say
+ * so beside their checks.
  */
 export interface ClientSnapshot {
   queue: ClientQueueEntry[];
@@ -91,6 +103,31 @@ export interface ClientSnapshot {
  * This one reads a field a client's own response may or may not include,
  * so it has to.
  */
+/**
+ * What one `snapshot` call is for: the refs the caller will ask the answer
+ * about, and whether it needs the client's whole list regardless.
+ *
+ * `refs` are the `client_ref`s of this client's non-terminal rows -- the
+ * set `sweepAbsent` checks and the walk advances. `everything` is set when
+ * some row of that set has no ref yet: `recoverRefs` matches such a row by
+ * category and name against the *whole* snapshot and needs "exactly one
+ * match" to be provable, which no early stop can give it.
+ *
+ * SABnzbd's adapter pages its history until every ref in `refs` has been
+ * seen, then stops (#107); with `everything` it pages to the end as it
+ * always did. qBittorrent's reads its whole list in one request and ignores
+ * the ask. The default, {@link ASK_EVERYTHING}, is the pre-#107 behaviour,
+ * so a caller that does not say what it wants pays for the whole picture
+ * rather than silently getting less than it needs.
+ */
+export interface SnapshotAsk {
+  readonly refs: ReadonlySet<string>;
+  readonly everything: boolean;
+}
+
+/** The ask that reads the client's whole list -- what every `snapshot` did before #107. */
+export const ASK_EVERYTHING: SnapshotAsk = { refs: new Set(), everything: true };
+
 export function normalizeClientCategory(category: string | null | undefined): string | null {
   return category === null || category === undefined || category === '' || category === 'None'
     ? null
