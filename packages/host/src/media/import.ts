@@ -81,7 +81,26 @@
  * cost of one `lstat`. `link(2)` would close it entirely -- it refuses an
  * existing name atomically -- but hardlinks are unsupported on filesystems a
  * media library plausibly sits on (exFAT, some network mounts), and design
- * spec §4 names a rename. The window is left open, and named.
+ * spec §4 names a rename. The window is left open, and named -- for a
+ * second *process*. Within this host it is closed, below.
+ *
+ * **Two callers in one host were reachable, and did worse than clobber
+ * (#100).** `host.ts` builds one importer per plugin and every download
+ * client's reconcile job delivers through it; the dispatcher runs up to
+ * eight jobs at once. So two clients finishing two releases of one episode
+ * in the same tick could call `place` for the same target concurrently.
+ * Measured, with a copy that yields once mid-way: both passed the first
+ * check, both copied to the *same* temporary -- the non-random name above
+ * -- and the bytes of the two sources interleaved in it; one rename then
+ * succeeded and reported `{ placed: 'library' }` over a corrupt file, and
+ * the other found its temporary gone and answered `copy-failed` with
+ * `ENOENT`. `place` is therefore serialised per importer: each call waits
+ * for the one before it to settle, so the second caller meets the first
+ * check after the first rename and is refused `destination-exists`, which
+ * is the refusal that exists for this. The chain never rejects, since
+ * `place` itself never does; a caller's own refusal is its own. `list`
+ * is not serialised: it only reads. `test/media/import.test.ts` drives the
+ * two callers and checks the bytes.
  *
  * ## Why no `node:fs` error ever escapes
  *
@@ -426,6 +445,13 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
     }
   }
 
+  /**
+   * The tail of the serialisation chain the module doc describes: every
+   * `place` call awaits the one before it. Never rejects, because `place`
+   * never does, so an earlier caller's refusal cannot poison a later one.
+   */
+  let lastPlace: Promise<unknown> = Promise.resolve();
+
   return {
     async list(file): Promise<readonly DownloadEntry[] | ImportRefusal> {
       try {
@@ -445,65 +471,75 @@ export function createLibraryImporter(deps: LibraryImporterDeps): LibraryImporte
     },
 
     async place(file, entry, resolveTokens): Promise<ImportOutcome> {
-      const destination = readDestination(deps.raw, deps.pluginId);
-      if (destination === undefined) return refuse('no-destination');
-      // `rootRefusal` (`media/shape.ts`), the same function
-      // `media/destinations.ts` applies on the way in -- not a second copy
-      // of the rule. Re-checked rather than trusted for the same reason the
-      // unmatched directory is: a row can predate a rule. Both sides once
-      // carried their own `startsWith('/')` and nothing else, which is how
-      // `'/'`, `'//'` and `'/lib/../..'` came to save and then refuse at
-      // every import for ever.
-      const rootProblem = rootRefusal(destination.root);
-      if (rootProblem !== undefined) {
-        return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
-      }
-
-      if (isForeign(file, entry) || !(await ownsOnDisk(file, entry))) return refuse('foreign-entry');
-
-      const relative = await relativeDestination(file, entry, destination, resolveTokens);
-      if ('refusal' in relative) return relative;
-      if (hasControlCharacter(relative.path)) return refuse('control-character');
-
-      const root = resolve(destination.root);
-      const target = resolve(root, relative.path);
-      // Last line of defence, after the normalisation `resolve` performs --
-      // and it is a live check rather than a belt over a proven brace, so
-      // do not read it as unreachable, even though neither branch has a
-      // known way through today. It is not what refuses a release name of
-      // `..` -- `_unmatched/../x.mkv` resolves to `<root>/x.mkv`, inside
-      // the root, so this line would let it pass; `unmatchedDestination`
-      // refuses that segment on its own. What this line catches is a path
-      // that leaves the root altogether, from either branch, by a route no
-      // earlier rule anticipated. Refused rather than thrown -- a
-      // throw from here reaches `deliverCompleted`'s log carrying two
-      // paths.
-      //
-      // `root` is already what it resolves to: `rootRefusal` above refuses
-      // an empty, `.` or `..` segment and refuses `/` itself, so
-      // `root + sep` is a real prefix rather than `'//'`.
-      if (!target.startsWith(root + sep)) return refuse('escapes-root');
-
-      const placed = file.mediaItemId === null ? 'unmatched' : 'library';
-      try {
-        // Design spec §7: a root that does not exist is **not** created. Only
-        // the levels *below* it are, which is what lets a shape name
-        // directories at all.
-        const rootStat = await stat(root).catch(() => null);
-        if (rootStat === null || !rootStat.isDirectory()) return refuse('missing-root');
-        if (await presentAt(target)) return refuse('destination-exists');
-
-        await mkdir(dirname(target), { recursive: true });
-        const temporary = `${target}${TEMPORARY_SUFFIX}`;
-        await copyFile(entry.path, temporary);
-        // Again, immediately before the rename. See the module doc for what
-        // this narrows and what it does not close.
-        if (await presentAt(target)) return refuse('destination-exists');
-        await rename(temporary, target);
-      } catch (error) {
-        return { refusal: 'copy-failed', errno: importErrno(error) };
-      }
-      return { placed };
+      const turn = lastPlace.then(() => placeOne(file, entry, resolveTokens));
+      lastPlace = turn;
+      return turn;
     },
   };
+
+  async function placeOne(
+    file: DownloadedFile,
+    entry: DownloadEntry,
+    resolveTokens: () => Promise<TokenValues>,
+): Promise<ImportOutcome> {
+    const destination = readDestination(deps.raw, deps.pluginId);
+    if (destination === undefined) return refuse('no-destination');
+    // `rootRefusal` (`media/shape.ts`), the same function
+    // `media/destinations.ts` applies on the way in -- not a second copy
+    // of the rule. Re-checked rather than trusted for the same reason the
+    // unmatched directory is: a row can predate a rule. Both sides once
+    // carried their own `startsWith('/')` and nothing else, which is how
+    // `'/'`, `'//'` and `'/lib/../..'` came to save and then refuse at
+    // every import for ever.
+    const rootProblem = rootRefusal(destination.root);
+    if (rootProblem !== undefined) {
+      return refuse(rootProblem === 'not-absolute' ? 'not-absolute-root' : 'unusable-root');
+    }
+
+    if (isForeign(file, entry) || !(await ownsOnDisk(file, entry))) return refuse('foreign-entry');
+
+    const relative = await relativeDestination(file, entry, destination, resolveTokens);
+    if ('refusal' in relative) return relative;
+    if (hasControlCharacter(relative.path)) return refuse('control-character');
+
+    const root = resolve(destination.root);
+    const target = resolve(root, relative.path);
+    // Last line of defence, after the normalisation `resolve` performs --
+    // and it is a live check rather than a belt over a proven brace, so
+    // do not read it as unreachable, even though neither branch has a
+    // known way through today. It is not what refuses a release name of
+    // `..` -- `_unmatched/../x.mkv` resolves to `<root>/x.mkv`, inside
+    // the root, so this line would let it pass; `unmatchedDestination`
+    // refuses that segment on its own. What this line catches is a path
+    // that leaves the root altogether, from either branch, by a route no
+    // earlier rule anticipated. Refused rather than thrown -- a
+    // throw from here reaches `deliverCompleted`'s log carrying two
+    // paths.
+    //
+    // `root` is already what it resolves to: `rootRefusal` above refuses
+    // an empty, `.` or `..` segment and refuses `/` itself, so
+    // `root + sep` is a real prefix rather than `'//'`.
+    if (!target.startsWith(root + sep)) return refuse('escapes-root');
+
+    const placed = file.mediaItemId === null ? 'unmatched' : 'library';
+    try {
+      // Design spec §7: a root that does not exist is **not** created. Only
+      // the levels *below* it are, which is what lets a shape name
+      // directories at all.
+      const rootStat = await stat(root).catch(() => null);
+      if (rootStat === null || !rootStat.isDirectory()) return refuse('missing-root');
+      if (await presentAt(target)) return refuse('destination-exists');
+
+      await mkdir(dirname(target), { recursive: true });
+      const temporary = `${target}${TEMPORARY_SUFFIX}`;
+      await copyFile(entry.path, temporary);
+      // Again, immediately before the rename. See the module doc for what
+      // this narrows and what it does not close.
+      if (await presentAt(target)) return refuse('destination-exists');
+      await rename(temporary, target);
+    } catch (error) {
+      return { refusal: 'copy-failed', errno: importErrno(error) };
+    }
+    return { placed };
+  }
 }
