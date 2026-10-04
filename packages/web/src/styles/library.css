@@ -811,8 +811,16 @@ section > p:not(.details-foot) {
 }
 .item-dialog > button { float: right; }
 
-/* The picked filter and search form. These selectors reach `BrowseControls.tsx`'s form and nothing else. */
-form[role='search'] { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block-end: var(--space-3); }
+/* The filter, view and search form. These selectors reach `BrowseControls.tsx`'s form and nothing else.
+   Sticky at the top of the content column, on the page's own background, so the
+   options stay in reach however far a long category is scrolled; the nav beside
+   it is sticky for the same reason (`base.css`). `z-index: 1` keeps the tiles'
+   images, which are positioned by their own stacking, from painting over it. */
+form[role='search'] {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--color-bg); padding-block: var(--space-3);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block-end: var(--space-3);
+}
 form[role='search'] fieldset { display: flex; gap: var(--space-2); border: 0; padding: 0; margin: 0; }
 form[role='search'] legend { float: left; margin-inline-end: var(--space-2); }
 form[role='search'] fieldset label { display: inline-flex; align-items: center; gap: var(--space-1); }

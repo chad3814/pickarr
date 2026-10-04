@@ -52,7 +52,7 @@
  * gone.
  */
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
-import { NavLink, Navigate, Outlet, Route, Routes } from 'react-router';
+import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from 'react-router';
 import { createStore, type CreateStoreDeps, type Store } from '../store/index.ts';
 import { realFetch, idleScheduler, realEventStream } from '../store/adapters.ts';
 import { webLocksLease, type SyncFetch } from '../store/sync.ts';
@@ -399,7 +399,34 @@ function StoreFailed(): ReactElement {
  * every render, which is wasteful even though nothing here currently has
  * state.
  */
+/** The three browse parameters a category page keeps in its URL (`library/useBrowseQuery.ts`), and nothing else. */
+const BROWSE_PARAMS = ['filter', 'q', 'view'] as const;
+
+/**
+ * The current browse state as a query string to carry onto another
+ * category's link, or `''` when there is none.
+ *
+ * The filter, the search text and the view are the URL's, not the page's
+ * (browse design spec 2026-10-02 §3.2), so a category link that dropped
+ * them would reset the operator's choices on every switch. Only the three
+ * browse parameters travel: anything else in the search string belongs to
+ * the page that put it there. A keystroke still inside its debounce is not
+ * in the URL yet and does not travel, which `useBrowseQuery.test.tsx` pins.
+ */
+export function browseSearch(search: string): string {
+  const current = new URLSearchParams(search);
+  const carried = new URLSearchParams();
+  for (const key of BROWSE_PARAMS) {
+    const value = current.get(key);
+    if (value !== null) carried.set(key, value);
+  }
+  const text = carried.toString();
+  return text === '' ? '' : `?${text}`;
+}
+
 function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): ReactElement {
+  const { search } = useLocation();
+  const carried = browseSearch(search);
   return (
     <div>
       <header>
@@ -435,7 +462,7 @@ function ShellChrome({ counts, onSignOut, storeFailed }: ShellChromeProps): Reac
           */}
           {BROWSER_PLUGINS.map((plugin) => (
             <li key={plugin.id}>
-              <NavLink to={`/${plugin.id}`}>
+              <NavLink to={`/${plugin.id}${carried}`}>
                 {plugin.label} <span data-testid={`count-${plugin.id}`}>{counts[plugin.id] ?? 0}</span>
               </NavLink>
             </li>

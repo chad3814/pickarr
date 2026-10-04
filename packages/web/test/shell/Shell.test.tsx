@@ -411,6 +411,31 @@ test('the nav links to each category, and marks the current one', async () => {
  * three strings against the plugin packages); the hrefs are the ids, which
  * is `Shell.tsx`'s route table read from the other side.
  */
+test('the category links carry the browse state in the URL, and the other links do not', () => {
+  const { deps } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/tv?filter=picked&q=dune&view=grid']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+  // Spelled literally: this is the string a switch to Movies lands on.
+  assert.equal(screen.getByRole('link', { name: /Movies/ }).getAttribute('href'), '/movie?filter=picked&q=dune&view=grid');
+  assert.equal(screen.getByRole('link', { name: /XXX/ }).getAttribute('href'), '/xxx?filter=picked&q=dune&view=grid');
+  assert.equal(screen.getByRole('link', { name: 'Unmatched' }).getAttribute('href'), '/unmatched');
+  assert.equal(screen.getByRole('link', { name: 'Activities' }).getAttribute('href'), '/activities');
+  assert.equal(screen.getByRole('link', { name: 'Settings' }).getAttribute('href'), '/settings');
+});
+
+test('with no browse state in the URL the category links are bare, and a stranger parameter does not travel', () => {
+  const { deps } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/tv?other=1']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+  assert.equal(screen.getByRole('link', { name: /Movies/ }).getAttribute('href'), '/movie');
+});
+
 test('the nav has exactly one link per registered plugin, plus Unmatched, Activities and Settings', async () => {
   const { deps, sched } = testDeps();
   render(
