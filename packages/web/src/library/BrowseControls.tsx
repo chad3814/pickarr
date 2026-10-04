@@ -5,12 +5,15 @@
  */
 import type { ReactElement } from 'react';
 import type { PickedFilter } from '../store/catalog.ts';
+import type { BrowseView } from './useBrowseQuery.ts';
 
 export interface BrowseControlsProps {
   filter: PickedFilter;
   input: string;
   onFilter(f: PickedFilter): void;
   onInput(v: string): void;
+  view: BrowseView;
+  onView(v: BrowseView): void;
 }
 
 const OPTIONS: ReadonlyArray<{ value: PickedFilter; label: string }> = [
@@ -19,7 +22,12 @@ const OPTIONS: ReadonlyArray<{ value: PickedFilter; label: string }> = [
   { value: 'unpicked', label: 'Unpicked' },
 ];
 
-export function BrowseControls({ filter, input, onFilter, onInput }: BrowseControlsProps): ReactElement {
+const VIEWS: ReadonlyArray<{ value: BrowseView; label: string }> = [
+  { value: 'list', label: 'List' },
+  { value: 'grid', label: 'Grid' },
+];
+
+export function BrowseControls({ filter, input, onFilter, onInput, view, onView }: BrowseControlsProps): ReactElement {
   return (
     <form
       role="search"
@@ -39,6 +47,23 @@ export function BrowseControls({ filter, input, onFilter, onInput }: BrowseContr
               checked={filter === option.value}
               onChange={() => {
                 onFilter(option.value);
+              }}
+            />
+            {option.label}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset>
+        <legend>View</legend>
+        {VIEWS.map((option) => (
+          <label key={option.value}>
+            <input
+              type="radio"
+              name="view"
+              value={option.value}
+              checked={view === option.value}
+              onChange={() => {
+                onView(option.value);
               }}
             />
             {option.label}
