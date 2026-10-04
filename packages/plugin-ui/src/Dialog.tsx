@@ -45,15 +45,21 @@ export function Dialog({ label, labelledBy, className, onClose, onKeyDown, child
   // pick inside the item dialog unmounts the Pick button that held focus,
   // focus falls to `<body>`, and Escape and the Tab trap live on the panel's
   // `onKeyDown`, so the dialog could no longer be closed from the keyboard
-  // (found by `grid.spec.ts`). A blur handler cannot see this: browsers do
-  // not fire blur or focusout when a focused element is removed, so the
-  // panel watches its own subtree instead. It acts only when focus is on
-  // `<body>` (nothing), so a deliberate move to another control is untouched.
+  // (found by `grid.spec.ts`). What was measured: a React `onBlur` handler
+  // on the panel did not run when the focused child was removed (React
+  // drops events from fibers being deleted), so the panel watches its own
+  // subtree instead. It acts only when focus is on `<body>` (nothing), so a
+  // deliberate move to another control is untouched. Dialogs nest (the item
+  // dialog holds a gallery) and every panel's observer sees the inner
+  // mutations, so a panel with an open dialog inside it steps aside and the
+  // innermost one reclaims.
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
     const observer = new MutationObserver(() => {
-      if (panel.isConnected && document.activeElement === document.body) panel.focus();
+      if (!panel.isConnected || document.activeElement !== document.body) return;
+      if (panel.querySelector('[role="dialog"]')) return;
+      panel.focus();
     });
     observer.observe(panel, { childList: true, subtree: true });
     return () => { observer.disconnect(); };

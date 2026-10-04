@@ -88,3 +88,30 @@ test('when the focused control removes itself, the dialog reclaims focus so Esca
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   assert.equal(closed, 1, 'Escape closes it');
 });
+
+test('with dialogs nested, the innermost one reclaims focus, not the outer', async () => {
+  // The inner dialog opens after the outer one, as a gallery does inside the
+  // item dialog, so the outer panel's observer is created first and runs first.
+  function Harness(): ReactElement {
+    const [innerOpen, setInnerOpen] = useState(false);
+    const [present, setPresent] = useState(true);
+    return (
+      <Dialog label="outer" className="item-dialog" onClose={noop}>
+        <button type="button" onClick={() => { setInnerOpen(true); }}>Open gallery</button>
+        {innerOpen && (
+          <Dialog label="inner" className="gallery" onClose={noop}>
+            {present && <button type="button" onClick={() => { setPresent(false); }}>Next</button>}
+          </Dialog>
+        )}
+      </Dialog>
+    );
+  }
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open gallery' }));
+  const next = screen.getByRole('button', { name: 'Next' });
+  next.focus();
+  fireEvent.click(next);
+  await waitFor(() => {
+    assert.ok(document.activeElement === screen.getByRole('dialog', { name: 'inner' }), 'the inner panel holds focus');
+  });
+});
