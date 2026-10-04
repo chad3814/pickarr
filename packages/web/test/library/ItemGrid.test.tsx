@@ -51,7 +51,7 @@ test('a film grid shows each item\'s poster; a television grid shows backgrounds
 
 test('a record with no image of the plugin\'s kind shows the placeholder under the title, even when it has the other kind', () => {
   renderGrid('movie', resultOf([mediaItem(1, 'movie', 'Arrival')], [recordOf(1, 'movie', 'Arrival', null, 91)]));
-  const tile = screen.getByRole('button', { name: /Arrival/ });
+  const tile = screen.getByRole('button', { name: 'Arrival' });
   assert.ok(!tile.querySelector('img[src]'), 'no image is requested');
   assert.ok(within(tile).getByRole('img', { name: 'No poster for Arrival' }), 'the placeholder names what is missing');
 });
@@ -59,13 +59,13 @@ test('a record with no image of the plugin\'s kind shows the placeholder under t
 test('an image that fails latches to the placeholder, and a new id for the tile is tried afresh', async () => {
   const first = resultOf([mediaItem(1, 'movie', 'Arrival')], [recordOf(1, 'movie', 'Arrival', 41, null)]);
   const { rerender } = render(<ItemGrid store={source} pluginId="movie" tables={NO_TABLES} submit={acceptsPick} identify={neverIdentify} result={first} emptyMessage="x" />);
-  const img = screen.getByRole('button', { name: /Arrival/ }).querySelector('img');
+  const img = screen.getByRole('button', { name: 'Arrival' }).querySelector('img');
   assert.ok(img);
   fireEvent.error(img);
   await waitFor(() => { assert.ok(screen.getByRole('img', { name: 'No poster for Arrival' })); });
   // The same record again: still the placeholder, no retry.
   rerender(<ItemGrid store={source} pluginId="movie" tables={NO_TABLES} submit={acceptsPick} identify={neverIdentify} result={first} emptyMessage="x" />);
-  assert.ok(!screen.getByRole('button', { name: /Arrival/ }).querySelector('img[src]'));
+  assert.ok(!screen.getByRole('button', { name: 'Arrival' }).querySelector('img[src]'));
   // A re-rank changes the id: the tile tries the new image.
   const reranked = resultOf([mediaItem(1, 'movie', 'Arrival')], [recordOf(1, 'movie', 'Arrival', 43, null)]);
   rerender(<ItemGrid store={source} pluginId="movie" tables={NO_TABLES} submit={acceptsPick} identify={neverIdentify} result={reranked} emptyMessage="x" />);
@@ -89,14 +89,22 @@ test('activating a tile opens one dialog named for the item with the card expand
 test('Escape, the backdrop and Close each close the dialog and return focus to the tile', () => {
   renderGrid('movie', resultOf([mediaItem(1, 'movie', 'Arrival')], [recordOf(1, 'movie', 'Arrival', 41, null)]));
   const tile = screen.getByRole('button', { name: 'Arrival' });
+  const focusIsOnTile = (): boolean => tile.contains(document.activeElement) || document.activeElement === tile;
   tile.focus();
   fireEvent.click(tile);
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   assert.ok(!screen.queryByRole('dialog'), 'Escape closed it');
-  assert.ok(tile.contains(document.activeElement) || document.activeElement === tile, 'focus is back on the tile');
+  assert.ok(focusIsOnTile(), 'focus is back on the tile after Escape');
+  fireEvent.click(tile);
+  const backdrop = screen.getByRole('dialog').closest('.dialog-backdrop');
+  assert.ok(backdrop instanceof HTMLElement, 'the dialog sits in a backdrop');
+  fireEvent.click(backdrop);
+  assert.ok(!screen.queryByRole('dialog'), 'the backdrop closed it');
+  assert.ok(focusIsOnTile(), 'focus is back on the tile after the backdrop');
   fireEvent.click(tile);
   fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }));
   assert.ok(!screen.queryByRole('dialog'), 'Close closed it');
+  assert.ok(focusIsOnTile(), 'focus is back on the tile after Close');
 });
 
 test('a dialog whose item leaves the page closes, and focus lands on the grid', async () => {

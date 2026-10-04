@@ -23,7 +23,7 @@
  * matches it, or it was tombstoned -- the dialog closes and focus goes to
  * the list, since the tile that would take it back is gone.
  */
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import { Dialog, ImagePlaceholder, type IdentifySubmit } from '@pickarr/plugin-ui';
 import { pluginFor } from '../plugins/registry.ts';
@@ -67,15 +67,19 @@ function Tile({ item, kind, imageId, onOpen }: TileProps): ReactElement {
   // placeholder, and a re-rank that changes the id is a fresh attempt.
   const [failedId, setFailedId] = useState<number | null>(null);
   const showImage = imageId !== null && failedId !== imageId;
+  // The placeholder is an `svg role="img"` with its own name, which would
+  // otherwise be folded into the button's name ("No poster for X X"); naming
+  // the button by its caption keeps it exactly the title either way.
+  const captionId = useId();
   return (
     <li>
-      <button type="button" aria-haspopup="dialog" onClick={() => { onOpen(item.id); }}>
+      <button type="button" aria-haspopup="dialog" aria-labelledby={captionId} onClick={() => { onOpen(item.id); }}>
         {showImage ? (
           <img src={artworkUrl(kind, imageId)} alt="" onError={() => { setFailedId(imageId); }} />
         ) : (
           <ImagePlaceholder label={`No ${kindLabel(kind)} for ${item.title}`} />
         )}
-        <span>{item.title}</span>
+        <span id={captionId}>{item.title}</span>
       </button>
     </li>
   );
@@ -83,9 +87,10 @@ function Tile({ item, kind, imageId, onOpen }: TileProps): ReactElement {
 
 export function ItemGrid({ store, pluginId, tables, submit, identify, result, emptyMessage }: ItemGridProps): ReactElement | null {
   const { items, records, loadMore, done, empty } = result;
-  // `pluginFor` is typed `undefined` for an unregistered id; the registry test
-  // proves every category route's id is registered, so the fallback is for the
-  // type and not a reachable case.
+  // `pluginFor` is typed `undefined` for an unregistered id. `Shell.tsx` builds
+  // the category routes with `BROWSER_PLUGINS.map(...)`, so a category only
+  // mounts for a registered id and the fallback is for the type, not a
+  // reachable case.
   const kind: TileKind = pluginFor(pluginId)?.tile ?? 'poster';
 
   const mediaItemIds = useMemo(() => items.map((item) => item.id), [items]);
