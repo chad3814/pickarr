@@ -160,8 +160,21 @@ test('switching the view keeps the filter and the search, including a keystroke 
   fireEvent.click(screen.getByRole('button', { name: 'set-grid' }));
   assert.equal(text('search'), '?filter=unpicked&q=dune&view=grid', 'the pending text travelled with the view change, as it does with a filter change');
   assert.equal(text('view'), 'grid');
-  // The cancelled timer must not fire later and write over it.
+  // The wait only confirms the URL is stable after the debounce window; the
+  // assertion before it is what catches a missing carry.
   await new Promise((resolve) => { realSetTimeout(resolve, 200); });
   assert.equal(text('search'), '?filter=unpicked&q=dune&view=grid');
   assert.equal(text('q'), 'dune');
+});
+
+test('in grid view a filter change, typing, and clearing each keep view=grid in the URL', async () => {
+  renderAt('/tv?view=grid');
+  fireEvent.click(screen.getByRole('button', { name: 'set-picked' }));
+  assert.equal(text('search'), '?filter=picked&view=grid', 'setFilter kept the view');
+  fireEvent.click(screen.getByRole('button', { name: 'type-dune' }));
+  await new Promise((resolve) => { realSetTimeout(resolve, 200); });
+  assert.equal(text('search'), '?filter=picked&q=dune&view=grid', 'the debounced write kept the view');
+  fireEvent.click(screen.getByRole('button', { name: 'clear' }));
+  assert.equal(text('search'), '?filter=picked&view=grid', 'the immediate clear kept the view');
+  assert.equal(text('view'), 'grid');
 });
