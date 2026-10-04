@@ -16,6 +16,7 @@
  */
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import type { ReactElement } from 'react';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { CardHeading, useExpansion } from '../src/expansion.tsx';
 
@@ -174,4 +175,21 @@ test('no plugin writes aria-expanded itself', async () => {
   }
 
   assert.deepEqual(offenders, [], 'a plugin hand-wrote aria-expanded instead of composing CardHeading');
+});
+
+test('useExpansion starts closed unless told otherwise, and reports the first toggle either way', () => {
+  const seen: boolean[] = [];
+  function Probe({ initiallyExpanded }: { initiallyExpanded?: boolean }): ReactElement {
+    const { expanded, toggle } = useExpansion((next) => { seen.push(next); }, initiallyExpanded);
+    return <button type="button" aria-pressed={expanded} onClick={toggle}>toggle</button>;
+  }
+  render(<Probe />);
+  assert.equal(screen.getByRole('button').getAttribute('aria-pressed'), 'false', 'closed by default');
+  cleanup();
+  render(<Probe initiallyExpanded />);
+  const button = screen.getByRole('button');
+  assert.equal(button.getAttribute('aria-pressed'), 'true', 'open when asked');
+  fireEvent.click(button);
+  assert.equal(button.getAttribute('aria-pressed'), 'false');
+  assert.deepEqual(seen, [false], 'the toggle reports the new state; opening on mount is not a change');
 });

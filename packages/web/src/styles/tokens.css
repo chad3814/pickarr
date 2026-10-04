@@ -60,7 +60,9 @@
      their own family rather than further `--space-*` members: the scale
      above is for the distance *between* things, and each of these is the
      width or the height of one specific thing. Three members, since this
-     slice; the first two are widths and the third is a height.
+     slice; the first two are widths and the third is a height. Two more
+     since phase 8: the minimum widths the grid's `auto-fill` columns use for
+     poster and background tiles.
 
      `--size-poster` is the poster frame `library.css`'s `article img` crops
      to, at the fixed 2:3 aspect ratio 1.x's `card.css` measured, so every
@@ -128,6 +130,8 @@
      requires the two to be equal, in a real browser, so a control that
      outgrows this value reddens there. */
   --size-poster: 6rem;
+  --size-tile-poster: 9rem;        /* a poster tile's minimum width; 2:3, so 13.5rem tall */
+  --size-tile-background: 16rem;   /* a background tile's minimum width; 16:9, so 9rem tall */
   --size-pick-button: 4.5rem;
   --size-mapping-row: 1.75rem;
 

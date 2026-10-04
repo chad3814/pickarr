@@ -723,10 +723,12 @@ section > p:not(.details-foot) {
 .details-foot { display: flex; justify-content: space-between; align-items: baseline; margin: 0; }
 .details-foot small { color: var(--color-text-dim); }
 
-/* The gallery: a real overlay, because a dialog that is merely in the
-   accessibility tree renders as an unstyled block of text -- see the
-   IdentityChangeConfirm entry in CLAUDE.md. */
-.gallery-backdrop {
+/* Every dialog's backdrop (`plugin-ui`'s `Dialog`): a real overlay, because
+   a dialog that is merely in the accessibility tree renders as an unstyled
+   block of text -- see the IdentityChangeConfirm entry in CLAUDE.md. The
+   panel inside is styled per kind: `.gallery` below, `.item-dialog` in the
+   grid section. */
+.dialog-backdrop {
   position: fixed; inset: 0; z-index: 10;
   display: flex; align-items: center; justify-content: center;
   background: rgb(0 0 0 / 70%);
@@ -771,6 +773,43 @@ section > p:not(.details-foot) {
   display: block;
   max-width: 80vw; max-height: 70vh; object-fit: contain;
 }
+
+/* The grid view (design spec 2026-10-04 §3.3): `auto-fill` columns at the
+   plugin's tile width, every tile a button whose whole face is the image
+   with the title beneath. `data-tile` picks the aspect ratio, so a film
+   grid is posters and a television grid is backgrounds from the same
+   rules. */
+.tiles {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(var(--size-tile-poster), 1fr));
+}
+.tiles[data-tile='background'] { grid-template-columns: repeat(auto-fill, minmax(var(--size-tile-background), 1fr)); }
+.tiles button {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  width: 100%; padding: 0; border: 1px solid var(--color-line); border-radius: var(--radius-md);
+  background: var(--color-surface); color: var(--color-text); cursor: pointer; text-align: left;
+  overflow: hidden;
+}
+.tiles button:is(:hover, :focus-visible) { border-color: var(--color-line-strong); }
+.tiles img, .tiles .placeholder { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; }
+.tiles[data-tile='background'] img, .tiles[data-tile='background'] .placeholder { aspect-ratio: 16 / 9; }
+.tiles .placeholder { box-sizing: border-box; padding: 1.5rem; color: var(--color-text-dim); background: var(--color-surface-2); }
+.tiles span {
+  padding: 0 var(--space-2) var(--space-2); font-size: var(--text-body);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* The item dialog: the card, in a panel that scrolls when its detail
+   section is taller than the viewport. Shares `.dialog-backdrop` with the
+   gallery. */
+.item-dialog {
+  max-width: min(60rem, 100%); max-height: 100%; overflow: auto;
+  padding: var(--space-3); border-radius: var(--radius-md);
+  background: var(--color-bg); color: var(--color-text);
+  box-shadow: var(--shadow-dialog);
+}
+.item-dialog > button { float: right; }
 
 /* The picked filter and search form. These selectors reach `BrowseControls.tsx`'s form and nothing else. */
 form[role='search'] { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-block-end: var(--space-3); }

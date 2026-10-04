@@ -74,8 +74,8 @@ export function movieHeadline(title: string, releaseDate: string | null): string
   return /^[0-9]{4}$/.test(year) ? `${title} (${year})` : title;
 }
 
-function MovieCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
-  const { expanded, toggle } = useExpansion(onExpandedChange);
+function MovieCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
+  const { expanded, toggle } = useExpansion(onExpandedChange, initiallyExpanded);
 
   // IMDb is this plugin's to supply: `imdb_id` is a `movie_detail` column,
   // and `MediaDetails` is shared by three plugins, two of which have no
@@ -100,5 +100,6 @@ export const movieBrowser: BrowserPlugin = {
   id: 'movie',
   label: 'Movies',
   tables: ['movie_detail'],
+  tile: 'poster',
   Card: MovieCard,
 };

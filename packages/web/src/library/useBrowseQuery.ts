@@ -1,6 +1,6 @@
 /**
- * The category page's filter and search, read from and written to the URL
- * (design spec 2026-10-02 §3.2): `?filter=unpicked&q=dune` on the category's path.
+ * The category page's filter, search and view, read from and written to the URL
+ * (design spec 2026-10-02 §3.2): `?view=grid&filter=unpicked&q=dune` on the category's path.
  *
  * `q` is what the operator typed and what the input shows; `term` is what
  * the catalog is asked for. Typing is debounced before the URL changes so
@@ -23,28 +23,39 @@ import { normalizeTerm, type PickedFilter } from '../store/catalog.ts';
 
 export const SEARCH_DEBOUNCE_MS = 150;
 
+/** The two ways a category page shows its result (design spec 2026-10-04 §3.1). `list` is the default and is never written to the URL. */
+export type BrowseView = 'list' | 'grid';
+
 /** `q` as typed (what the URL and the input hold); `term` is `normalizeTerm(q)`, what the catalog is asked for. */
 export interface BrowseQuery {
   filter: PickedFilter;
   q: string;
   term: string;
+  view: BrowseView;
 }
 
 export interface BrowseQueryControls {
   filter: PickedFilter;
   input: string;
+  view: BrowseView;
   setFilter(f: PickedFilter): void;
   setInput(v: string): void;
+  setView(v: BrowseView): void;
 }
 
 export function parseFilter(raw: string | null): PickedFilter {
   return raw === 'picked' || raw === 'unpicked' ? raw : 'all';
 }
 
-function paramsFor(filter: PickedFilter, q: string): URLSearchParams {
+export function parseView(raw: string | null): BrowseView {
+  return raw === 'grid' ? 'grid' : 'list';
+}
+
+function paramsFor(filter: PickedFilter, q: string, view: BrowseView): URLSearchParams {
   const params = new URLSearchParams();
   if (filter !== 'all') params.set('filter', filter);
   if (q !== '') params.set('q', q);
+  if (view !== 'list') params.set('view', view);
   return params;
 }
 
@@ -52,12 +63,15 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
   const [params, setParams] = useSearchParams();
   const filter = parseFilter(params.get('filter'));
   const q = params.get('q') ?? '';
+  const view = parseView(params.get('view'));
   const [input, setInput] = useState(q);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** The typed value the pending timer will write; meaningful only while `timer` is set. */
   const pendingQ = useRef('');
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const { pathname } = useLocation();
   const lastPathname = useRef(pathname);
   // The URL is the source of truth; a back/forward navigation re-seeds the box.
@@ -85,8 +99,8 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
     [],
   );
   const write = useCallback(
-    (nextFilter: PickedFilter, nextQ: string) => {
-      setParams(paramsFor(nextFilter, nextQ), { replace: true });
+    (nextFilter: PickedFilter, nextQ: string, nextView: BrowseView) => {
+      setParams(paramsFor(nextFilter, nextQ, nextView), { replace: true });
     },
     [setParams],
   );
@@ -98,7 +112,21 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
         timer.current = undefined;
         nextQ = pendingQ.current;
       }
-      write(f, nextQ);
+      write(f, nextQ, viewRef.current);
+    },
+    [write, q],
+  );
+  const setView = useCallback(
+    (v: BrowseView) => {
+      // The same shape as `setFilter`: a keystroke still in its debounce
+      // travels with the change rather than being dropped on the floor.
+      let nextQ = q;
+      if (timer.current !== undefined) {
+        clearTimeout(timer.current);
+        timer.current = undefined;
+        nextQ = pendingQ.current;
+      }
+      write(filterRef.current, nextQ, v);
     },
     [write, q],
   );
@@ -108,19 +136,19 @@ export function useBrowseQuery(): { query: BrowseQuery; controls: BrowseQueryCon
       if (timer.current !== undefined) clearTimeout(timer.current);
       timer.current = undefined;
       if (value.trim() === '') {
-        write(filterRef.current, '');
+        write(filterRef.current, '', viewRef.current);
         return;
       }
       pendingQ.current = value;
       timer.current = setTimeout(() => {
         timer.current = undefined;
-        write(filterRef.current, value);
+        write(filterRef.current, value, viewRef.current);
       }, SEARCH_DEBOUNCE_MS);
     },
     [write],
   );
   return {
-    query: { filter, q, term: normalizeTerm(q) },
-    controls: { filter, input, setFilter, setInput: setInputDebounced },
+    query: { filter, q, term: normalizeTerm(q), view },
+    controls: { filter, input, view, setFilter, setInput: setInputDebounced, setView },
   };
 }

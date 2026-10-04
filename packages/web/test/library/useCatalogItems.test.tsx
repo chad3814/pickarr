@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { freshDb } from '../store/harness.ts';
-import { done } from '../../src/store/idb.ts';
+import { done, request } from '../../src/store/idb.ts';
 import { getRows } from '../../src/store/rows.ts';
 import { listCatalog, type CatalogQuery, type CatalogRecord } from '../../src/store/catalog.ts';
 import { useCatalogItems, type CatalogItemsSource } from '../../src/library/useCatalogItems.ts';
@@ -32,6 +32,8 @@ async function seed(db: IDBDatabase, items: readonly SeedItem[]): Promise<void> 
       updatedAt: item.updatedAt,
       picked: item.picked,
       haystack: item.title.toLowerCase(),
+      poster: null,
+      background: null,
     };
     catalog.put(record);
     if (item.rowMissing === true) continue;
@@ -334,6 +336,38 @@ test('a page of records with no media_item rows is not empty, and paging continu
   await waitFor(() => {
     assert.deepEqual(titlesShown(), ['One']);
   });
+
+  db.close();
+});
+
+test('the result carries the page\'s catalog records keyed by item id, so a caller has the image ids without another read', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    { id: 1, title: 'Alpha', updatedAt: 10, picked: 0 },
+    { id: 2, title: 'Beta', updatedAt: 20, picked: 1 },
+  ]);
+  // Give one record an image, straight into the store, the way the catalog phase would.
+  const tx = db.transaction('catalog', 'readwrite');
+  const current = await request<CatalogRecord | undefined>(tx.objectStore('catalog').get(2));
+  if (current === undefined) throw new Error('seed wrote no record 2');
+  tx.objectStore('catalog').put({ ...current, poster: 77 });
+  await done(tx);
+
+  const { source } = sourceFor(db);
+  let seen: ReadonlyMap<number, CatalogRecord> | undefined;
+  function RecordsProbe(): ReactElement {
+    const result = useCatalogItems(source, { pluginId: 'tv', filter: 'all', term: '' });
+    seen = result.records;
+    return <output>{result.items.map((item) => item.id).join(',')}</output>;
+  }
+  render(<RecordsProbe />);
+  await waitFor(() => {
+    assert.equal(screen.getByRole('status').textContent, '2,1');
+  });
+
+  assert.deepEqual([...(seen?.keys() ?? [])].toSorted(), [1, 2]);
+  assert.equal(seen?.get(2)?.poster, 77);
+  assert.equal(seen?.get(1)?.poster, null);
 
   db.close();
 });

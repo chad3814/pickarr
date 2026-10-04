@@ -58,8 +58,8 @@ export function siteNameOf(rows: PluginRows): string | undefined {
   return undefined;
 }
 
-function XxxCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
-  const { expanded, toggle } = useExpansion(onExpandedChange);
+function XxxCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
+  const { expanded, toggle } = useExpansion(onExpandedChange, initiallyExpanded);
   const site = siteNameOf(rows);
 
   return (
@@ -96,5 +96,6 @@ export const xxxBrowser: BrowserPlugin = {
   id: 'xxx',
   label: 'XXX',
   tables: [SCENE_TABLE],
+  tile: 'background',
   Card: XxxCard,
 };

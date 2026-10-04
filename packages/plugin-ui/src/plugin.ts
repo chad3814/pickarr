@@ -59,6 +59,12 @@ export interface CardProps {
    * rather than a quiet one.
    */
   readonly onExpandedChange: (expanded: boolean) => void;
+  /**
+   * Open with the detail section showing. The grid's dialog sets this
+   * (§2.2); the list never does. `useExpansion` takes it as its starting
+   * state, so the heading is still a toggle afterwards.
+   */
+  readonly initiallyExpanded?: boolean;
   readonly submit: PickSubmit;
   /** Requery and manual edit for this card's releases; handed to `ReleaseList`. */
   readonly identify: IdentifySubmit;
@@ -75,6 +81,13 @@ export interface BrowserPlugin {
    * the store.
    */
   readonly tables: readonly string[];
+  /**
+   * Which image a grid tile shows for this plugin's items (design spec
+   * 2026-10-04 §2.1): the item's rank-0 poster or its rank-0 background.
+   * Required and undefaulted, so a plugin added later renders the grid
+   * someone chose for it rather than whichever kind a default picked.
+   */
+  readonly tile: 'poster' | 'background';
   /**
    * The card body, rendered into the `<article>` web holds
    * (`web/src/library/MediaItemCard.tsx`).

@@ -500,6 +500,12 @@ export interface Harness {
    */
   seedPoster(mediaItemId: number, rank: number): number;
   /**
+   * {@link Harness.seedPoster} for either media-item artwork kind. The grid
+   * browses television and adult by background, so a spec of that view
+   * needs a `background` row; the same 1x1 png serves both tables.
+   */
+  seedArtwork(kind: 'poster' | 'background', mediaItemId: number, rank: number): number;
+  /**
    * Everything a pick needs that a browser cannot create for itself: a
    * torrent download client pointed at this test's fake qBittorrent, a
    * torrent feed, a `media_item` to expand, and one `rss_item` under it
@@ -867,6 +873,10 @@ export const test = base.extend<{ harness: Harness }>({
       }
 
       function seedPoster(mediaItemId: number, rank: number): number {
+        return seedArtwork('poster', mediaItemId, rank);
+      }
+
+      function seedArtwork(kind: 'poster' | 'background', mediaItemId: number, rank: number): number {
         // `width`/`height` are the real 1x1 of `POSTER_PNG`, not the frame
         // the card renders: the replica carries them (artwork rows replicate
         // as `id`, owner, `width`, `height`, `language`, `rank`) but nothing
@@ -878,9 +888,13 @@ export const test = base.extend<{ harness: Harness }>({
         // with `media_item_id`, so it needs a value, and nothing should be
         // able to resolve it. It never replicates; the browser addresses
         // the row by id.
+        //
+        // The table name is interpolated from a two-member union, never
+        // from caller input.
+        const table = kind === 'poster' ? 'poster' : 'background';
         const result = raw.prepare(
-          'INSERT INTO poster (media_item_id, url, width, height, rank, created_at, path) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        ).run(mediaItemId, `http://artwork.invalid/${String(mediaItemId)}-${String(rank)}.png`, 1, 1, rank, Date.now(), posterPath);
+          `INSERT INTO ${table} (media_item_id, url, width, height, rank, created_at, path) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(mediaItemId, `http://artwork.invalid/${kind}-${String(mediaItemId)}-${String(rank)}.png`, 1, 1, rank, Date.now(), posterPath);
         return Number(result.lastInsertRowid);
       }
 
@@ -951,6 +965,7 @@ export const test = base.extend<{ harness: Harness }>({
         seedMediaItem,
         seedTvRelease,
         seedPoster,
+        seedArtwork,
         seedXxxScene,
         async seedUnmatchedRelease({ filename, feedName, lookupState, detail, lookupJson }) {
           const feed = await host.addFeed({

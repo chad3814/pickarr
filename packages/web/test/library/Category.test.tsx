@@ -11,7 +11,7 @@ import { listCatalog } from '../../src/store/catalog.ts';
 import { done } from '../../src/store/idb.ts';
 import { subscribe, subscribeCatalog, subscribeInserts, subscribeTouched } from '../../src/store/notify.ts';
 import { gatherMediaItem } from '../../src/store/gather.ts';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import type { ReactElement } from 'react';
 import { Category, type CategorySource } from '../../src/library/Category.tsx';
 import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
@@ -551,3 +551,46 @@ for (const entry of ['/tv', '/tv?q=show']) {
     db.close();
   });
 }
+
+function SearchProbe(): ReactElement {
+  return <output data-testid="search">{useLocation().search}</output>;
+}
+
+test('view=grid lists through the catalog as tiles, and the toggle writes the URL both ways', async () => {
+  const db = await freshDb();
+  await seed(db, [mediaItem({ id: 1, pluginId: 'tv', title: 'Alpha Show', updatedAt: 10 })]);
+  renderAt(
+    <>
+      <SearchProbe />
+      <Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />
+    </>,
+    '/tv?view=grid',
+  );
+  await waitFor(() => { assert.ok(screen.getByRole('list')); });
+  assert.equal(screen.getByRole('list').getAttribute('data-tile'), 'background', 'television browses by background');
+  assert.ok(screen.getByRole('button', { name: /Alpha Show/ }));
+  assert.ok(!screen.queryByRole('heading', { name: /Alpha Show/ }), 'no list card is rendered alongside the grid');
+
+  fireEvent.click(screen.getByRole('radio', { name: 'List' }));
+  await waitFor(() => { assert.ok(screen.getByRole('heading', { name: /Alpha Show/ })); });
+  assert.ok(!screen.queryByRole('list'), 'the grid is gone');
+  assert.equal(screen.getByTestId('search').textContent, '', 'List writes the URL without a view');
+
+  fireEvent.click(screen.getByRole('radio', { name: 'Grid' }));
+  await waitFor(() => { assert.ok(screen.getByRole('list')); });
+  assert.ok(screen.getByRole('button', { name: /Alpha Show/ }), 'the tiles are back');
+  assert.equal(screen.getByTestId('search').textContent, '?view=grid', 'Grid writes the URL with view=grid');
+  db.close();
+});
+
+test('the grid honours the filter and the search, and a grid with nothing to show says what it is empty of', async () => {
+  const db = await freshDb();
+  await seedPickedAndNot(db);
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?view=grid&filter=picked');
+  await waitFor(() => { assert.equal(screen.getAllByRole('listitem').length, 2); });
+  assert.ok(screen.getByRole('button', { name: /Gamma Show/ }));
+  assert.ok(!screen.queryByRole('button', { name: /Beta Show/ }));
+  cleanup();
+  renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?view=grid&filter=unpicked&q=zzz');
+  await waitFor(() => { assert.ok(screen.getByText('Nothing matches "zzz" among unpicked items')); });
+});
