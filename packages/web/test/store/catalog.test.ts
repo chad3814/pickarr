@@ -11,7 +11,7 @@ async function seedCatalog(db: IDBDatabase, records: readonly CatalogRecord[]): 
   await done(tx);
 }
 const rec = (id: number, updatedAt: number, picked: 0 | 1, haystack: string, pluginId = 'tv'): CatalogRecord =>
-  ({ id, pluginId, updatedAt, picked, haystack });
+  ({ id, pluginId, updatedAt, picked, haystack, poster: null, background: null });
 
 test('normalizeTerm trims, lowercases and collapses whitespace', () => {
   assert.equal(normalizeTerm('  Dune   Part\tTwo '), 'dune part two');

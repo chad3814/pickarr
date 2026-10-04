@@ -87,7 +87,7 @@ test('bumping the schema version rebuilds the replica rather than throwing', asy
 test('the per-category index exists, and holds only rows that project a pluginId', async () => {
   const db = await openStore(freshDbName());
   try {
-    assert.equal(SCHEMA_VERSION, 4, 'the current schema, which still carries this index');
+    assert.equal(SCHEMA_VERSION, 5, 'the current schema: the catalog record grew poster and background in phase 8');
     const index = db.transaction('rows').objectStore('rows').index('by_table_plugin_updated');
     assert.deepEqual(
       [...index.keyPath],
@@ -203,7 +203,7 @@ test('the catalog store with its two indexes, and by_person on rows, present sin
   assert.deepEqual(catalog.index('by_plugin_picked_updated').keyPath, ['pluginId', 'picked', 'updatedAt', 'id']);
   assert.deepEqual(catalog.index('by_plugin_updated').keyPath, ['pluginId', 'updatedAt', 'id']);
   assert.equal(tx.objectStore('rows').index('by_person').keyPath, 'value.personId');
-  assert.equal(db.version, 4);
+  assert.equal(db.version, 5);
   db.close();
 });
 

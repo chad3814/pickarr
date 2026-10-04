@@ -32,6 +32,8 @@ async function seed(db: IDBDatabase, items: readonly SeedItem[]): Promise<void> 
       updatedAt: item.updatedAt,
       picked: item.picked,
       haystack: item.title.toLowerCase(),
+      poster: null,
+      background: null,
     };
     catalog.put(record);
     if (item.rowMissing === true) continue;
