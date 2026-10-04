@@ -52,7 +52,7 @@ import type {
   RssItemSyncRead,
   TorrentDownloadSyncRead,
 } from '@pickarr/contract';
-import type { GatheredItemView } from '@pickarr/plugin-ui';
+import { CAST_LIMIT, topBilled, type GatheredItemView } from '@pickarr/plugin-ui';
 import type { StoredRow } from './db.ts';
 import { byMediaItem, byPersonIds, byRssItem, getRow, getRows } from './rows.ts';
 
@@ -214,7 +214,12 @@ export interface GatheredRole {
   readonly id: number;
   readonly row: RoleSyncRead;
   readonly person: PersonSyncRead | undefined;
-  /** This person's pictures, best first; empty when the replica holds none. */
+  /**
+   * This person's pictures, best first. Empty when the replica holds none,
+   * and empty for a person `topBilled` would not place in the card's first
+   * `CAST_LIMIT` -- see `gatherMediaItem` on why those are read for the
+   * shown cast only (#110).
+   */
   readonly images: readonly GatheredImage[];
 }
 
@@ -254,11 +259,11 @@ async function gatherRelease(
   return { id, row: value, downloads };
 }
 
+/** A role and its person, with no pictures yet: `gatherMediaItem` attaches those after choosing whose to read. */
 function gatherRole(
   id: number,
   value: unknown,
   people: ReadonlyMap<number, unknown>,
-  images: ReadonlyMap<number, readonly GatheredImage[]>,
 ): GatheredRole | undefined {
   if (!isRole(value)) return undefined;
   const personValue = people.get(value.personId);
@@ -270,7 +275,7 @@ function gatherRole(
     id,
     row: value,
     person: personValue !== undefined && isPerson(personValue) ? personValue : undefined,
-    images: images.get(value.personId) ?? [],
+    images: [],
   };
 }
 
@@ -282,9 +287,20 @@ function gatherRole(
  * same answer).
  *
  * One `byMediaItem` query supplies the item's releases, roles and artwork
- * together, and one `byPersonIds` read its cast's pictures;
- * only the downloads under each release need a query of their own, one per
- * release, over `byRssItem`.
+ * together; only the downloads under each release need a query of their
+ * own, one per release, over `byRssItem`.
+ *
+ * **Pictures are read for the people the card will show, not for every
+ * role (#110).** `byPersonIds` costs one `by_person` read per person, and
+ * `MediaDetails` renders `topBilled(roles, CAST_LIMIT)` -- five people --
+ * while an item can carry a cast of dozens, and an open card re-gathers
+ * on every artwork or download change. So the roles are built first, the
+ * card's own `topBilled` picks the people it would show, and only those
+ * ids go to `byPersonIds`: at most `CAST_LIMIT` reads however long the
+ * cast. The rule and the count are imported from `@pickarr/plugin-ui`
+ * rather than restated here, so the store cannot read pictures for a
+ * different five than the card shows. `test/store/gather.test.ts` counts
+ * the reads.
  */
 export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Promise<GatheredItem | undefined> {
   const mediaItemValue = await getRow(db, 'media_item', mediaItemId);
@@ -305,20 +321,26 @@ export async function gatherMediaItem(db: IDBDatabase, mediaItemId: number): Pro
     logos: toImages('logo', rows.filter((row) => row.table === 'logo'), isArtworkRow),
   };
 
+  const releasesGathering = Promise.all(releaseRows.map((row) => gatherRelease(db, row.id, row.value)));
+
   const personIds = [...new Set(
     roleRows.flatMap((row) => (isRole(row.value) ? [row.value.personId] : [])),
   )];
-  const [people, personRows] = await Promise.all([getRows(db, 'person', personIds), byPersonIds(db, personIds)]);
+  const people = await getRows(db, 'person', personIds);
+  const unpictured = roleRows
+    .map((row) => gatherRole(row.id, row.value, people))
+    .filter((role): role is GatheredRole => role !== undefined);
+  const shownIds = [...new Set(topBilled(unpictured, CAST_LIMIT).map((role) => role.row.personId))];
+  const personRows = await byPersonIds(db, shownIds);
   const images = new Map<number, GatheredImage[]>();
   for (const [personId, pictures] of personRows) {
     images.set(personId, toImages('person', pictures.filter((row) => row.table === 'person_image'), isPersonImageRow));
   }
+  const roles: GatheredRole[] = [];
+  for (const role of unpictured) roles.push({ ...role, images: images.get(role.row.personId) ?? [] });
 
-  const gathered = await Promise.all(releaseRows.map((row) => gatherRelease(db, row.id, row.value)));
+  const gathered = await releasesGathering;
   const releases = gathered.filter((release): release is GatheredRelease => release !== undefined);
-  const roles = roleRows
-    .map((row) => gatherRole(row.id, row.value, people, images))
-    .filter((role): role is GatheredRole => role !== undefined);
   const feedIds = [...new Set(releases.map((release) => release.row.feedId))].toSorted((a, b) => a - b);
 
   return { mediaItem, pluginId: mediaItem.pluginId, releases, roles, artwork, feedIds };

@@ -67,7 +67,13 @@ export interface GatheredRoleView {
    * log order is not group order, so a role can land before its person.
    */
   readonly person: PersonSyncRead | undefined;
-  /** This person's pictures, best first; empty when the replica holds none. */
+  /**
+   * This person's pictures, best first. Empty when the replica holds none,
+   * and empty for a person `topBilled` would not place in the first
+   * `CAST_LIMIT`: the gather reads pictures only for the people this card
+   * shows (#110), so a role outside that cut carries none even when the
+   * replica has them.
+   */
   readonly images: readonly GatheredImageView[];
 }
 
