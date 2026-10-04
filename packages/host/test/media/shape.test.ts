@@ -190,7 +190,7 @@ test('`..` inside a value is *not* refused: it traverses nothing unless it is th
   assert.equal(pathOf(result), 'Rocky..Balboa.mkv');
 });
 
-test('a value of `.. ` -- two dots and a trailing space -- is refused, because Win32 would trim it to `..`', () => {
+test('a value of `.. ` -- two dots and a trailing space -- is refused, because it reads as `..` and no one meant it', () => {
   assertRefusal(
     resolveShape('{series}/{title}.{ext}', { series: '.. ', title: 'Live', ext: 'mkv' }),
     'escapes-root',
@@ -198,10 +198,10 @@ test('a value of `.. ` -- two dots and a trailing space -- is refused, because W
 });
 
 test('`...` is *not* refused, which is the stated edge of the trailing-whitespace rule', () => {
-  // Win32 trims a trailing period as well as a trailing space, so `...`
-  // may behave differently there. That is not measurable on this host and
-  // stripping dots would rewrite the `Arrival.` pinned above, so the rule
-  // stops at whitespace and this test is where that boundary is written.
+  // On POSIX, the only platform this host runs on (#99), `...` is an
+  // ordinary directory name, and stripping dots would rewrite the
+  // `Arrival.` pinned above. The rule stops at whitespace and this test is
+  // where that boundary is written.
   const result = resolveShape('{series}/{title}.{ext}', {
     series: '...', title: 'Live', ext: 'mkv',
   });

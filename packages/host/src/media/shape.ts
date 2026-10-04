@@ -94,12 +94,14 @@
  *    exists to refuse.
  *
  * What is relied on instead: **`/` is the separator, in the shape and in
- * the result, on every platform.** Node's `fs` accepts `/` as a separator
- * on Windows as well as POSIX -- that is documented Node behaviour and this
- * tree cannot measure it, since only darwin was available here. A literal
- * backslash anywhere in a shape is refused (`backslash-in-shape`) rather
- * than carried through, so there is no second spelling for a separator to
- * disagree about.
+ * the result.** The host runs on POSIX -- in Docker, which is the supported
+ * deployment (`README.md`), or on a POSIX machine for development -- and
+ * Windows is out of scope (#99), so there is no second platform whose path
+ * rules this module has to reconcile with. A literal backslash anywhere in
+ * a shape is still refused (`backslash-in-shape`) rather than carried
+ * through: on POSIX it is an ordinary filename character, and a shape that
+ * used it would be laying out a library with a character no one types for
+ * any reason but a separator.
  */
 
 /**
@@ -271,10 +273,10 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
  * same directory with nothing recorded. A refusal leaves the row
  * `completed` and logs each tick -- visible, per §5, which is the property
  * that makes refusing safe rather than silent -- and the operator can fix
- * the title. `\` is refused on the same rule and on every platform, not
- * only on Windows where it separates, so that one shape and one title
- * cannot lay out a library two different ways depending on where pickarr
- * runs.
+ * the title. `\` is refused on the same rule: on POSIX it is an ordinary
+ * character, but a title carrying one would be laying out a library with
+ * the one character that means "separator" to anyone who reads the path,
+ * and this module does not become the place that spelling is decided.
  *
  * **Non-injectivity alone is not the argument, and this module does not
  * get to pretend it is.** Dropping a null segment is not injective either
@@ -294,20 +296,21 @@ function resolveSegment(segment: string, values: Readonly<Record<string, string 
  * whole by one value, or assembled from two values that are each innocent
  * alone.
  *
- * **"Every" there is POSIX, and the exception is trailing whitespace.**
- * Win32 trims a trailing space from a path component -- documented
- * Microsoft naming behaviour, not measured here, since only darwin was
- * available -- so a value of `'.. '` would name the parent directory
- * there while being an ordinary two-dot-and-a-space name on POSIX. The
- * segment check therefore compares with trailing whitespace stripped, so
- * `'.. '` is refused on both. What is deliberately **not** covered, and is
- * left uncovered rather than guessed at: Win32 also trims a trailing
- * *period*, which makes the handling of `'...'` and of the `Arrival.`
- * above platform-dependent in ways this host cannot measure. Stripping
- * trailing dots here would rewrite `Arrival.` -- a result this module
- * pins deliberately -- so the line is drawn at whitespace and the residue
- * is stated. A segment of spaces alone (`'   '`) is likewise kept as the
- * directory name POSIX says it is.
+ * **"Every" there is POSIX, which is the only platform this host runs on
+ * (#99).** This paragraph used to hedge three claims about Win32 -- that it
+ * trims a trailing space from a component, that it trims a trailing
+ * period, that Node's `fs` accepts `/` there -- none of them measurable on
+ * the machines available, and the decision is that they do not need to be:
+ * the supported deployment is Docker, and Windows is out of scope. One
+ * rule that came from that hedging stays, for a reason that holds on
+ * POSIX: a value of `'.. '` -- two dots and a trailing space -- is refused
+ * by comparing with trailing whitespace stripped. On POSIX it is a legal
+ * directory name, but it is one that reads as `..` to every person who
+ * looks at the path and that no title ever resolves to by accident, so
+ * refusing it costs nothing anyone wanted and keeps a traversal from
+ * hiding behind a space. `'...'` and `Arrival.` are what POSIX says they
+ * are, and the test suite pins both. A segment of spaces alone (`'   '`)
+ * is likewise kept as the directory name POSIX says it is.
  */
 export function resolveShape(
   shape: string,
@@ -373,9 +376,9 @@ export function validateShape(
   for (const [index, segment] of shapeSegments.entries()) {
     const result = resolveSegment(segment, values);
     if ('refusal' in result) return result;
-    // `trimEnd` before the comparison, not after: Win32 trims a trailing
-    // space from a component, so `'.. '` names the parent there. See the
-    // docblock's note on what that does and does not cover.
+    // `trimEnd` before the comparison: `'.. '` is a legal POSIX name that
+    // reads as `..` to anyone looking at the path, and refusing it costs
+    // nothing anyone wanted. See the docblock (#99).
     if (result.text.trimEnd() === '..') return { refusal: 'escapes-root', token: null };
     const isLast = index === shapeSegments.length - 1;
     if (result.text === '' || result.text === '.') {
@@ -467,8 +470,8 @@ export function unmatchedDirSegments(dir: string): UnmatchedDirPath | UnmatchedD
   const segments: string[] = [];
   for (const segment of dir.split(/[/\\]/)) {
     // `trimEnd` before the comparison, for the reason `resolveShape`
-    // records: Win32 trims a trailing space from a component, so `'.. '`
-    // names the parent there while being an ordinary name on POSIX.
+    // records: `'.. '` reads as `..` to anyone looking at the path, and no
+    // one meant it as a directory name.
     if (segment.trimEnd() === '..') return { refusal: 'escapes-root' };
     // An empty segment and a `.` both name the directory the path is
     // already in, so neither contributes a level. `'   '` is not one of
