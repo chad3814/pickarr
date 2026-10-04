@@ -20,6 +20,7 @@
  * is the whole reason `tables` is a declaration rather than a free read.
  */
 import type { ReactElement } from 'react';
+import type { MediaItemSyncRead } from '@pickarr/contract';
 import { CardHeading, MediaDetails, ReleaseList, useExpansion, type BrowserPlugin, type CardProps, type PluginRows } from '@pickarr/plugin-ui';
 
 /** The replica table this card reads, named once so the declaration and the read cannot drift. */
@@ -56,6 +57,17 @@ export function siteNameOf(rows: PluginRows): string | undefined {
     if (typeof siteName === 'string' && siteName !== '') return siteName;
   }
   return undefined;
+}
+
+/**
+ * `BrowserPlugin.caption` for a scene: the site first, then the title, or
+ * the title alone when there is no site to show (`siteNameOf`). The card's
+ * own heading keeps the site as a dimmed trailing label instead; a tile
+ * has one line, so the site leads it.
+ */
+export function xxxCaption(item: MediaItemSyncRead, rows: PluginRows): string {
+  const site = siteNameOf(rows);
+  return site === undefined ? item.title : `${site} ${item.title}`;
 }
 
 function XxxCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
@@ -97,5 +109,6 @@ export const xxxBrowser: BrowserPlugin = {
   label: 'XXX',
   tables: [SCENE_TABLE],
   tile: 'background',
+  caption: xxxCaption,
   Card: XxxCard,
 };

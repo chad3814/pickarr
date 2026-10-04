@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead, TvRead } from '@pickarr/contract';
 import type { GatheredItemView, IdentifySubmit, PickSubmit, PluginRows } from '@pickarr/plugin-ui';
-import { tvBrowser } from '../src/browser.tsx';
+import { tvBrowser, tvCaption } from '../src/browser.tsx';
 
 afterEach(cleanup);
 
@@ -229,4 +229,11 @@ test('a malformed tvdb providerRef yields no badge at all', () => {
     tvRelease({ kind: 'series', seriesRef: '184871' }),
   );
   assert.ok(!screen.queryByText('TVDb'), 'no url built from a reference this function could not parse');
+});
+
+test('the grid caption leads with the series and the episode number, and falls back to the title without a release row', () => {
+  const rows: PluginRows = { tv_release: [tvRelease({ seasonNumber: 1, episodeNumber: 2 })] };
+  assert.equal(tvCaption(mediaItem({ title: 'Pilot' }), rows), 'Jo Jo’s Bizarre Adventure S01E02 Pilot');
+  assert.equal(tvCaption(mediaItem({ title: 'Pilot' }), {}), 'Pilot', 'no tv_release row yet: the title alone');
+  assert.equal(tvBrowser.caption, tvCaption, 'the registry entry hands web the same function');
 });

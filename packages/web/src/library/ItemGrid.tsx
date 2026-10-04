@@ -60,29 +60,33 @@ function kindLabel(kind: TileKind): string {
 
 interface TileProps {
   item: MediaItemSyncRead;
+  /** The plugin's words for this tile (`BrowserPlugin.caption`): shown, announced, and offered on hover. */
+  caption: string;
   kind: TileKind;
   imageId: number | null;
   onOpen: (id: number) => void;
 }
 
-function Tile({ item, kind, imageId, onOpen }: TileProps): ReactElement {
+function Tile({ item, caption, kind, imageId, onOpen }: TileProps): ReactElement {
   // Latched per image id, not per tile: a 404 on this id stays a
   // placeholder, and a re-rank that changes the id is a fresh attempt.
   const [failedId, setFailedId] = useState<number | null>(null);
   const showImage = imageId !== null && failedId !== imageId;
   // The placeholder is an `svg role="img"` with its own name, which would
   // otherwise be folded into the button's name ("No poster for X X"); naming
-  // the button by its caption keeps it exactly the title either way.
+  // the button by its caption keeps it exactly the caption either way.
+  // `title` repeats the caption because the stylesheet truncates the span
+  // to one line with an ellipsis, and hover is how the rest is read.
   const captionId = useId();
   return (
     <li>
-      <button type="button" aria-haspopup="dialog" aria-labelledby={captionId} onClick={() => { onOpen(item.id); }}>
+      <button type="button" aria-haspopup="dialog" aria-labelledby={captionId} title={caption} onClick={() => { onOpen(item.id); }}>
         {showImage ? (
           <img src={artworkUrl(kind, imageId)} alt="" onError={() => { setFailedId(imageId); }} />
         ) : (
-          <ImagePlaceholder label={`No ${kindLabel(kind)} for ${item.title}`} />
+          <ImagePlaceholder label={`No ${kindLabel(kind)} for ${caption}`} />
         )}
-        <span id={captionId}>{item.title}</span>
+        <span id={captionId}>{caption}</span>
       </button>
     </li>
   );
@@ -94,7 +98,8 @@ export function ItemGrid({ store, pluginId, tables, submit, identify, result, em
   // the category routes with `BROWSER_PLUGINS.map(...)`, so a category only
   // mounts for a registered id and the fallback is for the type, not a
   // reachable case.
-  const kind: TileKind = pluginFor(pluginId)?.tile ?? 'poster';
+  const plugin = pluginFor(pluginId);
+  const kind: TileKind = plugin?.tile ?? 'poster';
 
   const mediaItemIds = useMemo(() => items.map((item) => item.id), [items]);
   const pluginRows = usePluginRows(store, mediaItemIds, tables);
@@ -121,7 +126,14 @@ export function ItemGrid({ store, pluginId, tables, submit, identify, result, em
     <div>
       <ul className="tiles" data-tile={kind} ref={listRef} tabIndex={-1}>
         {items.map((item) => (
-          <Tile key={item.id} item={item} kind={kind} imageId={imageFor(records.get(item.id), kind)} onOpen={setOpenId} />
+          <Tile
+            key={item.id}
+            item={item}
+            caption={plugin?.caption(item, pluginRows.get(item.id) ?? emptyRows) ?? item.title}
+            kind={kind}
+            imageId={imageFor(records.get(item.id), kind)}
+            onOpen={setOpenId}
+          />
         ))}
       </ul>
       {!done && (
@@ -131,7 +143,11 @@ export function ItemGrid({ store, pluginId, tables, submit, identify, result, em
         </>
       )}
       {openItem !== undefined && (
-        <Dialog label={openItem.title} className="item-dialog" onClose={() => { setOpenId(null); }}>
+        <Dialog
+          label={plugin?.caption(openItem, pluginRows.get(openItem.id) ?? emptyRows) ?? openItem.title}
+          className="item-dialog"
+          onClose={() => { setOpenId(null); }}
+        >
           <button type="button" onClick={() => { setOpenId(null); }}>Close</button>
           <MediaItemCard
             source={store}

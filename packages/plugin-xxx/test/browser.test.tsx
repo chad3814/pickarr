@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import type { MediaItemSyncRead } from '@pickarr/contract';
 import type { IdentifySubmit, PickSubmit } from '@pickarr/plugin-ui';
-import { xxxBrowser, siteNameOf } from '../src/browser.tsx';
+import { xxxBrowser, xxxCaption, siteNameOf } from '../src/browser.tsx';
 
 afterEach(cleanup);
 
@@ -172,4 +172,11 @@ test('every expand and every collapse is reported, with the state the card moved
   fireEvent.click(button);
   fireEvent.click(button);
   assert.deepEqual(reported, [true, false, true], 'open, close, open -- each reported once, in order');
+});
+
+test('the grid caption leads with the site, separated by a space, and is the title alone when there is no site', () => {
+  assert.equal(xxxCaption(mediaItem({ title: 'A Scene' }), sceneRows('Some Site')), 'Some Site A Scene');
+  assert.equal(xxxCaption(mediaItem({ title: 'A Scene' }), sceneRows(null)), 'A Scene');
+  assert.equal(xxxCaption(mediaItem({ title: 'A Scene' }), {}), 'A Scene', 'no scene row at all');
+  assert.equal(xxxBrowser.caption, xxxCaption, 'the registry entry hands web the same function');
 });

@@ -36,6 +36,7 @@ import {
   useExpansion,
   type BrowserPlugin,
   type CardProps,
+  type PluginRows,
   type ExternalLink,
 } from '@pickarr/plugin-ui';
 import { tvHeadline } from './headline.ts';
@@ -152,13 +153,22 @@ function tvdbExtraLinks(item: MediaItemSyncRead, release: TvRead | undefined): r
  * finding 1 -- the TVDb link `tvdbExtraLinks` supplies through the same
  * `extraLinks` seam `plugin-movie` uses for IMDb.
  */
+/**
+ * `BrowserPlugin.caption` for television, and the card's own headline: the
+ * series, the `SxxExx`, then the title (`tvHeadline`). An item with no
+ * `tv_release` row, or one that failed `isTvRelease`, is captioned by
+ * `item.title` alone -- there is no series or episode number to build a
+ * headline out of.
+ */
+export function tvCaption(item: MediaItemSyncRead, rows: PluginRows): string {
+  const release = tvRelease(rows);
+  return release === undefined ? item.title : tvHeadline(release, item.title);
+}
+
 function TvCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
   const { expanded, toggle } = useExpansion(onExpandedChange, initiallyExpanded);
   const release = tvRelease(rows);
-  // An item with no `tv_release` row, or one that failed `isTvRelease`,
-  // renders `item.title` alone -- there is no series or episode number to
-  // build a headline out of.
-  const headline = release === undefined ? item.title : tvHeadline(release, item.title);
+  const headline = tvCaption(item, rows);
   const extraLinks = tvdbExtraLinks(item, release);
 
   return (
@@ -179,5 +189,6 @@ export const tvBrowser: BrowserPlugin = {
   label: 'TV',
   tables: [TV_RELEASE_TABLE],
   tile: 'background',
+  caption: tvCaption,
   Card: TvCard,
 };
