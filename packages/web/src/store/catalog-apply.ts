@@ -9,8 +9,8 @@
  * download before its release, a role before its person, a release before
  * its item -- all read the same final state. The haystack costs two reads
  * per affected item plus one per role with a person id (an absent item
- * costs two in all), and the two image ids come from the first of those
- * reads.
+ * costs two in all), and the two image ids come from the `by_media_item`
+ * read, so they add none.
  *
  * **Except `picked`, which is one bit and used to cost one read per
  * release (#108).** "Any download row exists for any release of this item"
