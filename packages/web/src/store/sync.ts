@@ -72,6 +72,20 @@ export const LEASE_NAME = 'pickarr-sync';
  * answers `undefined` there), or the connection is currently down -- the
  * poll is the whole mechanism again, and {@link TAIL_INTERVAL_POLLING_MS} is
  * the faster cadence `TAIL_INTERVAL_MS` used to be unconditionally.
+ *
+ * **Neither cadence applies while the tail is catching up (#112).** A page
+ * whose cursor moved is followed by the next request at once, and only a
+ * page that moved nothing waits for the interval -- the rule the backfill
+ * has always run under (`BACKFILL_IDLE_MS`). Before this, every page waited,
+ * full or not, and a nudge bought one more: a replica bootstrapped 128k
+ * entries below the log's top -- measured on a live install, with every
+ * artwork row above the cursor -- took hours to show a poster the host
+ * could have served in a 22-second walk. "The cursor moved" rather than "the
+ * page was full": the client does not know the server's page size, and a
+ * page can be short with more behind it, since the server reads a page of
+ * entries and emits ops only for the tables it knows. The cost is one extra
+ * request after each burst of changes, which comes back with the cursor
+ * where it was and drops the loop to its cadence.
  */
 export const TAIL_INTERVAL_STREAMING_MS = 30_000;
 export const TAIL_INTERVAL_POLLING_MS = 3_000;
@@ -413,8 +427,10 @@ function refuseWrongKinds(loop: SyncLoop, ops: readonly SyncOp[]): void {
 
 /** What one tick did, and whether its loop should be scheduled again. */
 type Outcome =
-  /** Schedule this loop again. */
+  /** Schedule this loop again, at its cadence. */
   | 'continue'
+  /** The tail's cursor moved, so the log may hold more: schedule it again at once (#112). */
+  | 'more'
   /** The backfill answered a null cursor. Exhaustion is permanent (sync design §5.2) -- do not schedule it again. */
   | 'retired'
   /** Something else has already scheduled this loop -- the reset does, for both. */
@@ -873,7 +889,8 @@ export function startSync(deps: SyncDeps): SyncHandle {
       if (changed.touched.size > 0) {
         broadcast({ type: 'changed', changed: serializeChanged(changed) });
       }
-      return retired ? 'retired' : 'continue';
+      if (retired) return 'retired';
+      return loop === 'tail' && next.since !== fresh.cursors.since ? 'more' : 'continue';
     });
   }
 
@@ -885,6 +902,13 @@ export function startSync(deps: SyncDeps): SyncHandle {
     try {
       const outcome = await runOnce(loop);
       failures.delete(loop);
+      if (outcome === 'more') {
+        // Catching up (#112): the next page now, and a nudge that landed
+        // meanwhile asks for nothing this does not already do.
+        nudged = false;
+        schedule(loop, 0);
+        return;
+      }
       if (outcome !== 'continue') return;
       if (loop === 'tail' && nudged) {
         // A nudge landed while this tick was already running (`onChanged`
