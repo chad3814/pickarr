@@ -72,6 +72,9 @@ test('a television tile shows the background, opens the card in a dialog, takes 
 
   // The grid is laid out by `.tiles`, not by the UA's list defaults.
   await expect(grid).toHaveCSS('display', 'grid');
+  // The browse controls stay in reach while the grid scrolls: `library.css`
+  // makes the form sticky, which the UA default never does.
+  await expect(page.getByRole('search', { name: 'Filter and search' })).toHaveCSS('position', 'sticky');
   // And the tile rules apply: `.tiles button` draws its border with the line
   // token, which a gutted stylesheet would not.
   const { borderTopColor, lineTokenColor } = await borderTopAgainstLineToken(page, '.tiles button');
