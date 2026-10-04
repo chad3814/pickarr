@@ -84,9 +84,11 @@ export interface MediaItemCardProps {
    * `submit` is.
    */
   identify: IdentifySubmit;
+  /** Open expanded, gathering on mount: what the grid's dialog asks for (design spec 2026-10-04 §3.4). */
+  initiallyExpanded?: boolean;
 }
 
-export function MediaItemCard({ source, item, rows, submit, identify }: MediaItemCardProps): ReactElement {
+export function MediaItemCard({ source, item, rows, submit, identify, initiallyExpanded = false }: MediaItemCardProps): ReactElement {
   /**
    * The plugin card's own expanded state, mirrored here because that is
    * what decides whether to gather. The plugin owns the state and reports
@@ -105,7 +107,7 @@ export function MediaItemCard({ source, item, rows, submit, identify }: MediaIte
    * now holds 0 and costs 0. `@pickarr/plugin-ui`'s `onExpandedChange` doc
    * has the contract reasoning.
    */
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const gathered = useGatheredItem(source, item.id, expanded);
 
   // `useCallback` so the plugin's card gets the same function every render.
@@ -156,7 +158,7 @@ export function MediaItemCard({ source, item, rows, submit, identify }: MediaIte
       {plugin === undefined ? (
         <h2>{item.title}</h2>
       ) : (
-        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} submit={submit} identify={identify} />
+        <plugin.Card item={item} rows={rows} gathered={gathered} onExpandedChange={onExpandedChange} initiallyExpanded={initiallyExpanded} submit={submit} identify={identify} />
       )}
     </article>
   );

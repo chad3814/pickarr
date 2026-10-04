@@ -152,8 +152,8 @@ function tvdbExtraLinks(item: MediaItemSyncRead, release: TvRead | undefined): r
  * finding 1 -- the TVDb link `tvdbExtraLinks` supplies through the same
  * `extraLinks` seam `plugin-movie` uses for IMDb.
  */
-function TvCard({ item, rows, gathered, onExpandedChange, submit, identify }: CardProps): ReactElement {
-  const { expanded, toggle } = useExpansion(onExpandedChange);
+function TvCard({ item, rows, gathered, onExpandedChange, initiallyExpanded, submit, identify }: CardProps): ReactElement {
+  const { expanded, toggle } = useExpansion(onExpandedChange, initiallyExpanded);
   const release = tvRelease(rows);
   // An item with no `tv_release` row, or one that failed `isTvRelease`,
   // renders `item.title` alone -- there is no series or episode number to
@@ -178,5 +178,6 @@ export const tvBrowser: BrowserPlugin = {
   id: 'tv',
   label: 'TV',
   tables: [TV_RELEASE_TABLE],
+  tile: 'background',
   Card: TvCard,
 };

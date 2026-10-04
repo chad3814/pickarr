@@ -229,6 +229,22 @@ test('a card gathers nothing until it is opened, and opening it gathers once', a
   assert.equal(gathers, 1);
 });
 
+test('a card asked to open expanded gathers on mount, before anyone clicks', async () => {
+  let gathers = 0;
+  const source: GatheredSource = {
+    ...quietInserts,
+    gatherMediaItem: async (id: number) => {
+      gathers += 1;
+      return gathered({ id, title: 'The Thing' });
+    },
+    subscribe: () => () => {},
+  };
+  render(<MediaItemCard source={source} item={summary({ id: 7, title: 'The Thing' })} rows={NO_ROWS} submit={acceptsPick} identify={throwsOnUse} initiallyExpanded />);
+  await waitFor(() => {
+    assert.equal(gathers, 1);
+  });
+});
+
 test('closing a card tears its subscriptions down, and reopening gathers again behind the cache', async () => {
   // **The behaviour `CardProps.onExpandedChange` exists to make possible.**
   // The seam first shipped with only an `onExpand`, so web could not learn

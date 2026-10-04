@@ -195,6 +195,13 @@ test("web's src imports each plugin's /browser subpath, never its package root",
   assert.deepEqual(offenders, [], "import the plugin's /browser subpath, not its package root");
 });
 
+test('each plugin declares the image kind its grid tiles show: posters for film, backgrounds for television and adult', () => {
+  assert.deepEqual(
+    BROWSER_PLUGINS.map((plugin) => [plugin.id, plugin.tile]),
+    [['tv', 'background'], ['movie', 'poster'], ['xxx', 'background']],
+  );
+});
+
 test('the registry holds the three shipped plugins, with the ids and labels the nav and the settings rows show', () => {
   // **Spelled out, not derived.** `CLAUDE.md`: an expectation computed by
   // the code under test cannot detect that code changing. This replaces
