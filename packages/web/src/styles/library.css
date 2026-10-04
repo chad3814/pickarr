@@ -723,10 +723,12 @@ section > p:not(.details-foot) {
 .details-foot { display: flex; justify-content: space-between; align-items: baseline; margin: 0; }
 .details-foot small { color: var(--color-text-dim); }
 
-/* The gallery: a real overlay, because a dialog that is merely in the
-   accessibility tree renders as an unstyled block of text -- see the
-   IdentityChangeConfirm entry in CLAUDE.md. */
-.gallery-backdrop {
+/* Every dialog's backdrop (`plugin-ui`'s `Dialog`): a real overlay, because
+   a dialog that is merely in the accessibility tree renders as an unstyled
+   block of text -- see the IdentityChangeConfirm entry in CLAUDE.md. The
+   panel inside is styled per kind: `.gallery` below, `.item-dialog` in the
+   grid section. */
+.dialog-backdrop {
   position: fixed; inset: 0; z-index: 10;
   display: flex; align-items: center; justify-content: center;
   background: rgb(0 0 0 / 70%);

@@ -173,7 +173,7 @@ test('the gallery opens as an overlay covering the viewport, and its image escap
   // A dialog that is merely in the accessibility tree renders inline as a
   // block of text. The backdrop covering the viewport is what distinguishes
   // an overlay from that, and `toBeVisible()` does not.
-  const backdrop = page.locator('.gallery-backdrop');
+  const backdrop = page.locator('.dialog-backdrop');
   const backdropBox = await backdrop.boundingBox();
   const viewport = page.viewportSize();
   expect(backdropBox).not.toBeNull();

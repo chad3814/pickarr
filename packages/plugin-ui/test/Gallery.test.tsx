@@ -1,6 +1,5 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ReactElement } from 'react';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { Gallery } from '../src/Gallery.tsx';
 
@@ -196,85 +195,7 @@ test('a subject whose every image fails closes rather than showing an empty fram
   });
 });
 
-test('Escape closes the gallery', () => {
-  let closed = false;
-  render(<Gallery images={[{ url: "/api/artwork/poster/1", caption: "Blockers" }]} startUrl={'/api/artwork/poster/1'} onClose={() => { closed = true; }} />);
-
-  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
-
-  assert.ok(closed, 'Escape asked to close');
-});
-
-test('focus moves into the gallery when it opens', () => {
-  render(<Gallery images={[{ url: "/api/artwork/poster/1", caption: "Blockers" }]} startUrl={'/api/artwork/poster/1'} onClose={noop} />);
-
-  // Compared as a boolean, never `assert.equal(document.activeElement,
-  // element)` -- handing two live nodes to `node:assert` formats both and
-  // kills the run. `scripts/check-test-hygiene.ts` fails the build on it.
-  assert.ok(
-    screen.getByRole('dialog').contains(document.activeElement),
-    'focus is inside the dialog',
-  );
-});
-
 test('an empty url list renders nothing at all', () => {
   const { container } = render(<Gallery images={[]} startUrl={''} onClose={noop} />);
   assert.equal(container.innerHTML, '');
-});
-
-test('Tab wraps within the dialog, and Shift+Tab wraps the other way', () => {
-  // The dialog's only focusable element is the Close button, so a correct
-  // trap wraps in either direction back onto itself -- jsdom performs no
-  // native Tab traversal at all, so an untrapped Tab keydown would *also*
-  // leave focus on Close, and a bare `activeElement` assertion cannot tell
-  // the two apart. The trap's actual, observable behaviour is that it
-  // intercepts the key: `fireEvent` returns the boolean DOM
-  // `dispatchEvent` produces, which is `false` exactly when something
-  // called `preventDefault()`. Comparing that boolean is not a comparison
-  // of live nodes.
-  render(<Gallery images={[{ url: "/api/artwork/poster/1", caption: "Blockers" }]} startUrl={'/api/artwork/poster/1'} onClose={noop} />);
-
-  const closeButton = screen.getByRole('button', { name: 'Close' });
-  closeButton.focus();
-
-  const tabNotCancelled = fireEvent.keyDown(closeButton, { key: 'Tab' });
-  assert.equal(tabNotCancelled, false, 'Tab from the last (and only) element was intercepted, not left to default traversal');
-  assert.ok(screen.getByRole('dialog').contains(document.activeElement), 'focus is still inside the dialog after Tab');
-
-  const shiftTabNotCancelled = fireEvent.keyDown(closeButton, { key: 'Tab', shiftKey: true });
-  assert.equal(shiftTabNotCancelled, false, 'Shift+Tab from the first (and only) element was intercepted, not left to default traversal');
-  assert.ok(screen.getByRole('dialog').contains(document.activeElement), 'focus is still inside the dialog after Shift+Tab');
-});
-
-test('closing the gallery returns focus to the control that opened it', () => {
-  function Harness({ showGallery }: { showGallery: boolean }): ReactElement {
-    return (
-      <div>
-        <button type="button">Open</button>
-        {showGallery && (
-          <Gallery images={[{ url: "/api/artwork/poster/1", caption: "Blockers" }]} startUrl={'/api/artwork/poster/1'} onClose={noop} />
-        )}
-      </div>
-    );
-  }
-
-  const { rerender } = render(<Harness showGallery={false} />);
-  const openButton = screen.getByRole('button', { name: 'Open' });
-  openButton.focus();
-  assert.ok(openButton.contains(document.activeElement), 'focus starts on the opener');
-
-  rerender(<Harness showGallery={true} />);
-  assert.ok(screen.getByRole('dialog').contains(document.activeElement), 'focus moved into the dialog');
-
-  rerender(<Harness showGallery={false} />);
-  // Unmounting the gallery removes whatever held focus from the document,
-  // and jsdom then falls `document.activeElement` back to `<body>`. With
-  // only "<div><button>Open</button></div>" left in the document at this
-  // point, `document.body.textContent` is coincidentally also `'Open'`, so
-  // asserting on textContent alone cannot tell "focus was restored to the
-  // button" apart from "focus was lost to the body" -- it passed even with
-  // `opener.focus()` deleted from Gallery.tsx entirely. `contains()` does
-  // not have that ambiguity: the button contains itself, but does not
-  // contain `<body>`.
-  assert.ok(openButton.contains(document.activeElement), 'focus returned to the opener, not lost to <body>');
 });

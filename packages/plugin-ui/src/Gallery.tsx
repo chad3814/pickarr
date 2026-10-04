@@ -16,7 +16,8 @@
  * reads as a bug, and there is nothing to look at.
  */
 import type { KeyboardEvent, ReactElement } from 'react';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import { Dialog } from './Dialog.tsx';
 
 /** One image and who it is of -- the attribution shown beneath it. */
 export interface GalleryImage {
@@ -70,12 +71,8 @@ function nextSurvivor(
   return undefined;
 }
 
-const FOCUSABLE_SELECTOR =
-  'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
 export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactElement | null {
   const headingId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState<readonly string[]>([]);
   const [currentUrl, setCurrentUrl] = useState(startUrl);
 
@@ -99,19 +96,6 @@ export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactEleme
   const index = found === -1 ? 0 : found;
   const current = showing[index];
 
-  // Focus moves in on open so Escape and Tab reach the dialog rather than
-  // the page behind it, and back out on close: to the control that opened
-  // it, not the top of the document.
-  useEffect(() => {
-    const opener = document.activeElement;
-    dialogRef.current?.focus();
-    return () => {
-      if (opener instanceof HTMLElement && document.contains(opener)) {
-        opener.focus();
-      }
-    };
-  }, []);
-
   // Every image failed: there is nothing to show. Asked for in an effect
   // rather than during render, because calling a parent's setter while
   // rendering is a React error.
@@ -127,98 +111,58 @@ export function Gallery({ images, startUrl, onClose }: GalleryProps): ReactEleme
     if (next !== undefined) setCurrentUrl(next.url);
   }
 
-  // Keeps Tab and Shift+Tab inside the dialog: leaving its focusable
-  // elements at either end wraps to the other end instead of escaping to
-  // the page behind the backdrop, which is also where the Escape handler
-  // lives -- focus leaving the subtree would take Escape with it.
+  // Arrow keys walk the set, the same way the buttons do. Without them
+  // the only way through a gallery is the mouse. `Dialog` handles Escape,
+  // Tab and focus, and hands every other key here.
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
-    if (event.key === 'Escape') {
-      onClose();
-      return;
-    }
-    // Arrow keys walk the set, the same way the buttons do. Without them
-    // the only way through a gallery is the mouse, which is the gap the
-    // focus trap above exists to avoid everywhere else.
     if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
       event.preventDefault();
       step(event.key === 'ArrowRight' ? 1 : -1);
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (!first || !last) return;
-    const active = document.activeElement;
-    if (event.shiftKey) {
-      if (active === first || !dialog.contains(active)) {
-        event.preventDefault();
-        last.focus();
-      }
-    } else if (active === last || !dialog.contains(active)) {
-      event.preventDefault();
-      first.focus();
     }
   }
 
   return (
-    <div className="gallery-backdrop" onClick={onClose}>
-      <div
-        className="gallery"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        tabIndex={-1}
-        ref={dialogRef}
-        onKeyDown={handleKeyDown}
-        // The backdrop closes on click; a click on the dialog itself must
-        // not bubble up to it and close the thing being looked at.
-        onClick={(event) => {
-          event.stopPropagation();
+    <Dialog labelledBy={headingId} className="gallery" onClose={onClose} onKeyDown={handleKeyDown}>
+      <h2 id={headingId}>{current.caption}</h2>
+      {/*
+        One image, keyed by url so React swaps the element rather than
+        reusing it: a reused `<img>` keeps painting the previous picture
+        until the next decodes, which reads as the arrows not working.
+      */}
+      <img
+        key={current.url}
+        src={current.url}
+        alt={current.caption}
+        onError={() => {
+          const dead = current.url;
+          // Move first, drop second. The next survivor is chosen from
+          // `images` -- the full list, in its original order -- rather
+          // than from `showing`, because `showing` still contains the
+          // dead url at this point and will not a render later. Picking
+          // from the full list means the position survives the removal
+          // instead of being re-derived from a set the current url has
+          // just left.
+          const next = nextSurvivor(images, failed, dead);
+          if (next !== undefined) setCurrentUrl(next);
+          setFailed((previous) => (previous.includes(dead) ? previous : [...previous, dead]));
         }}
-      >
-        <h2 id={headingId}>{current.caption}</h2>
+      />
+      <p className="gallery-controls">
         {/*
-          One image, keyed by url so React swaps the element rather than
-          reusing it: a reused `<img>` keeps painting the previous picture
-          until the next decodes, which reads as the arrows not working.
+          Both arrows render whenever there is more than one image, and
+          wrap rather than disabling at the ends -- a disabled control a
+          keyboard user has tabbed to is a dead end with no announcement.
         */}
-        <img
-          key={current.url}
-          src={current.url}
-          alt={current.caption}
-          onError={() => {
-            const dead = current.url;
-            // Move first, drop second. The next survivor is chosen from
-            // `images` -- the full list, in its original order -- rather
-            // than from `showing`, because `showing` still contains the
-            // dead url at this point and will not a render later. Picking
-            // from the full list means the position survives the removal
-            // instead of being re-derived from a set the current url has
-            // just left.
-            const next = nextSurvivor(images, failed, dead);
-            if (next !== undefined) setCurrentUrl(next);
-            setFailed((previous) => (previous.includes(dead) ? previous : [...previous, dead]));
-          }}
-        />
-        <p className="gallery-controls">
-          {/*
-            Both arrows render whenever there is more than one image, and
-            wrap rather than disabling at the ends -- a disabled control a
-            keyboard user has tabbed to is a dead end with no announcement.
-          */}
-          {showing.length > 1 && (
-            <button type="button" aria-label="Previous image" onClick={() => { step(-1); }}>←</button>
-          )}
-          <span>{index + 1} of {showing.length}</span>
-          {showing.length > 1 && (
-            <button type="button" aria-label="Next image" onClick={() => { step(1); }}>→</button>
-          )}
-        </p>
-        <button type="button" onClick={onClose}>Close</button>
-      </div>
-    </div>
+        {showing.length > 1 && (
+          <button type="button" aria-label="Previous image" onClick={() => { step(-1); }}>←</button>
+        )}
+        <span>{index + 1} of {showing.length}</span>
+        {showing.length > 1 && (
+          <button type="button" aria-label="Next image" onClick={() => { step(1); }}>→</button>
+        )}
+      </p>
+      <button type="button" onClick={onClose}>Close</button>
+    </Dialog>
   );
 }
+
