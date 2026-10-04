@@ -86,9 +86,10 @@ interface BorderTopProbe {
  * what comes back is the token as this run resolved it -- not anything read
  * off the rule under test, which is what would make the assertion circular.
  *
- * Shared by the two settings specs below rather than written twice: they
- * pin the same property of two different lists, and a second copy is a
- * second thing to keep in step.
+ * Shared by the settings specs below and, since #90, by the browse card and
+ * release-list specs above, rather than written per spec: they pin the same
+ * property of different elements, and a second copy is a second thing to
+ * keep in step.
  */
 async function borderTopAgainstLineToken(page: Page, selector: string): Promise<BorderTopProbe> {
   return page.evaluate((sel) => {
@@ -445,6 +446,18 @@ test('a media item renders as a card, not a bare block of text', async ({ page, 
   const card = page.getByRole('article');
   await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card).toHaveCSS('border-radius', '10px');
+
+  // The radius alone pins one declaration, not the rule (#90): a
+  // `library.css` cut down to `article { border-radius: 10px }` leaves the
+  // line above green. The card's `border: 1px solid var(--color-line)` is
+  // a token-derived value only the real rule produces, compared against
+  // the token's own resolved colour for the reason
+  // `borderTopAgainstLineToken`'s doc gives. Measured 2026-10-03 both
+  // ways: the import removed reds both assertions; the sheet present but
+  // gutted to the three declarations this file's old pins needed reds
+  // this one and leaves the radius green.
+  const cardBorder = await borderTopAgainstLineToken(page, 'article');
+  expect(cardBorder.borderTopColor, 'the card border takes the line token').toBe(cardBorder.lineTokenColor);
 });
 
 test("a media item's release list is laid out as a list, not just present", async ({ page, harness }) => {
@@ -452,7 +465,16 @@ test("a media item's release list is laid out as a list, not just present", asyn
   await claimInstall(page, 'owner@example.invalid', harness.claimToken);
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
-  harness.seedMediaItem('tv', 'A Show');
+  // A release row too, not a bare media item: the second pin below is on
+  // the list's `li`, and an item with no releases renders the list empty.
+  // No download client, because nothing here picks.
+  await harness.seedPickableRelease({
+    pluginId: 'tv',
+    title: 'A Show',
+    filename: 'a.show.s01e01.1080p.web-dl.h265-GRP.mkv',
+    lookupState: 'resolved',
+    withDownloadClient: false,
+  });
 
   const disclosure = page.getByRole('button', { name: 'A Show' });
   await expect(disclosure).toBeVisible({ timeout: 15_000 });
@@ -462,6 +484,18 @@ test("a media item's release list is laid out as a list, not just present", asyn
   // none`, which the UA default (`disc`) never does.
   const releases = page.getByRole('list', { name: 'releases' });
   await expect(releases).toHaveCSS('list-style-type', 'none');
+
+  // A second, independent rule, the same shape the feeds spec draws for
+  // `settings.css` (#90): `list-style: none` pins only the list's own
+  // reset, and a `library.css` gutted to that one declaration leaves the
+  // line above green. `ul[aria-label='releases'] li`'s `border-top: 1px
+  // solid var(--color-line)` is a separate rule block with a token-derived
+  // value, compared against the token's own resolved colour. Measured
+  // 2026-10-03 both ways: the import removed reds both assertions; the
+  // sheet present but gutted reds this one alone.
+  await expect(releases.locator('li').first()).toBeVisible();
+  const rowBorder = await borderTopAgainstLineToken(page, "ul[aria-label='releases'] li");
+  expect(rowBorder.borderTopColor, 'the release row border takes the line token').toBe(rowBorder.lineTokenColor);
 });
 
 /*
@@ -839,6 +873,16 @@ test('the empty state reads as an aside, not as content waiting to be filled in'
   const empty = page.getByText('Everything has been matched.');
   await expect(empty).toBeVisible();
   await expect(empty).toHaveCSS('font-style', 'italic');
+
+  // Italic alone pins one declaration (#90): a `library.css` cut down to
+  // `section > p { font-style: italic }` leaves the line above green. The
+  // same rule's `color: var(--color-text-dim)` is a token-derived value
+  // only the real rule produces, compared against the token's own resolved
+  // colour (`colorAgainstToken`'s doc). Measured 2026-10-03 both ways: the
+  // import removed reds both assertions; the sheet present but gutted reds
+  // this one and leaves the italic green.
+  const dim = await colorAgainstToken(page, 'section > p', '--color-text-dim');
+  expect(dim.color, 'the empty state takes the dim token').toBe(dim.tokenColor);
 });
 
 /**
