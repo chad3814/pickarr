@@ -20,6 +20,7 @@ function Probe(): ReactElement {
   return (
     <div>
       <output data-testid="filter">{query.filter}</output>
+      <output data-testid="view">{query.view}</output>
       <output data-testid="q">{query.q}</output>
       <output data-testid="term">{query.term}</output>
       <output data-testid="input">{controls.input}</output>
@@ -28,6 +29,8 @@ function Probe(): ReactElement {
       <output data-testid="nav">{navType}</output>
       <button type="button" onClick={() => { controls.setFilter('picked'); }}>set-picked</button>
       <button type="button" onClick={() => { controls.setFilter('all'); }}>set-all</button>
+      <button type="button" onClick={() => { controls.setView('grid'); }}>set-grid</button>
+      <button type="button" onClick={() => { controls.setView('list'); }}>set-list</button>
       <button type="button" onClick={() => { controls.setInput('dune'); }}>type-dune</button>
       <button type="button" onClick={() => { controls.setInput(''); }}>clear</button>
       <button type="button" onClick={() => { controls.setInput('x'); }}>type-x</button>
@@ -138,4 +141,27 @@ test('a re-seed does not overwrite a keystroke typed between a debounce fire and
   await new Promise((resolve) => { realSetTimeout(resolve, 200); });
   assert.equal(text('search'), '?q=x');
   assert.equal(text('input'), 'x');
+});
+
+test('view is read from the URL, anything unrecognised reads as list, and list writes no param', () => {
+  renderAt('/tv?view=grid&filter=picked');
+  assert.equal(text('view'), 'grid');
+  fireEvent.click(screen.getByRole('button', { name: 'set-list' }));
+  assert.equal(text('search'), '?filter=picked', 'list is the default and is not spelled');
+  assert.equal(text('nav'), 'REPLACE');
+  cleanup();
+  renderAt('/tv?view=mosaic');
+  assert.equal(text('view'), 'list');
+});
+
+test('switching the view keeps the filter and the search, including a keystroke still pending', async () => {
+  renderAt('/tv?filter=unpicked');
+  fireEvent.click(screen.getByRole('button', { name: 'type-dune' }));
+  fireEvent.click(screen.getByRole('button', { name: 'set-grid' }));
+  assert.equal(text('search'), '?filter=unpicked&q=dune&view=grid', 'the pending text travelled with the view change, as it does with a filter change');
+  assert.equal(text('view'), 'grid');
+  // The cancelled timer must not fire later and write over it.
+  await new Promise((resolve) => { realSetTimeout(resolve, 200); });
+  assert.equal(text('search'), '?filter=unpicked&q=dune&view=grid');
+  assert.equal(text('q'), 'dune');
 });

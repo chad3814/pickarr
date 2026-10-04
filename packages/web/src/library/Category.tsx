@@ -96,6 +96,8 @@ export function Category({ store, pluginId, tables, submit, identify }: Category
         input={controls.input}
         onFilter={controls.setFilter}
         onInput={controls.setInput}
+        view={controls.view}
+        onView={controls.setView}
       />
       {store === undefined || identify === undefined ? null : query.filter === 'all' && query.term === '' ? (
         <DefaultList store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} />
