@@ -1,10 +1,12 @@
 /**
  * One category's screen: `pluginId`'s media items, newest first, paged on
- * demand, each row expanding into a `MediaItemCard`
- * (design spec §6, §7). The unfiltered view pages `rows` through
- * `useMediaItems`; a picked filter or a search term pages the derived
- * `catalog` store through `useCatalogItems` (browse-filter-search design
- * spec §3), with the filter and term read from the URL by `useBrowseQuery`.
+ * demand, in one of two views chosen by the URL's `view` (read, with the
+ * filter and term, by `useBrowseQuery`): the list, each row expanding into a
+ * `MediaItemCard` (design spec §6, §7), or the grid, a wall of tiles from
+ * `ItemGrid`. The unfiltered list pages `rows` through `useMediaItems`; a
+ * picked filter or a search term pages the derived `catalog` store through
+ * `useCatalogItems` (browse-filter-search design spec §3), and the grid
+ * always does, whatever the filter.
  *
  * **`data-testid={`category-${pluginId}`}` on the root element is the
  * route-mapping contract.** `Shell.test.tsx`'s per-category
@@ -19,9 +21,9 @@
  *
  * **`store` is `undefined` until `Shell`'s own store finishes opening**
  * (`Shell.tsx`'s state starts there, same as `useCounts`'s). Nothing is
- * fetched or rendered as a list until a store exists -- `DefaultList` and
- * `FilteredList` below are the pieces that only mount once one does, so
- * `useMediaItems` and `useCatalogItems` themselves are never called with nothing to read from.
+ * fetched or rendered as a list until a store exists -- `DefaultList`,
+ * `FilteredList` and `GridView` below are the pieces that only mount once one
+ * does, so `useMediaItems` and `useCatalogItems` themselves are never called with nothing to read from.
  *
  * **Plugin rows are fetched here, once per page, and handed to each card.**
  * `usePluginRows` reads the whole page's rows in one batched query as soon
@@ -44,6 +46,7 @@ import { useCatalogItems, type CatalogItemsSource } from './useCatalogItems.ts';
 import { useBrowseQuery, type BrowseQuery } from './useBrowseQuery.ts';
 import { BrowseControls } from './BrowseControls.tsx';
 import { MediaItemCard } from './MediaItemCard.tsx';
+import { ItemGrid } from './ItemGrid.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from './usePluginRows.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
@@ -99,11 +102,21 @@ export function Category({ store, pluginId, tables, submit, identify }: Category
         view={controls.view}
         onView={controls.setView}
       />
-      {store === undefined || identify === undefined ? null : query.filter === 'all' && query.term === '' ? (
-        <DefaultList store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} />
+      {store === undefined || identify === undefined ? null : query.view === 'grid' ? (
+        <GridView
+          key={`grid|${query.filter}|${query.term}`}
+          store={store}
+          pluginId={pluginId}
+          tables={tables}
+          submit={submit}
+          identify={identify}
+          query={query}
+        />
+      ) : query.filter === 'all' && query.term === '' ? (
+        <DefaultList key="list" store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} />
       ) : (
         <FilteredList
-          key={`${query.filter}|${query.term}`}
+          key={`list|${query.filter}|${query.term}`}
           store={store}
           pluginId={pluginId}
           tables={tables}
@@ -134,6 +147,18 @@ function DefaultList({ store, pluginId, tables, submit, identify }: ListProps): 
 function FilteredList({ store, pluginId, tables, submit, identify, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
   const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
   return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={result} emptyMessage={emptySentence(query)} />;
+}
+
+/**
+ * The grid always reads through the catalog, the empty filter included:
+ * the tile ids live on the record and nowhere the rows store can answer
+ * in one read (design spec 2026-10-04 §3.2). The list keeps its rows-store
+ * fast path for the unfiltered case.
+ */
+function GridView({ store, pluginId, tables, submit, identify, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
+  const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
+  const emptyMessage = query.filter === 'all' && query.term === '' ? 'Nothing here yet.' : emptySentence(query);
+  return <ItemGrid store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} result={result} emptyMessage={emptyMessage} />;
 }
 
 interface ItemListProps {
