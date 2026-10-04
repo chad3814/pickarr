@@ -8,14 +8,32 @@ import { request } from '../../src/store/idb.ts';
 import { readCursors } from '../../src/store/meta.ts';
 import { buildHaystack, type CatalogRecord } from '../../src/store/catalog.ts';
 
-// Measured on fake-indexeddb with the 500-op batch below, in isolation:
-// three runs gave 75, 76 and 74 ms (median 75) before `by_table_status_updated`
-// existed, and 78, 82 and 80 ms with it. The budget is 10x that median, not
-// 3x: `npm run check` runs test files concurrently, and a 3x budget tripped
-// at 313 ms under that load with no change to the path it measures. Ten
-// times still catches the regression this exists for -- a recompute that
-// goes quadratic -- while a loaded machine does not.
-const CATALOG_BATCH_BUDGET_MS = 750;
+/**
+ * Runs `body` while counting `getAllKeys` calls on the `by_rss_item` index
+ * -- the read `picked` costs, one per release checked -- and restores the
+ * prototype whatever `body` does.
+ *
+ * This replaced a wall-clock budget (#108). That budget measured a 500-op
+ * batch over 100 items at 75-82 ms in isolation and was set to ten times
+ * that; it still tripped at 313 ms and then 966 ms under `npm run check`'s
+ * concurrent files with no change to the path it measured. The property it
+ * existed to catch -- a recompute whose reads grow with the releases an
+ * item already has -- is a count, and fake-indexeddb answers a count
+ * exactly on any machine.
+ */
+async function countingReleaseReads<T>(body: () => Promise<T>): Promise<{ result: T; reads: number }> {
+  const original = IDBIndex.prototype.getAllKeys;
+  let reads = 0;
+  IDBIndex.prototype.getAllKeys = function getAllKeys(this: IDBIndex, query?: IDBValidKey | IDBKeyRange | null, count?: number) {
+    if (this.name === 'by_rss_item') reads += 1;
+    return original.call(this, query, count);
+  };
+  try {
+    return { result: await body(), reads };
+  } finally {
+    IDBIndex.prototype.getAllKeys = original;
+  }
+}
 
 const CURSORS = { since: 1, before: null } as const;
 async function record(db: IDBDatabase, id: number): Promise<CatalogRecord | undefined> {
@@ -170,17 +188,73 @@ test('buildHaystack lowercases, collapses whitespace per part and joins with new
   assert.equal(buildHaystack(['Dune:  Part\tTwo', '2024', 'A.mkv']), 'dune: part two\n2024\na.mkv');
 });
 
-test('a 500-op batch over 100 items applies within the budget', async () => {
-  // A regression tripwire on fake-indexeddb, not a benchmark: the budget is
-  // at least three times the median measured when this test was written
-  // (record the measurement in CATALOG_BATCH_BUDGET_MS's comment).
+test('bootstrap: releases arriving over four pages cost one check each, not one per release so far (#108)', async () => {
+  // A long-running show whose 200 releases arrive 50 to a sync page. The
+  // from-scratch recompute read every release the item already had on each
+  // page: 50 + 100 + 150 + 200 = 500 reads. Each page now checks only the
+  // releases it linked: 200 in all.
   const db = await freshDb();
-  const ops: SyncOp[] = [];
-  for (let i = 1; i <= 100; i += 1) {
-    ops.push(item(i, `Title ${String(i)}`, '2020-01-01'), release(i * 10, i, `f${String(i)}.mkv`), release(i * 10 + 1, i, `g${String(i)}.mkv`), role(i, i, i), person(i, `Person ${String(i)}`));
+  const pageOf = (page: number): SyncOp[] =>
+    Array.from({ length: 50 }, (_, i) => release(1000 + page * 50 + i, 1, `s01e${String(page * 50 + i)}.mkv`));
+  const counts: number[] = [];
+  const first = await countingReleaseReads(() => applyBatch(db, [item(1, 'Long Show', '2001-01-01'), ...pageOf(0)], CURSORS));
+  counts.push(first.reads);
+  for (let page = 1; page < 4; page += 1) {
+    // eslint-disable-next-line no-await-in-loop -- pages arrive in order; that is the thing being measured
+    const { reads } = await countingReleaseReads(() => applyBatch(db, pageOf(page), { since: page + 1, before: null }));
+    counts.push(reads);
   }
-  const started = performance.now();
-  await applyBatch(db, ops, CURSORS);
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed < CATALOG_BATCH_BUDGET_MS, `${String(Math.round(elapsed))} ms`);
+  assert.deepEqual(counts, [50, 50, 50, 50], `by_rss_item reads per page were ${counts.join(', ')}; the from-scratch recompute gives 50, 100, 150, 200`);
+  const rec = await record(db, 1);
+  assert.equal(rec?.picked, 0);
+  assert.equal(rec?.haystack.split('\n').length, 2 + 200, 'every release is still in the haystack');
+});
+
+test('a batch that touches an item without touching its downloads reads no release (#108)', async () => {
+  const db = await freshDb();
+  const releases = Array.from({ length: 20 }, (_, i) => release(100 + i, 1, `r${String(i)}.mkv`));
+  await applyBatch(db, [item(1, 'Show', null), ...releases, role(1, 1, 1), person(1, 'Someone'), torrent(500, 100)], CURSORS);
+  assert.equal((await record(db, 1))?.picked, 1);
+
+  const renamed = await countingReleaseReads(() =>
+    applyBatch(db, [{ ...person(1, 'Someone Else'), op: 'upsert' }], { since: 2, before: null }));
+  assert.equal(renamed.reads, 0, 'a person rename cannot change picked, so no release is read');
+  assert.equal((await record(db, 1))?.picked, 1, 'and the carried bit is the right one');
+  assert.ok((await record(db, 1))?.haystack.endsWith('someone else'));
+
+  const retitled = await countingReleaseReads(() =>
+    applyBatch(db, [{ ...release(100, 1, 'renamed.mkv'), op: 'upsert' }], { since: 3, before: null }));
+  assert.equal(retitled.reads, 0, 'a release that stays on its item changed only the haystack');
+  assert.ok((await record(db, 1))?.haystack.includes('renamed.mkv'));
+});
+
+test('a download arriving flips picked with no release read; its tombstone re-reads every release and flips it back (#108)', async () => {
+  const db = await freshDb();
+  const releases = Array.from({ length: 20 }, (_, i) => release(100 + i, 1, `r${String(i)}.mkv`));
+  await applyBatch(db, [item(1, 'Show', null), ...releases], CURSORS);
+
+  const added = await countingReleaseReads(() => applyBatch(db, [nzb(700, 105)], { since: 2, before: null }));
+  assert.equal(added.reads, 0, 'a download written this batch is proof enough');
+  assert.equal((await record(db, 1))?.picked, 1);
+
+  const removed = await countingReleaseReads(() => applyBatch(db, [del('nzb_download', 700)], { since: 3, before: null }));
+  assert.equal(removed.reads, 20, 'only the whole scan can prove no other download remains');
+  assert.equal((await record(db, 1))?.picked, 0);
+});
+
+test('a release that arrives after its downloads is checked alone, and a release rematched away re-reads the item it left (#108)', async () => {
+  const db = await freshDb();
+  const releases = Array.from({ length: 10 }, (_, i) => release(100 + i, 1, `r${String(i)}.mkv`));
+  await applyBatch(db, [item(1, 'Show', null), item(2, 'Other', null), ...releases, torrent(900, 555)], CURSORS);
+  assert.equal((await record(db, 1))?.picked, 0, 'the download belongs to a release nobody has linked yet');
+
+  const linked = await countingReleaseReads(() => applyBatch(db, [release(555, 1, 'late.mkv')], { since: 2, before: null }));
+  assert.equal(linked.reads, 1, 'only the release that joined can have brought downloads');
+  assert.equal((await record(db, 1))?.picked, 1);
+
+  const moved = await countingReleaseReads(() =>
+    applyBatch(db, [{ ...release(555, 2, 'late.mkv'), op: 'upsert' }], { since: 3, before: null }));
+  assert.equal(moved.reads, 10 + 1, 'the item it left scans its ten remaining releases; the item it joined checks it alone');
+  assert.equal((await record(db, 1))?.picked, 0);
+  assert.equal((await record(db, 2))?.picked, 1);
 });
