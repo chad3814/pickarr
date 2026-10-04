@@ -6,7 +6,10 @@ import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   CREDENTIAL_ALLOW_LIST,
+  CREDENTIAL_FIELD_ALLOW_LIST,
   findCredentialAssertions,
+  findCredentialFills,
+  findCredentialFillsIn,
   findCredentialOperands,
   findCredentialSelections,
   findViolations,
@@ -923,4 +926,128 @@ test('rule 3 walks a directory and names the file and line', async (t) => {
     ]),
     [['leaks.test.ts', 2, 'generated']],
   );
+});
+
+/** Runs rule 4 over a snippet, returning just the offending text. */
+function fills(source: string): string[] {
+  return findCredentialFills('sample.spec.ts', source).map((violation) => violation.text);
+}
+
+const E2E_TESTS = join('packages', 'e2e', 'tests');
+
+test('a credential-shaped field filled from a literal, or a const bound to one, is not flagged', () => {
+  assert.deepEqual(fills(`await page.getByLabel('Password').fill('correct horse battery staple');`), []);
+  assert.deepEqual(
+    fills(`const API_KEY = 'placeholder-not-a-real-key';\nawait page.getByLabel('Api key').fill(API_KEY);`),
+    [],
+  );
+  assert.deepEqual(
+    fills(`const SECRET = \`also a literal\`;\nawait page.getByLabel('Shared secret').fill(SECRET);`),
+    [],
+    'a no-substitution template is a literal too',
+  );
+  assert.deepEqual(
+    fills(`const t = 'x';\nawait page.getByLabel('Password').fill((t));`),
+    [],
+    'parentheses do not change what is typed',
+  );
+});
+
+test('a credential-shaped field filled from process.env is flagged, and so is any field filled from it', () => {
+  assert.deepEqual(
+    fills(`await page.getByLabel('Api key').fill(process.env['QBT_KEY'] ?? '');`),
+    [`process.env['QBT_KEY'] ?? '' (from process.env) into Api key`],
+  );
+  assert.deepEqual(
+    fills(`await page.getByLabel('Feed url').fill(process.env.STAGING_URL);`),
+    [`process.env.STAGING_URL (from process.env) into Feed url`],
+    'the label is not credential-shaped, and the env read is a violation anyway',
+  );
+  assert.deepEqual(
+    fills(`const key = process.env['K'];\nawait page.getByLabel('Address').fill(key);`),
+    [`key (from process.env) into Address`],
+    'a const standing between the env read and the fill does not hide it',
+  );
+});
+
+test('a credential-shaped field filled from a parameter, a property or a template is flagged', () => {
+  assert.deepEqual(
+    fills(`async function signIn(page, password) {\n  await page.getByLabel('Password').fill(password);\n}`),
+    ['password into Password'],
+    'a parameter has no declaration this rule can read, so it is not a literal',
+  );
+  assert.deepEqual(
+    fills(`await page.getByLabel('Api key').fill(harness.apiKey);`),
+    ['harness.apiKey into Api key'],
+  );
+  assert.deepEqual(
+    fills(`await page.getByLabel('API Key').fill(\`key-\${run}\`);`),
+    ['`key-${run}` into API Key'],
+    'the label match is case-insensitive and a substituted template is built at run time',
+  );
+  assert.deepEqual(
+    fills(`let token = 'lit';\ntoken = other;\nawait page.getByLabel('Token').fill(token);`),
+    ['token into Token'],
+    'a let can be reassigned, so its initializer proves nothing',
+  );
+});
+
+test('the field is found through a locator held in a const, a getByRole name, or a placeholder', () => {
+  assert.deepEqual(
+    fills(`const box = page.getByRole('textbox', { name: 'Api key' });\nawait box.fill(value);`),
+    ['value into Api key'],
+  );
+  assert.deepEqual(
+    fills(`const form = page.getByRole('form');\nawait form.getByLabel('Password').fill(value);`),
+    ['value into Password'],
+  );
+  assert.deepEqual(fills(`await page.getByPlaceholder('Passphrase').fill(value);`), ['value into Passphrase']);
+  assert.deepEqual(
+    fills(`await page.getByLabel('Client name').fill(value);`),
+    [],
+    'a field that is not credential-shaped may be filled from anything that is not the environment',
+  );
+});
+
+test('an allow-listed label may be filled from a non-literal, and a different token field may not', () => {
+  assert.deepEqual(fills(`await page.getByLabel('Claim token').fill(claimToken);`), []);
+  assert.deepEqual(fills(`await page.getByLabel('Reset token').fill(claimToken);`), ['claimToken into Reset token']);
+  assert.deepEqual(
+    fills(`await page.getByLabel('Claim token').fill(process.env['CLAIM']);`),
+    [`process.env['CLAIM'] (from process.env) into Claim token`],
+    'the allow-list exempts the label from the literal rule, never from the env rule',
+  );
+});
+
+test('the credential-fill violation carries a line number', () => {
+  const [violation] = findCredentialFills('sample.spec.ts', `\n\nawait page.getByLabel('Password').fill(pw);`);
+  assert.equal(violation?.line, 3);
+});
+
+test('the shipped browser specs type only repo literals, and the field allow-list is exactly what they need', async () => {
+  // Asserted over the real tree, because the claim is about this repo: every
+  // credential the suite types is a literal in git, except the claim token,
+  // which every spec types through `claimInstall`'s parameter.
+  assert.deepEqual(await findCredentialFillsIn(E2E_TESTS), [], 'rule 4 over packages/e2e/tests must be clean');
+  assert.deepEqual([...CREDENTIAL_FIELD_ALLOW_LIST], ['Claim token']);
+
+  // And the one entry is not inert: the shape it exempts is the `claimInstall`
+  // helper every spec carries, and the same helper under a label the list
+  // does not name is a violation. A fixture rather than the tracked specs,
+  // for the reason every other rule's tests give.
+  const helper = (label: string): string =>
+    `async function claimInstall(page, claimToken) {\n  await page.getByLabel('${label}').fill(claimToken);\n}`;
+  const dir = await mkdtemp(join(tmpdir(), 'hygiene-claim-'));
+  try {
+    await writeFile(join(dir, 'claim.spec.ts'), helper('Claim token'));
+    assert.deepEqual(await findCredentialFillsIn(dir), [], 'the allow-listed label passes the helper shape');
+    await writeFile(join(dir, 'claim.spec.ts'), helper('Reset token'));
+    assert.deepEqual(
+      (await findCredentialFillsIn(dir)).map((violation) => violation.text),
+      ['claimToken into Reset token'],
+      'and the same shape under another label is what the entry exempts',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

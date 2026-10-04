@@ -12,6 +12,10 @@
  *    plugin holds the raw connection. See `findCredentialSelections`.
  * 3. **No host test hands a credential to `node:assert`** as a value it might
  *    have to print. See `findCredentialAssertions`.
+ * 4. **No browser spec types anything but a literal committed to this repo
+ *    into a credential-shaped field, and nothing from `process.env` into
+ *    any field.** Playwright's trace records every typed value in cleartext
+ *    and CI uploads it (#92). See `findCredentialFills`.
  *
  * **Parsed rather than pattern-matched, and that is not fastidiousness.** Each
  * rule is *documented* by quoting the thing it forbids. The web suite quotes
@@ -1153,14 +1157,224 @@ async function checkCredentialAssertions(): Promise<boolean> {
   return false;
 }
 
+
+/**
+ * **Rule 4**: where the browser specs live. Only this tree types into forms
+ * a trace records; the harness under `packages/e2e/src` seeds the database
+ * directly and never drives a page.
+ */
+const E2E_TEST_DIR = 'packages/e2e/tests';
+
+/**
+ * A form field whose label says it takes a credential. Matched against the
+ * accessible name a locator was built from -- `getByLabel`, `getByPlaceholder`
+ * or `getByRole`'s `name` -- case-insensitively, so `Api key` and `API Key`
+ * are the same field.
+ */
+const CREDENTIAL_LABEL = /password|passphrase|token|secret|api[ -]?key/i;
+
+/**
+ * Credential-shaped labels a spec may fill from something other than a
+ * literal, each with the reason it is not a credential anyone holds.
+ *
+ * Exported for the test that keeps it honest: dropping an entry has to
+ * produce a violation in the real tree, so an entry nothing needs cannot
+ * stay.
+ */
+export const CREDENTIAL_FIELD_ALLOW_LIST: readonly string[] = [
+  // Minted per run by the harness for a throwaway in-process install and
+  // dead with it, so the trace that records it records nothing reusable.
+  // Every spec types it through a `claimInstall` helper's parameter, which
+  // is the one non-literal shape this rule has to let through.
+  'Claim token',
+];
+
+/**
+ * Whether `node` reads `process.env`, anywhere inside it. `process.env.X`,
+ * `process.env['X']` and `process.env['X'] ?? ''` all count; so does a
+ * `const` the expression reaches, one level down, since `const key =
+ * process.env['K']; fill(key)` is the same leak with a name in between.
+ */
+function readsEnv(node: ts.Node, bindings: Bindings, seen: ReadonlySet<string> = new Set()): boolean {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'process' &&
+    node.name.text === 'env'
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(node) && !seen.has(node.text)) {
+    const declared = bindings.get(node.text) ?? [];
+    const next = new Set([...seen, node.text]);
+    if (declared.some((initializer) => readsEnv(initializer, bindings, next))) return true;
+  }
+  return ts.forEachChild(node, (child) => (readsEnv(child, bindings, seen) ? true : undefined)) === true;
+}
+
+/**
+ * Whether what a spec types is a string literal committed to this repo: the
+ * literal itself, or an identifier every one of whose declarations is a
+ * `const` initialised to one. A parameter has no declaration this map can
+ * see, a `let` can be reassigned, and a template with a substitution or a
+ * property read is built at run time -- none of those is a literal in git.
+ */
+function isRepoLiteral(node: ts.Expression, bindings: Bindings, seen: ReadonlySet<string> = new Set()): boolean {
+  const expression = unwrap(node);
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return true;
+  if (ts.isIdentifier(expression) && !seen.has(expression.text)) {
+    const declared = bindings.get(expression.text);
+    if (declared === undefined) return false;
+    const next = new Set([...seen, expression.text]);
+    return declared.every(
+      (initializer) =>
+        ts.isVariableDeclaration(initializer.parent) &&
+        (initializer.parent.parent.flags & ts.NodeFlags.Const) !== 0 &&
+        isRepoLiteral(initializer, bindings, next),
+    );
+  }
+  return false;
+}
+
+/**
+ * Every accessible name a locator chain was built from, outermost call
+ * first. `page.getByLabel('Api key')` yields one; a `const row = …` the
+ * chain starts from is followed to its declarations, and each of them
+ * contributes, so a name declared twice is checked against both -- the
+ * fail-closed reading, since a guess that happened to be the harmless
+ * declaration would let a credential through.
+ */
+function labelsOf(node: ts.Expression, bindings: Bindings, seen: ReadonlySet<string> = new Set()): string[] {
+  const expression = unwrap(node);
+  if (ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression)) {
+    const method = expression.expression.name.text;
+    const [first, second] = expression.arguments;
+    const here: string[] = [];
+    if ((method === 'getByLabel' || method === 'getByPlaceholder') && first !== undefined) {
+      const text = sqlTextOf(first, bindings);
+      if (text !== null && text.unresolved === 0) here.push(text.text);
+    }
+    if (method === 'getByRole' && second !== undefined && ts.isObjectLiteralExpression(second)) {
+      for (const property of second.properties) {
+        if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'name') {
+          const text = sqlTextOf(property.initializer, bindings);
+          if (text !== null && text.unresolved === 0) here.push(text.text);
+        }
+      }
+    }
+    return [...here, ...labelsOf(expression.expression.expression, bindings, seen)];
+  }
+  if (ts.isPropertyAccessExpression(expression)) return labelsOf(expression.expression, bindings, seen);
+  if (ts.isIdentifier(expression) && !seen.has(expression.text)) {
+    const next = new Set([...seen, expression.text]);
+    return (bindings.get(expression.text) ?? []).flatMap((initializer) => labelsOf(initializer, bindings, next));
+  }
+  return [];
+}
+
+/**
+ * Rule 4 over one file: every `.fill(value)` that types a non-literal into a
+ * credential-shaped field, and every `.fill(value)` that types anything
+ * from `process.env` into any field.
+ *
+ * **Why a mechanism and not the paragraph it replaces.** `shell.spec.ts`'s
+ * module docblock measured the download client api key thirteen times in
+ * one `trace.zip` -- the `fill` action's parameters, the log line, two DOM
+ * snapshots with the password input's `value`, the step title and the POST
+ * body -- and `ci.yml` uploads that archive for 7 days. The value is a
+ * literal in git, so nothing real escaped. The protection was a sentence:
+ * "every credential this suite types must be a repo literal." A spec that
+ * reads one from `process.env`, which is the obvious thing to write against
+ * a real service, would have published it for a week with nothing to object
+ * (#92). Now this objects.
+ *
+ * **Two shapes, because the label match is not enough on its own.** A field
+ * labelled `Address` or `Feed url` is not credential-shaped, and a spec
+ * that typed `process.env['STAGING_URL']` into it would be pointing the
+ * suite at a real instance -- the second half of the hazard the docblock
+ * names. So an env read fails on any field, and a non-literal fails on a
+ * credential-shaped one.
+ *
+ * The violation's `text` is the typed expression and the field it went
+ * into, so the report can name both without printing a value: the
+ * expression is source text, never what it evaluated to.
+ */
+export function findCredentialFills(file: string, source: string): Violation[] {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const bindings = collectBindings(parsed);
+  const allowed = new Set(CREDENTIAL_FIELD_ALLOW_LIST);
+  const violations: Violation[] = [];
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === 'fill' &&
+      node.arguments.length > 0
+    ) {
+      const [value] = node.arguments;
+      if (value === undefined) return;
+      const labels = labelsOf(node.expression.expression, bindings);
+      const credentialField = labels.find((label) => CREDENTIAL_LABEL.test(label) && !allowed.has(label));
+      const line = parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1;
+      if (readsEnv(value, bindings)) {
+        violations.push({ file, line, text: `${value.getText(parsed)} (from process.env) into ${labels[0] ?? 'a field'}` });
+      } else if (credentialField !== undefined && !isRepoLiteral(value, bindings)) {
+        violations.push({ file, line, text: `${value.getText(parsed)} into ${credentialField}` });
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  return violations;
+}
+
+/**
+ * Rule 4 over a whole directory tree. `dir` is a parameter for the reason
+ * `findCredentialSelections` gives: the tests point it at a fixture.
+ */
+export async function findCredentialFillsIn(dir: string): Promise<Violation[]> {
+  const violations: Violation[] = [];
+  for (const file of await sourceFiles(dir)) {
+    // eslint-disable-next-line no-await-in-loop -- a handful of spec files in a one-shot check; not a hot path
+    violations.push(...findCredentialFills(file, await readFile(file, 'utf8')));
+  }
+  return violations;
+}
+
+/** Rule 4 across `E2E_TEST_DIR`, reported. Resolves `true` when the tree is clean. */
+async function checkCredentialFills(): Promise<boolean> {
+  const violations = await findCredentialFillsIn(E2E_TEST_DIR);
+  if (violations.length === 0) {
+    console.log(`test-hygiene: every credential typed under ${E2E_TEST_DIR} is a literal in this repo`);
+    return true;
+  }
+
+  for (const violation of violations) {
+    console.error(`${relative(process.cwd(), violation.file)}:${violation.line}: types ${violation.text}`);
+  }
+  console.error(
+    `\n${violations.length} browser spec fill(s) type a value that is not a literal committed to this repo\n` +
+      'into a credential-shaped field, or type something read from process.env into any field.\n' +
+      "Playwright's trace records every typed value in cleartext -- the action's parameters, the\n" +
+      "DOM snapshot's password `value`, the request body -- and CI uploads test-results/ for 7\n" +
+      'days, so a real credential typed here is published on the first red build. Type a string\n' +
+      'literal, or a `const` bound to one, and let the harness fake the service behind it. A\n' +
+      'field that genuinely takes a per-run throwaway value goes in CREDENTIAL_FIELD_ALLOW_LIST\n' +
+      'in this script, with the reason.\n',
+  );
+  return false;
+}
+
 async function main(): Promise<void> {
-  // All three run, and all three report, before the exit code is set: a run
+  // All four run, and all four report, before the exit code is set: a run
   // that stopped at the first failing rule would hide the others' findings
   // until the first was fixed.
   const clean = await Promise.all([
     checkDomAssertions(),
     checkCredentialColumns(),
     checkCredentialAssertions(),
+    checkCredentialFills(),
   ]);
   if (clean.includes(false)) process.exitCode = 1;
 }

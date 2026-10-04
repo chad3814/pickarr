@@ -45,10 +45,13 @@
  * **The standing constraint that makes this safe is on the values, not on
  * the tooling: every credential this suite types must be a literal
  * committed to this repo.** All three are, today. A spec that reads one
- * from `process.env`, or points at a staging instance, publishes a real
- * credential to a 7-day artifact with nothing here to stop it -- this
- * paragraph is the only thing standing in the way, which is worth knowing
- * about it.
+ * from `process.env`, or points at a staging instance, would publish a real
+ * credential to a 7-day artifact. This paragraph used to be the only thing
+ * standing in the way; since #92 `scripts/check-test-hygiene.ts`'s rule 4
+ * fails `npm run check` on a credential-shaped field filled from anything
+ * but a literal, and on any field filled from `process.env`. The claim
+ * token, typed below from `claimInstall`'s parameter, is the one exemption,
+ * and the rule says why.
  */
 import { expect, type Page } from '@playwright/test';
 import { test } from '../src/harness-2.ts';
