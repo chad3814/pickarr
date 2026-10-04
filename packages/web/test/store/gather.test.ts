@@ -4,6 +4,7 @@ import { freshDb } from './harness.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
 import { gatherMediaItem } from '../../src/store/gather.ts';
+import { CAST_LIMIT } from '@pickarr/plugin-ui';
 
 /** Seeds `ops` into `db` in one batch -- the cursor value has no bearing on these tests. */
 async function seed(db: IDBDatabase, ops: readonly SyncOp[]): Promise<void> {
@@ -131,6 +132,92 @@ test("artwork is the item's poster, background and logo rows, each list by rank 
   assert.deepEqual(gathered.artwork.posters[0], {
     id: 21, url: '/api/artwork/poster/21', width: 10, height: 15, language: null, rank: 0,
   });
+  db.close();
+});
+
+/**
+ * Runs `body` while counting `getAll` calls on the `by_person` index -- the
+ * read `byPersonIds` issues once per person -- and restores the prototype
+ * whatever `body` does. A count of reads, not a timing budget, because the
+ * claim under test is a number of round trips and fake-indexeddb answers
+ * that exactly.
+ */
+async function countingPersonReads<T>(body: () => Promise<T>): Promise<{ result: T; reads: number }> {
+  const original = IDBIndex.prototype.getAll;
+  let reads = 0;
+  IDBIndex.prototype.getAll = function getAll(this: IDBIndex, query?: IDBValidKey | IDBKeyRange | null, count?: number) {
+    if (this.name === 'by_person') reads += 1;
+    return original.call(this, query, count);
+  };
+  try {
+    return { result: await body(), reads };
+  } finally {
+    IDBIndex.prototype.getAll = original;
+  }
+}
+
+test('pictures are read for the top-billed people the card shows, not for every role (#110)', async () => {
+  // Thirty people in thirty roles, every one with a picture. The card shows
+  // `CAST_LIMIT` of them, so the gather has that many `by_person` reads to
+  // spend, and the people it spends them on are the ones `topBilled` picks:
+  // billing ascending, so persons 100..104.
+  const db = await freshDb();
+  const ops: SyncOp[] = [{ op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } }];
+  for (let i = 0; i < 30; i += 1) {
+    const personId = 100 + i;
+    ops.push(
+      { op: 'upsert', table: 'person', id: personId, value: { name: `Person ${String(i).padStart(2, '0')}` } },
+      { op: 'upsert', table: 'role', id: 200 + i, value: { mediaItemId: 7, personId, role: 'actor', billingOrder: 29 - i } },
+      personImageRow(300 + i, personId, 0),
+    );
+  }
+  await seed(db, ops);
+
+  const { result: gathered, reads } = await countingPersonReads(() => gatherMediaItem(db, 7));
+
+  assert.equal(reads, CAST_LIMIT, `a gather over a cast of thirty issued ${String(reads)} by_person reads; the card shows ${String(CAST_LIMIT)}`);
+  assert.ok(gathered !== undefined);
+  assert.equal(gathered.roles.length, 30, 'every role is still gathered -- only the pictures are rationed');
+  const pictured = gathered.roles.filter((role) => role.images.length > 0).map((role) => role.row.personId).toSorted((a, b) => a - b);
+  // Billing 29 - i ascending means the last five seeded people are the best billed.
+  assert.deepEqual(pictured, [125, 126, 127, 128, 129], 'the pictured people are the five topBilled would show');
+  db.close();
+});
+
+test('one person in two roles costs one read, and a role whose person has not arrived costs none', async () => {
+  const db = await freshDb();
+  const ops: SyncOp[] = [
+    { op: 'upsert', table: 'media_item', id: 7, value: { pluginId: 'demo', title: 'A Show' } },
+    // The same person, billed first and tenth.
+    { op: 'upsert', table: 'person', id: 1, value: { name: 'Twice' } },
+    { op: 'upsert', table: 'role', id: 10, value: { mediaItemId: 7, personId: 1, role: 'actor', billingOrder: 0 } },
+    { op: 'upsert', table: 'role', id: 11, value: { mediaItemId: 7, personId: 1, role: 'director', billingOrder: 10 } },
+    personImageRow(90, 1, 0),
+    // A role billed ahead of everyone whose person has not replicated: topBilled
+    // drops it, so no read is spent on a face with no name.
+    { op: 'upsert', table: 'role', id: 12, value: { mediaItemId: 7, personId: 999, role: 'actor', billingOrder: -1 } },
+    personImageRow(91, 999, 0),
+  ];
+  // Six more people billed 1..6; with Twice taking one slot, four of them make the cut.
+  for (let i = 1; i <= 6; i += 1) {
+    ops.push(
+      { op: 'upsert', table: 'person', id: 1 + i, value: { name: `Person ${String(i)}` } },
+      { op: 'upsert', table: 'role', id: 20 + i, value: { mediaItemId: 7, personId: 1 + i, role: 'actor', billingOrder: i } },
+      personImageRow(100 + i, 1 + i, 0),
+    );
+  }
+  await seed(db, ops);
+
+  const { result: gathered, reads } = await countingPersonReads(() => gatherMediaItem(db, 7));
+
+  assert.equal(reads, CAST_LIMIT);
+  assert.ok(gathered !== undefined);
+  const byRole = new Map(gathered.roles.map((role) => [role.id, role.images.length]));
+  assert.equal(byRole.get(10), 1, 'the person in two roles has pictures on the first');
+  assert.equal(byRole.get(11), 1, 'and on the second, since the pictures are the person\'s');
+  assert.equal(byRole.get(12), 0, 'the role with no person carries none');
+  assert.deepEqual([21, 22, 23, 24].map((id) => byRole.get(id)), [1, 1, 1, 1], 'billing 1..4 make the cut beside Twice');
+  assert.deepEqual([25, 26].map((id) => byRole.get(id)), [0, 0], 'billing 5 and 6 are outside the five the card shows');
   db.close();
 });
 

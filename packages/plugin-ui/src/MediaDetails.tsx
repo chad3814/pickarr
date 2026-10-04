@@ -66,8 +66,15 @@ function rank(role: GatheredRoleView): number {
   return role.row.billingOrder ?? Number.MAX_SAFE_INTEGER;
 }
 
-/** How many of the cast the section shows. */
-const CAST_LIMIT = 5;
+/**
+ * How many of the cast the section shows.
+ *
+ * Exported with {@link topBilled} because `web/src/store/gather.ts` reads
+ * pictures only for the people this section will show (#110): the gather
+ * and the card have to agree on the count as well as the rule, and a copy
+ * of either in the store is what would let them drift.
+ */
+export const CAST_LIMIT = 5;
 
 /**
  * Every image this card can show, in the order the gallery walks them:

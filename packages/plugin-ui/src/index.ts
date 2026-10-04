@@ -29,5 +29,5 @@ export { mediaLink, personLink, providerDisplayName, providerRefId } from './lin
 export type { ExternalLink } from './links.ts';
 export { DownloadTypeIcon, ProviderBadge, ImagePlaceholder } from './icons.tsx';
 export { Gallery } from './Gallery.tsx';
-export { MediaDetails, topBilled } from './MediaDetails.tsx';
+export { CAST_LIMIT, MediaDetails, topBilled } from './MediaDetails.tsx';
 export type { MediaDetailsProps } from './MediaDetails.tsx';
