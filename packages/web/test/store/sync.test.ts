@@ -1402,3 +1402,53 @@ test('stop closes the stream, and so does losing the lease', async () => {
   release(); await settle();
   assert.equal(opened2[0]?.closed, true, 'a demoted tab stops listening to the host');
 });
+
+test('a tail page that moved the cursor is followed at once; a page that moved nothing waits for the cadence (#112)', async () => {
+  // Measured on a live install: a replica bootstrapped 128k entries below
+  // the log's top, every artwork row above it, caught up at one page per
+  // 30 s interval and showed no posters for most of a day. The backfill has
+  // always re-run immediately; the tail now does the same while its cursor
+  // keeps moving.
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const fetch = stubFetch(routes({
+    '/api/sync?since=10': { ops: [{ op: 'upsert', table: 'media_item', id: 7, value: ALPHA }], cursor: 11, generation: 'gen-1' },
+    // The cursor moves without an op, which happens when a page's entries
+    // are all for tables the host emits nothing for: still more behind it.
+    '/api/sync?since=11': { ops: [], cursor: 12, generation: 'gen-1' },
+    '/api/sync?since=12': { ops: [], cursor: 12, generation: 'gen-1' },
+  }));
+  const { sched } = start(db, fetch.fetch, grantedLease());
+  await settle();
+
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'a page that carried ops and moved the cursor is followed immediately');
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'a page that moved the cursor with no ops is followed immediately too');
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_POLLING_MS, 'a page that moved nothing returns to the cadence');
+  assert.equal((await readCursors(db.transaction('meta', 'readonly')))?.since, 12);
+});
+
+test('catching up overrides the streaming cadence as well, and clears a nudge that landed meanwhile (#112)', async () => {
+  const db = await freshDb();
+  await seedMeta(db, { since: 10, before: null }, 'gen-1');
+  const { events, opened } = fakeStreams();
+  const tailPage = deferred<SyncResponse>();
+  const fetch = stubFetch((url: string) => (url === '/api/sync?since=10'
+    ? tailPage.promise
+    : ok({ ops: [], cursor: 11, generation: 'gen-1' })));
+  const { sched } = start(db, fetch.fetch, grantedLease(), { events });
+  await settle();
+  opened[0]?.open();
+
+  await sched.drive('tail'); // in flight, parked on tailPage
+  opened[0]?.changed(JSON.stringify({ cursor: 11, generation: 'gen-1' }));
+  await settle();
+  tailPage.resolve(ok({ ops: [{ op: 'upsert', table: 'media_item', id: 7, value: ALPHA }], cursor: 11, generation: 'gen-1' }));
+  await settle();
+  assert.equal(sched.pendingFor('tail')?.delayMs, 0, 'the moved cursor schedules the next page at once, nudge or no nudge');
+
+  await sched.drive('tail');
+  assert.equal(sched.pendingFor('tail')?.delayMs, TAIL_INTERVAL_STREAMING_MS, 'the folded nudge was consumed by the catch-up, so an idle page returns to the streaming cadence rather than running once more for it');
+});
