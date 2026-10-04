@@ -1,7 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ReactElement } from 'react';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { useState } from 'react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { Dialog } from '../src/Dialog.tsx';
 
 afterEach(cleanup);
@@ -64,4 +65,53 @@ test('other keys reach the caller, so a gallery can walk with the arrows', () =>
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowRight' });
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   assert.deepEqual(keys, ['ArrowRight'], 'Escape is the dialog\'s own and is not forwarded');
+});
+
+test('when the focused control removes itself, the dialog reclaims focus so Escape still closes it', async () => {
+  let closed = 0;
+  function Harness(): ReactElement {
+    const [present, setPresent] = useState(true);
+    return (
+      <Dialog label="x" className="item-dialog" onClose={() => { closed += 1; }}>
+        {present && <button type="button" onClick={() => { setPresent(false); }}>Pick</button>}
+      </Dialog>
+    );
+  }
+  render(<Harness />);
+  const pick = screen.getByRole('button', { name: 'Pick' });
+  pick.focus();
+  fireEvent.click(pick);
+  assert.ok(!screen.queryByRole('button', { name: 'Pick' }), 'the focused button is gone');
+  await waitFor(() => {
+    assert.ok(screen.getByRole('dialog').contains(document.activeElement), 'focus came back inside the dialog');
+  });
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  assert.equal(closed, 1, 'Escape closes it');
+});
+
+test('with dialogs nested, the innermost one reclaims focus, not the outer', async () => {
+  // The inner dialog opens after the outer one, as a gallery does inside the
+  // item dialog, so the outer panel's observer is created first and runs first.
+  function Harness(): ReactElement {
+    const [innerOpen, setInnerOpen] = useState(false);
+    const [present, setPresent] = useState(true);
+    return (
+      <Dialog label="outer" className="item-dialog" onClose={noop}>
+        <button type="button" onClick={() => { setInnerOpen(true); }}>Open gallery</button>
+        {innerOpen && (
+          <Dialog label="inner" className="gallery" onClose={noop}>
+            {present && <button type="button" onClick={() => { setPresent(false); }}>Next</button>}
+          </Dialog>
+        )}
+      </Dialog>
+    );
+  }
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open gallery' }));
+  const next = screen.getByRole('button', { name: 'Next' });
+  next.focus();
+  fireEvent.click(next);
+  await waitFor(() => {
+    assert.ok(document.activeElement === screen.getByRole('dialog', { name: 'inner' }), 'the inner panel holds focus');
+  });
 });
