@@ -40,8 +40,11 @@
  * Version 4 adds `by_table_status_updated`, so the Activities page reads
  * live downloads by status instead of walking every download row ever
  * recorded (the host never deletes one). Same resync cost, same reasoning.
+ *
+ * Version 5 added `poster` and `background` to the catalog record (phase 8);
+ * a bump wipes and bootstraps, so no record is ever read in the old shape.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * A row of the replica, keyed by `['table', 'id']`.

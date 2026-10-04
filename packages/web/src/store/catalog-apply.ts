@@ -9,7 +9,8 @@
  * download before its release, a role before its person, a release before
  * its item -- all read the same final state. The haystack costs two reads
  * per affected item plus one per role with a person id (an absent item
- * costs two in all).
+ * costs two in all), and the two image ids come from the `by_media_item`
+ * read, so they add none.
  *
  * **Except `picked`, which is one bit and used to cost one read per
  * release (#108).** "Any download row exists for any release of this item"
@@ -30,8 +31,8 @@
  * built from the set of ops and their pre-images, not their sequence.
  * `catalog-apply.test.ts` counts the reads.
  *
- * Only six tables matter here (`media_item`, `rss_item`, `role`, `person`,
- * `torrent_download`, `nzb_download`). A plugin-owned row that carries
+ * Only eight tables matter here (`media_item`, `rss_item`, `role`, `person`,
+ * `torrent_download`, `nzb_download`, `poster`, `background`). A plugin-owned row that carries
  * `mediaItemId` (a `tv_release`) comes back from `by_media_item` too and is
  * filtered out by `table`, not by shape.
  */
@@ -118,6 +119,13 @@ export async function affectedMediaItems(tx: IDBTransaction, held: readonly Held
       case 'role':
         for (const v of [next, previous]) { const m = numberField(v, 'mediaItemId'); if (m !== undefined) hint(m); }
         break;
+      case 'poster':
+      case 'background':
+        // An image arriving, re-ranking or leaving changes which row the
+        // tile shows and nothing else: no download moved, so the hint
+        // stays empty and the recompute carries `picked`.
+        for (const v of [next, previous]) { const m = numberField(v, 'mediaItemId'); if (m !== undefined) hint(m); }
+        break;
       case 'torrent_download':
       case 'nzb_download':
         for (const [v, removed] of [[next, false], [previous, op.op === 'delete']] as const) {
@@ -181,6 +189,14 @@ async function recomputeOne(tx: IDBTransaction, id: number, hint: PickedHint): P
   ]);
   const releases = linked.filter((r) => r.table === 'rss_item').sort((a, b) => a.id - b.id);
   const roles = linked.filter((r) => r.table === 'role').sort((a, b) => a.id - b.id);
+  const bestOf = (table: 'poster' | 'background'): number | null => {
+    const best = linked
+      .filter((r) => r.table === table)
+      .map((r) => ({ id: r.id, rank: numberField(r.value, 'rank') }))
+      .filter((r): r is { id: number; rank: number } => r.rank !== undefined)
+      .sort((a, b) => a.rank - b.rank || a.id - b.id)[0];
+    return best === undefined ? null : best.id;
+  };
   const [anyDownload, people] = await Promise.all([
     hint.full || previous === undefined
       ? anyDownloadFor(rows, releases.map((r) => r.id))
@@ -196,7 +212,10 @@ async function recomputeOne(tx: IDBTransaction, id: number, hint: PickedHint): P
   if (releaseDate !== undefined && releaseDate.length >= 4) parts.push(releaseDate.slice(0, 4));
   for (const r of releases) { const f = stringField(r.value, 'filename'); if (f !== undefined) parts.push(f); }
   for (const p of people) { const n = stringField(p?.value, 'name'); if (n !== undefined) parts.push(n); }
-  const record: CatalogRecord = { id, pluginId, updatedAt, picked, haystack: buildHaystack(parts) };
+  const record: CatalogRecord = {
+    id, pluginId, updatedAt, picked, haystack: buildHaystack(parts),
+    poster: bestOf('poster'), background: bestOf('background'),
+  };
   catalog.put(record);
   return true;
 }

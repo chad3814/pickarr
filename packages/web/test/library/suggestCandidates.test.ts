@@ -28,6 +28,8 @@ async function seed(db: IDBDatabase, items: readonly SeedItem[]): Promise<void> 
       updatedAt: item.updatedAt,
       picked: 0,
       haystack: item.title.toLowerCase(),
+      poster: null,
+      background: null,
     };
     tx.objectStore('catalog').put(record);
     tx.objectStore('rows').put({

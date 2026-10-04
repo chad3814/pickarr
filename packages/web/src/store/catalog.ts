@@ -25,6 +25,10 @@ export interface CatalogRecord {
   updatedAt: number;
   picked: 0 | 1;
   haystack: string;
+  /** The item's rank-0 `poster` row id, ties by lowest id; `null` when the replica holds none. What a film's grid tile shows. */
+  poster: number | null;
+  /** The item's rank-0 `background` row id, same order; `null` when none. What a television or adult grid tile shows. */
+  background: number | null;
 }
 
 export type PickedFilter = 'all' | 'picked' | 'unpicked';
@@ -56,7 +60,9 @@ export function isCatalogRecord(value: unknown): value is CatalogRecord {
     && typeof value.pluginId === 'string'
     && typeof value.updatedAt === 'number'
     && (value.picked === 0 || value.picked === 1)
-    && typeof value.haystack === 'string';
+    && typeof value.haystack === 'string'
+    && (value.poster === null || typeof value.poster === 'number')
+    && (value.background === null || typeof value.background === 'number');
 }
 
 /** The index and key range for a query: the picked index when the filter names a side, else the plugin-wide one. Bounds carry the index's full arity, as `rows.ts`'s `rangeFor` explains. */

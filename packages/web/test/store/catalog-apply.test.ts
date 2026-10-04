@@ -65,6 +65,7 @@ test('one scrambled batch yields one record with pluginId, updatedAt, picked and
   assert.deepEqual(rec, {
     id: 1, pluginId: 'tv', updatedAt: 500, picked: 1,
     haystack: 'dune: part two\n2024\ndune.part.two.2024.1080p.mkv\ndune.part.two.2024.2160p.mkv\ntimothée chalamet\nzendaya',
+    poster: null, background: null,
   });
   assert.ok(!rec?.haystack.includes('never-in-haystack'));
 });
@@ -257,4 +258,59 @@ test('a release that arrives after its downloads is checked alone, and a release
   assert.equal(moved.reads, 10 + 1, 'the item it left scans its ten remaining releases; the item it joined checks it alone');
   assert.equal((await record(db, 1))?.picked, 0);
   assert.equal((await record(db, 2))?.picked, 1);
+});
+
+/** A `poster`, `background` or `logo` row as the host replicates it: no `url`, no `path`. */
+const artwork = (table: 'poster' | 'background' | 'logo', id: number, mediaItemId: number, rank: number): SyncOp =>
+  ({ op: 'create', table, id, value: { id, mediaItemId, width: 10, height: 15, language: null, rank, createdAt: 1 } });
+
+test('the record carries the rank-0 poster and background by rank then id, whatever order the batch came in', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [
+    artwork('poster', 22, 1, 0),
+    artwork('background', 31, 1, 1),
+    item(1, 'Show', null),
+    artwork('poster', 20, 1, 1),
+    artwork('poster', 21, 1, 0),
+    artwork('background', 30, 1, 0),
+    // Another item's rank-0 poster must not leak in.
+    artwork('poster', 40, 2, 0),
+    item(2, 'Other', null),
+  ], CURSORS);
+  const rec = await record(db, 1);
+  assert.equal(rec?.poster, 21, 'rank 0, and the lower id of the two rank-0 posters');
+  assert.equal(rec?.background, 30);
+  assert.equal((await record(db, 2))?.poster, 40);
+});
+
+test('a record with no images carries null for both, and logos and people pictures never fill them', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [item(1, 'Show', null), artwork('logo', 50, 1, 0)], CURSORS);
+  const rec = await record(db, 1);
+  assert.equal(rec?.poster, null);
+  assert.equal(rec?.background, null);
+});
+
+test('a better-ranked poster arriving later rewrites the record, and a tombstoned rank-0 background falls back to the survivor', async () => {
+  const db = await freshDb();
+  await applyBatch(db, [item(1, 'Show', null), artwork('poster', 20, 1, 1), artwork('background', 30, 1, 0), artwork('background', 31, 1, 1)], CURSORS);
+  assert.equal((await record(db, 1))?.poster, 20);
+
+  const later = await applyBatch(db, [artwork('poster', 21, 1, 0)], { since: 2, before: null });
+  assert.deepEqual(later.catalog, [1], 'a poster op affects its item');
+  assert.equal((await record(db, 1))?.poster, 21);
+
+  await applyBatch(db, [del('background', 30)], { since: 3, before: null });
+  assert.equal((await record(db, 1))?.background, 31, 'the rank-1 background is now the best there is');
+});
+
+test('an artwork-only batch recomputes the item without reading a single release (#108 holds)', async () => {
+  const db = await freshDb();
+  const releases = Array.from({ length: 20 }, (_, i) => release(100 + i, 1, `r${String(i)}.mkv`));
+  await applyBatch(db, [item(1, 'Show', null), ...releases, torrent(500, 100)], CURSORS);
+  const { reads } = await countingReleaseReads(() => applyBatch(db, [artwork('poster', 20, 1, 0)], { since: 2, before: null }));
+  assert.equal(reads, 0, 'a poster cannot change picked, so the previous bit is carried');
+  const rec = await record(db, 1);
+  assert.equal(rec?.picked, 1);
+  assert.equal(rec?.poster, 20);
 });
