@@ -1782,6 +1782,46 @@ test('a body larger than the cap is refused before it is parsed', async () => {
   }
 });
 
+test('an artwork id that parses to a neighbouring integer is a 404, not a different media item\u2019s artwork', async () => {
+  // #97. Measured on the route's own `SELECT path FROM poster WHERE id = ?`:
+  // a float (`1.5`), an out-of-range integer (`1e30`) and a negative id all
+  // bind without throwing and match no row -- a 404, not the 500 the old
+  // comment claimed. The check earns its place on the one case `DIGITS`
+  // cannot see: `Number('9007199254740993')` is `9007199254740992`, so
+  // without `Number.isSafeInteger` this request would serve the row with
+  // id `2**53` -- another item's poster -- with a 200.
+  const alias = '9007199254740993';
+  assert.equal(Number(alias), 2 ** 53, 'the premise: this id parses to its neighbour');
+  assert.equal(Number.isSafeInteger(Number(alias)), false, 'and the check is what sees that');
+
+  const { raw, db } = setup();
+  const mediaItemId = seedMediaItem(raw, 'alpha', 1000, 'Has A Poster');
+  const dir = await mkdtemp(join(tmpdir(), 'pickarr-server-artwork-collide-'));
+  try {
+    const path = join(dir, 'collide.bin');
+    await writeFile(path, PNG_BYTES);
+    raw.prepare('INSERT INTO poster (id, media_item_id, url, width, height, created_at, path) VALUES (?, ?, ?, 100, 100, 1, ?)')
+      .run(2 ** 53, mediaItemId, 'https://images.test/collide.png', path);
+
+    const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+    try {
+      // The target row exists and has a file -- so the 404 below is the
+      // guard, not a missing row. Checked in the database rather than over
+      // the route, because `2**53` is itself one past the safe range and the
+      // route refuses that spelling too.
+      assert.equal(raw.prepare('SELECT path FROM poster WHERE id = ?').get(2 ** 53)?.['path'], path);
+
+      const aliased = await get(server, `/api/artwork/poster/${alias}`, cookie);
+      assert.equal(aliased.status, 404);
+      assert.deepEqual(await aliased.json(), { error: 'unknown route' });
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('every route declares its methods', () => {
   // The count assertion that already guards `open` applies here too: a route
   // added without `methods` must not silently inherit GET.
