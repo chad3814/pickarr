@@ -41,7 +41,9 @@ a migration.
 
 ## Running the 2.0 host
 
-Node 24 or newer.
+Node 24 or newer, on Linux or another POSIX system. The supported deployment is the
+Docker image below; running from source on macOS or Linux is for development. Windows is
+out of scope, and the host's path rules assume POSIX (`packages/host/src/media/shape.ts`).
 
 ```bash
 npm ci
