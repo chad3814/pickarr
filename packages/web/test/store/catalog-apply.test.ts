@@ -285,7 +285,9 @@ test('the record carries the rank-0 poster and background by rank then id, whate
 
 test('a record with no images carries null for both, and logos and people pictures never fill them', async () => {
   const db = await freshDb();
-  await applyBatch(db, [item(1, 'Show', null), artwork('logo', 50, 1, 0)], CURSORS);
+  const personPicture: SyncOp =
+    { op: 'create', table: 'person_image', id: 60, value: { id: 60, personId: 1, width: 10, height: 15, language: null, rank: 0, createdAt: 1 } };
+  await applyBatch(db, [item(1, 'Show', null), artwork('logo', 50, 1, 0), person(1, 'Actor'), role(1, 1, 1), personPicture], CURSORS);
   const rec = await record(db, 1);
   assert.equal(rec?.poster, null);
   assert.equal(rec?.background, null);

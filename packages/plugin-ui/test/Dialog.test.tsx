@@ -115,3 +115,37 @@ test('with dialogs nested, the innermost one reclaims focus, not the outer', asy
     assert.ok(document.activeElement === screen.getByRole('dialog', { name: 'inner' }), 'the inner panel holds focus');
   });
 });
+
+test('Escape on a nested dialog closes only that dialog, not the one beneath it', () => {
+  let outerClosed = 0;
+  let innerClosed = 0;
+  function Harness(): ReactElement {
+    const [innerOpen, setInnerOpen] = useState(false);
+    return (
+      <Dialog label="outer" className="item-dialog" onClose={() => { outerClosed += 1; }}>
+        <button type="button" onClick={() => { setInnerOpen(true); }}>Open gallery</button>
+        {innerOpen && <Dialog label="inner" className="gallery" onClose={() => { innerClosed += 1; }}><button type="button">Next</button></Dialog>}
+      </Dialog>
+    );
+  }
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Open gallery' }));
+  const innerDialog = screen.getByRole('dialog', { name: 'inner' });
+  fireEvent.keyDown(innerDialog, { key: 'Escape' });
+  assert.equal(innerClosed, 1, 'the inner dialog asked to close');
+  assert.equal(outerClosed, 0, 'the outer dialog did not');
+});
+
+test('a disabled control is not the last stop, so Tab from the control before it is still trapped', () => {
+  render(
+    <Dialog label="x" className="item-dialog" onClose={noop}>
+      <button type="button">Close</button>
+      <button type="button" disabled>Picking…</button>
+    </Dialog>,
+  );
+  const closeButton = screen.getByRole('button', { name: 'Close' });
+  closeButton.focus();
+  const tabNotCancelled = fireEvent.keyDown(closeButton, { key: 'Tab' });
+  assert.equal(tabNotCancelled, false, 'Tab from the last enabled control was intercepted');
+  assert.ok(screen.getByRole('dialog').contains(document.activeElement), 'focus is still inside the dialog');
+});

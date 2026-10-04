@@ -25,7 +25,7 @@ export interface DialogProps {
 }
 
 const FOCUSABLE_SELECTOR =
-  'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function Dialog({ label, labelledBy, className, onClose, onKeyDown, children }: DialogProps): ReactElement {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -46,9 +46,8 @@ export function Dialog({ label, labelledBy, className, onClose, onKeyDown, child
   // focus falls to `<body>`, and Escape and the Tab trap live on the panel's
   // `onKeyDown`, so the dialog could no longer be closed from the keyboard
   // (found by `grid.spec.ts`). What was measured: a React `onBlur` handler
-  // on the panel did not run when the focused child was removed (React
-  // drops events from fibers being deleted), so the panel watches its own
-  // subtree instead. It acts only when focus is on `<body>` (nothing), so a
+  // on the panel did not run when the focused child was removed, so the
+  // panel watches its own subtree instead. It acts only when focus is on `<body>` (nothing), so a
   // deliberate move to another control is untouched. Dialogs nest (the item
   // dialog holds a gallery) and every panel's observer sees the inner
   // mutations, so a panel with an open dialog inside it steps aside and the
