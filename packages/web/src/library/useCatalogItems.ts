@@ -48,24 +48,35 @@ function cursorFor(record: CatalogRecord | undefined): Cursor | undefined {
   return record === undefined ? undefined : { updatedAt: record.updatedAt, id: record.id };
 }
 
-/** `records`' media items in catalog order; a record with no usable `media_item` row is skipped. */
+/** `MediaItemsResult` plus the catalog records behind the items, keyed by item id -- the grid reads its image ids from these. */
+export interface CatalogItemsResult extends MediaItemsResult {
+  records: ReadonlyMap<number, CatalogRecord>;
+}
+
+/** `records`' media items in catalog order, and the records themselves by id; a record with no usable `media_item` row contributes to neither. */
 async function resolveItems(
   source: CatalogItemsSource,
   records: readonly CatalogRecord[],
-): Promise<readonly MediaItemSyncRead[]> {
+): Promise<{ items: readonly MediaItemSyncRead[]; records: ReadonlyMap<number, CatalogRecord> }> {
   const rows = await source.getRows('media_item', records.map((record) => record.id));
-  return records.flatMap((record) => {
+  const items: MediaItemSyncRead[] = [];
+  const byId = new Map<number, CatalogRecord>();
+  for (const record of records) {
     const value = rows.get(record.id);
-    return isMediaItem(value) ? [value] : [];
-  });
+    if (!isMediaItem(value)) continue;
+    items.push(value);
+    byId.set(record.id, record);
+  }
+  return { items, records: byId };
 }
 
 export function useCatalogItems(
   source: CatalogItemsSource,
   query: CatalogQuery,
   pageSize: number = PAGE_SIZE,
-): MediaItemsResult {
+): CatalogItemsResult {
   const [items, setItems] = useState<readonly MediaItemSyncRead[]>([]);
+  const [records, setRecords] = useState<ReadonlyMap<number, CatalogRecord>>(new Map());
   const [done, setDone] = useState(false);
   const [resolved, setResolved] = useState(false);
 
@@ -85,19 +96,21 @@ export function useCatalogItems(
     loadingMoreRef.current = false;
     windowGenerationRef.current += 1;
     setItems([]);
+    setRecords(new Map());
     setDone(false);
     setResolved(false);
 
     async function reloadWindow(): Promise<void> {
       const requested = windowSizeRef.current;
-      const records = await source.listCatalog(effectQuery, { limit: requested });
-      const resolvedItems = await resolveItems(source, records);
+      const page = await source.listCatalog(effectQuery, { limit: requested });
+      const resolvedPage = await resolveItems(source, page);
       if (cancelled) return;
       // Before the state writes, so a `loadMore` queued behind this one sees the new generation.
       windowGenerationRef.current += 1;
-      setItems(resolvedItems);
-      setDone(records.length < requested);
-      cursorRef.current = cursorFor(records.at(-1));
+      setItems(resolvedPage.items);
+      setRecords(resolvedPage.records);
+      setDone(page.length < requested);
+      cursorRef.current = cursorFor(page.at(-1));
       setResolved(true);
     }
 
@@ -147,14 +160,15 @@ export function useCatalogItems(
 
     source
       .listCatalog(queryRef.current, { from: cursor, limit: pageSize })
-      .then(async (records) => {
-        const more = await resolveItems(source, records);
+      .then(async (page) => {
+        const more = await resolveItems(source, page);
         // The window was replaced while this page was in flight and the
-        // replacement already covers it; skip all three writes together.
+        // replacement already covers it; skip all four writes together.
         if (generation !== windowGenerationRef.current) return;
-        setItems((current) => [...current, ...more]);
-        setDone(records.length < pageSize);
-        cursorRef.current = cursorFor(records.at(-1)) ?? cursor;
+        setItems((current) => [...current, ...more.items]);
+        setRecords((current) => new Map([...current, ...more.records]));
+        setDone(page.length < pageSize);
+        cursorRef.current = cursorFor(page.at(-1)) ?? cursor;
       })
       .catch((err: unknown) => {
         if (isStoreClosed(err)) return;
@@ -168,5 +182,5 @@ export function useCatalogItems(
   // `empty` means "no items and nothing more to page", not "the first page
   // had no items": a page of records whose `media_item` rows are absent
   // yields no items while `done` is still false and later pages may hold some.
-  return { items, loadMore, done, empty: resolved && done && items.length === 0 };
+  return { items, records, loadMore, done, empty: resolved && done && items.length === 0 };
 }
