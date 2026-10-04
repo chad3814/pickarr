@@ -41,6 +41,24 @@ export function Dialog({ label, labelledBy, className, onClose, onKeyDown, child
     };
   }, []);
 
+  // Reclaims focus when the focused control is removed from the panel. A
+  // pick inside the item dialog unmounts the Pick button that held focus,
+  // focus falls to `<body>`, and Escape and the Tab trap live on the panel's
+  // `onKeyDown`, so the dialog could no longer be closed from the keyboard
+  // (found by `grid.spec.ts`). A blur handler cannot see this: browsers do
+  // not fire blur or focusout when a focused element is removed, so the
+  // panel watches its own subtree instead. It acts only when focus is on
+  // `<body>` (nothing), so a deliberate move to another control is untouched.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const observer = new MutationObserver(() => {
+      if (panel.isConnected && document.activeElement === document.body) panel.focus();
+    });
+    observer.observe(panel, { childList: true, subtree: true });
+    return () => { observer.disconnect(); };
+  }, []);
+
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
     if (event.key === 'Escape') {
       event.stopPropagation();
