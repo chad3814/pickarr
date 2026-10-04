@@ -721,10 +721,18 @@ function isArtworkKind(value: string): value is ArtworkKind {
  * Every segment is read by index and checked, never `!`-asserted:
  * `noUncheckedIndexedAccess` types each one `string | undefined`, and a path
  * with the right number of slashes and an empty segment is a real request a
- * client can send. An id that is not a safe integer is refused here too --
- * `Number('9'.repeat(30))` is a float, and handing a float to a parameter
- * bound against an `INTEGER PRIMARY KEY` is a 500 for a request that only
- * ever meant "not found".
+ * client can send.
+ *
+ * **The safe-integer check is not about 500s** -- an earlier version of this
+ * comment said it was, and that was never measured. Measured on this
+ * route's own query (`SELECT path FROM poster WHERE id = ?`), a float, an
+ * out-of-range integer and a negative id all bind without throwing and
+ * match no row, so without the check they would be a 404 anyway. What the
+ * check catches is the collision `DIGITS` cannot see: `Number('9007199254740993')`
+ * is `9007199254740992`, so the request would otherwise serve the row with
+ * id `2**53` -- a different media item's artwork -- with a 200. Pinned by
+ * `test/api/server.test.ts`'s collision test, the same shape the mapping
+ * routes pin (#97).
  */
 async function artworkAnswer(
   raw: DatabaseSync,
