@@ -109,6 +109,8 @@ import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
 import { useFeedNames, type FeedIdentity } from './useFeedNames.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
+import { unmatchedHaystack } from './unmatchedSearch.ts';
+import { useBrowseQuery } from './useBrowseQuery.ts';
 
 /**
  * The four `Store` members this screen needs, and nothing else -- so a
@@ -130,8 +132,19 @@ export interface UnmatchedSource {
   subscribeTable: Store['subscribeTable'];
 }
 
+/** The search box's wiring, from `useBrowseQuery` through {@link UnmatchedPage}: what the input shows, what typing does, and the committed text for the empty sentence. */
+export interface UnmatchedSearch {
+  readonly input: string;
+  readonly q: string;
+  onInput(value: string): void;
+}
+
 export interface UnmatchedProps {
   source: UnmatchedSource;
+  /** The normalised search term (`normalizeTerm`); `''` or absent lists everything. Matched against `unmatchedHaystack`. */
+  term?: string;
+  /** Renders the search box when given. `Unmatched` itself reads no URL, so its tests need no router. */
+  search?: UnmatchedSearch;
   /**
    * Asks the host to identify one release again. Required and never
    * defaulted, the rule every submit on this codebase follows: a default
@@ -320,7 +333,7 @@ interface UnmatchedPage {
  * two situations apart; that is `Unmatched`'s own job, and its docblock
  * says how it draws the line.
  */
-async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<UnmatchedPage> {
+async function readUnmatched(source: UnmatchedSource, term: string, from?: Cursor): Promise<UnmatchedPage> {
   const collected: UnmatchedRow[] = [];
   let cursor = from;
 
@@ -339,6 +352,11 @@ async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<Un
       // has none.
       const value: unknown = row.value;
       if (!isRecord(value) || !isRssItem(value) || value.mediaItemId !== null) continue;
+      const lookupJson = textOf(value, 'lookupJson');
+      // The search is one more predicate on the same walk: the filename and
+      // the envelope's named parts (`unmatchedSearch.ts`), built only while
+      // a term is set.
+      if (term !== '' && !unmatchedHaystack(value.filename, lookupJson).includes(term)) continue;
       collected.push({
         id: row.id,
         filename: value.filename,
@@ -346,7 +364,7 @@ async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<Un
         lookupState: textOf(value, 'lookupState'),
         lookupStateDetail: textOf(value, 'lookupStateDetail'),
         updatedAt: updatedAtOf(row),
-        lookupJson: textOf(value, 'lookupJson'),
+        lookupJson,
       });
     }
 
@@ -396,6 +414,7 @@ async function readUnmatched(source: UnmatchedSource, from?: Cursor): Promise<Un
  */
 function makeRefresh(
   source: UnmatchedSource,
+  term: string,
   apply: (page: UnmatchedPage) => void,
   isCancelled: () => boolean,
 ): () => void {
@@ -404,7 +423,7 @@ function makeRefresh(
 
   function walk(): void {
     walking = true;
-    readUnmatched(source)
+    readUnmatched(source, term)
       .then((next) => {
         if (!isCancelled()) apply(next);
       })
@@ -733,7 +752,26 @@ function UnmatchedCard(
   );
 }
 
-export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactElement {
+/**
+ * `/unmatched` as the router mounts it: the URL's `q` through
+ * `useBrowseQuery` (the same debounce and the same `?q=` the category pages
+ * use; `filter` and `view` are read too and ignored, since this page has
+ * neither), handed to {@link Unmatched} as its term and its search box.
+ */
+export function UnmatchedPage({ source, retry, identify }: Omit<UnmatchedProps, 'term' | 'search'>): ReactElement {
+  const { query, controls } = useBrowseQuery();
+  return (
+    <Unmatched
+      source={source}
+      retry={retry}
+      identify={identify}
+      term={query.term}
+      search={{ input: controls.input, q: query.q, onInput: controls.setInput }}
+    />
+  );
+}
+
+export function Unmatched({ source, retry, identify, term = '', search }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
@@ -819,7 +857,7 @@ export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactEle
       cursorRef.current = page.cursor;
     }
 
-    const refresh = makeRefresh(source, apply, () => cancelled);
+    const refresh = makeRefresh(source, term, apply, () => cancelled);
     refreshRef.current = refresh;
 
     refresh();
@@ -829,7 +867,7 @@ export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactEle
       refreshRef.current = undefined;
       unsubscribe();
     };
-  }, [source]);
+  }, [source, term]);
 
   // Resumes the walk from `cursorRef` for one more page, appending it to
   // `rows` rather than replacing them -- the one path that *does* resume a
@@ -844,7 +882,7 @@ export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactEle
     loadingMoreRef.current = true;
     const generation = generationRef.current;
 
-    readUnmatched(source, cursor)
+    readUnmatched(source, term, cursor)
       .then((page) => {
         // A wake already re-read the whole screen from the top while this
         // page was in flight, and that re-read already answered for
@@ -863,7 +901,7 @@ export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactEle
       .finally(() => {
         loadingMoreRef.current = false;
       });
-  }, [source]);
+  }, [source, term]);
 
   // Scrolling loads the next page; the button rendered below still does
   // too. See `useInfiniteScroll` for why both, and note the order in the
@@ -891,9 +929,30 @@ export function Unmatched({ source, retry, identify }: UnmatchedProps): ReactEle
   return (
     <section aria-labelledby="unmatched-heading" data-testid="unmatched">
       <h1 id="unmatched-heading">Unmatched</h1>
+      {search !== undefined && (
+        <form
+          role="search"
+          aria-label="Search unmatched"
+          onSubmit={(event) => {
+            event.preventDefault();
+          }}
+        >
+          <label>
+            Search
+            <input
+              type="search"
+              autoComplete="off"
+              value={search.input}
+              onChange={(event) => {
+                search.onInput(event.currentTarget.value);
+              }}
+            />
+          </label>
+        </form>
+      )}
       {rows !== undefined &&
         (rows.length === 0 ? (
-          <p>Everything has been matched.</p>
+          <p>{term === '' ? 'Everything has been matched.' : `Nothing matches "${search?.q ?? term}"`}</p>
         ) : (
           <>
             {rows.map((row) => (

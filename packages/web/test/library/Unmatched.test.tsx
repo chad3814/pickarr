@@ -1076,3 +1076,57 @@ test('saving an edit posts it for that release and holds Edit disabled until the
     assert.ok(!screen.getByRole<HTMLButtonElement>('button', { name: 'Edit' }).disabled);
   });
 });
+
+const SUSPECTS = JSON.stringify({
+  media: { title: 'Good News About Hell', parents: [{ title: 'Severance' }], people: [{ name: 'Adam Scott' }] },
+  suggestions: { site: { name: 'Some Site' }, performers: [{ name: 'Jane Doe' }] },
+  parsed: { title: 'Good News' },
+});
+
+test('a term narrows the list by filename and by what the lookup service suspected: a performer, a series, a site', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    rssOp({ id: 1, filename: 'unrelated.mkv', mediaItemId: null, updatedAt: 10 }),
+    rssOp({ id: 2, filename: 'cryptic.name.mkv', mediaItemId: null, updatedAt: 20, lookupJson: SUSPECTS }),
+    rssOp({ id: 3, filename: 'severance.s01e01.mkv', mediaItemId: null, updatedAt: 30 }),
+    // Matched: never listed, whatever the term.
+    rssOp({ id: 4, filename: 'jane.doe.matched.mkv', mediaItemId: 9, updatedAt: 40 }),
+  ]);
+
+  const { rerender } = render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="jane doe" />);
+  await waitFor(() => { assert.deepEqual(filenamesShown(), ['cryptic.name.mkv']); }, { timeout: 4000 });
+
+  rerender(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="severance" />);
+  await waitFor(() => { assert.deepEqual(filenamesShown(), ['severance.s01e01.mkv', 'cryptic.name.mkv']); }, { timeout: 4000 });
+
+  rerender(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="" />);
+  await waitFor(() => { assert.deepEqual(filenamesShown(), ['severance.s01e01.mkv', 'cryptic.name.mkv', 'unrelated.mkv']); }, { timeout: 4000 });
+});
+
+test('the search box renders when wired, reports typing, and a miss says what it missed', async () => {
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 1, filename: 'only.mkv', mediaItemId: null, updatedAt: 10 })]);
+  const typed: string[] = [];
+  render(
+    <Unmatched
+      retry={neverRetries}
+      identify={neverIdentifies}
+      source={sourceFor(db)}
+      term="zzz"
+      search={{ input: 'zzz', q: 'zzz', onInput: (value) => { typed.push(value); } }}
+    />,
+  );
+  const box = screen.getByRole('searchbox', { name: 'Search' });
+  assert.equal(box instanceof HTMLInputElement && box.value, 'zzz');
+  fireEvent.change(box, { target: { value: 'zzzy' } });
+  assert.deepEqual(typed, ['zzzy']);
+  await waitFor(() => { assert.ok(screen.getByText('Nothing matches "zzz"')); }, { timeout: 4000 });
+  assert.ok(screen.getByRole('search', { name: 'Search unmatched' }), 'a landmark of its own, so it is found the way the category controls are');
+});
+
+test('without a search wired, no box renders and the empty state is the plain sentence', async () => {
+  const db = await freshDb();
+  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  await waitFor(() => { assert.ok(screen.getByText('Everything has been matched.')); });
+  assert.ok(!screen.queryByRole('searchbox'));
+});
