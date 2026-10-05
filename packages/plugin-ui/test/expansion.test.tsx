@@ -193,3 +193,9 @@ test('useExpansion starts closed unless told otherwise, and reports the first to
   assert.equal(button.getAttribute('aria-pressed'), 'false');
   assert.deepEqual(seen, [false], 'the toggle reports the new state; opening on mount is not a change');
 });
+
+test('a headlineId lands on the headline span, so a control beside the card can be named by it', () => {
+  render(<CardHeading headline="Some.Release.mkv" headlineId="rel-1" expanded={false} onToggle={() => {}} />);
+  const span = document.getElementById('rel-1');
+  assert.ok(span !== null && span.textContent === 'Some.Release.mkv', 'the id is on the span carrying the headline');
+});

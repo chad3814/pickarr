@@ -1,16 +1,16 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
-import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { freshDb } from '../store/harness.ts';
 import { gone } from '../dom.ts';
 import { applyBatch } from '../../src/store/apply.ts';
 import type { SyncOp } from '../../src/store/wire.ts';
-import { listByTable } from '../../src/store/rows.ts';
+import { byRssItem, listByTable } from '../../src/store/rows.ts';
 import { subscribe, subscribeInserts, subscribeTable } from '../../src/store/notify.ts';
 import { Unmatched, type UnmatchedSource } from '../../src/library/Unmatched.tsx';
-import type { IdentifySubmit } from '@pickarr/plugin-ui';
+import type { IdentifySubmit, PickSubmit } from '@pickarr/plugin-ui';
 import type { RetrySubmit } from '../../src/library/postRetry.ts';
 import { PAGE_SIZE } from '../../src/library/useMediaItems.ts';
 
@@ -29,6 +29,11 @@ afterEach(cleanup);
  * rather than failing. The retry tests at the end of this file pass their
  * own.
  */
+/** A `pick` that fails the test if it is ever used, for the same reason `neverRetries` does. */
+const neverPicks: PickSubmit = () => {
+  assert.fail('this test must not pick');
+};
+
 const neverRetries: RetrySubmit = () => {
   assert.fail('this test must not retry');
 };
@@ -128,6 +133,7 @@ function feedOp({ id, name, pluginId = 'tv' }: { id: number; name: string; plugi
 function sourceFor(db: IDBDatabase): UnmatchedSource {
   return {
     listByTable: (table, opts) => listByTable(db, table, opts),
+    byRssItem: (rssItemId) => byRssItem(db, rssItemId),
     subscribeInserts,
     subscribe,
     subscribeTable,
@@ -154,8 +160,19 @@ function filenamesShown(): string[] {
 }
 
 /** Opens the one card on screen. Every expansion test below renders exactly one release. */
+/** The one card's heading button -- not its Pick button, which sits beside it since the pick slice. */
+function headingButton(): HTMLElement {
+  return within(screen.getByRole('heading', { level: 2 })).getByRole('button');
+}
+
 function expandTheOnlyCard(): void {
-  fireEvent.click(screen.getByRole('button'));
+  fireEvent.click(headingButton());
+}
+
+/** The one card's heading button once the card has rendered. A filename regex would now also match `Pick <filename>`. */
+async function findHeadingButton(): Promise<HTMLElement> {
+  const heading = await screen.findByRole('heading', { level: 2 });
+  return within(heading).getByRole('button');
 }
 
 test('lists releases whose mediaItemId is null, newest first', async () => {
@@ -166,7 +183,7 @@ test('lists releases whose mediaItemId is null, newest first', async () => {
     rssOp({ id: 3, filename: 'newer.mkv', mediaItemId: null, updatedAt: 30 }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['newer.mkv', 'older.mkv'], 'matched.mkv is not here');
@@ -182,7 +199,7 @@ test('a release renders as a card, with its filename as the title', async () => 
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'lonely.mkv', mediaItemId: null, updatedAt: 10 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.equal(screen.queryAllByRole('article').length, 1, 'one release, one card');
@@ -205,7 +222,7 @@ test('the feed that produced it is named at the right of the title', async () =>
     rssOp({ id: 1, filename: 'from-a-feed.mkv', mediaItemId: null, updatedAt: 10, feedId: 7 }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['from-a-feed.mkv'], 'the card rendered');
@@ -213,7 +230,7 @@ test('the feed that produced it is named at the right of the title', async () =>
   // A second `waitFor`: `useFeedNames` reads `rss_feed` through its own
   // effect, so the label can land a tick after the card it hangs on.
   await waitFor(() => {
-    const small = screen.getByRole('button').querySelector('small');
+    const small = headingButton().querySelector('small');
     assert.equal(small?.textContent, 'Nightly Tracker', 'the feed name is in its own <small>');
   });
   assert.ok(
@@ -231,13 +248,13 @@ test('a release whose feed the replica has not got renders no trailing label', a
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'orphan.mkv', mediaItemId: null, updatedAt: 10, feedId: 404 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['orphan.mkv']);
   });
   assert.ok(
-    screen.getByRole('button').querySelector('small') === null,
+    headingButton().querySelector('small') === null,
     'no feed, no element',
   );
   assert.ok(screen.getByRole('button', { name: 'orphan.mkv' }), 'and the name is the filename alone');
@@ -260,13 +277,13 @@ test('a feed named with the empty string renders no trailing label', async () =>
     rssOp({ id: 1, filename: 'nameless-feed.mkv', mediaItemId: null, updatedAt: 10, feedId: 7 }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['nameless-feed.mkv']);
   });
   assert.ok(
-    screen.getByRole('button').querySelector('small') === null,
+    headingButton().querySelector('small') === null,
     'an empty name is no name, and renders no element',
   );
   assert.ok(screen.getByRole('button', { name: 'nameless-feed.mkv' }), 'nor does it change what the control is called');
@@ -283,7 +300,7 @@ test('an empty detail sentence renders no label standing over nothing', async ()
     rssOp({ id: 1, filename: 'blank-detail.mkv', mediaItemId: null, updatedAt: 10, lookupStateDetail: '' }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['blank-detail.mkv']);
   });
@@ -310,7 +327,7 @@ test('collapsed, a card shows no detail and no JSON', async () => {
     }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['closed.mkv']);
@@ -334,7 +351,7 @@ test('expanded, a card says why the release is unmatched', async () => {
     }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['why.mkv']);
   });
@@ -352,7 +369,7 @@ test('expanded, a card shows the lookup answer', async () => {
     rssOp({ id: 1, filename: 'answered.mkv', mediaItemId: null, updatedAt: 10, lookupJson: answer }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['answered.mkv']);
   });
@@ -372,7 +389,7 @@ test('a release with no stored answer expands without an empty block', async () 
     rssOp({ id: 1, filename: 'unasked.mkv', mediaItemId: null, updatedAt: 10, lookupState: 'pending' }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['unasked.mkv']);
   });
@@ -446,7 +463,7 @@ test('a release stored before the lookup answer existed still lists, and still o
   const db = await freshDb();
   await seed(db, [legacyRssOp({ id: 1, filename: 'from-an-older-build.mkv', updatedAt: 10 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['from-an-older-build.mkv'], 'an older row is still an unmatched release');
@@ -467,7 +484,7 @@ test('an answer too large to store says so, rather than rendering the marker JSO
     rssOp({ id: 1, filename: 'huge.mkv', mediaItemId: null, updatedAt: 10, lookupJson: LOOKUP_JSON_TOO_LARGE }),
   ]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['huge.mkv']);
   });
@@ -483,7 +500,7 @@ test('a release that has since been matched drops off the list', async () => {
   const db = await freshDb();
   await seed(db, [rssOp({ id: 1, filename: 'pending.mkv', mediaItemId: null, updatedAt: 10 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(filenamesShown(), ['pending.mkv']);
@@ -507,7 +524,7 @@ test('a release that has since been matched drops off the list', async () => {
 test('an empty list says nothing is unmatched, rather than rendering blank', async () => {
   const db = await freshDb();
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/everything has been matched/i));
@@ -517,7 +534,7 @@ test('an empty list says nothing is unmatched, rather than rendering blank', asy
 test('a fresh unmatched release appears without a reload', async () => {
   const db = await freshDb();
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.ok(screen.getByText(/everything has been matched/i));
@@ -548,7 +565,7 @@ test('no fetch is issued while listing', async () => {
       rssOp({ id: 1, filename: 'local.mkv', mediaItemId: null, updatedAt: 10 }),
     ]);
 
-    render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+    render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
     await waitFor(() => {
       assert.deepEqual(filenamesShown(), ['local.mkv']);
@@ -557,7 +574,7 @@ test('no fetch is issued while listing', async () => {
     // `rss_feed` from the replica too, and a hook that resolved a feed id
     // over the network would be invisible to every other test here.
     await waitFor(() => {
-      assert.equal(screen.getByRole('button').querySelector('small')?.textContent, 'Nightly Tracker');
+      assert.equal(headingButton().querySelector('small')?.textContent, 'Nightly Tracker');
     });
     assert.equal(calls, 0, 'the replica answered without the network');
   } finally {
@@ -635,7 +652,7 @@ test('a batch that matches every listed release costs one re-read, not one per l
     },
   };
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={source} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, listed, 'one screenful of unmatched releases');
   });
@@ -670,7 +687,7 @@ test('a second page is read on demand, and the first page is kept', async () => 
   }
   await seed(db, seedOps);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.deepEqual(
@@ -706,7 +723,7 @@ test('the sentinel and the button both disappear once the table is exhausted', a
   }
   await seed(db, seedOps);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
   await waitFor(() => {
     assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful, exactly filling the first raw page');
@@ -763,7 +780,7 @@ test('a wake resets the walk rather than resuming a stale cursor', async () => {
     },
   };
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={source} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, PAGE_SIZE, 'one screenful of the first 26 releases');
   });
@@ -838,7 +855,7 @@ test('paging does not re-walk the pages already read', async () => {
     },
   };
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={source} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={source} />);
   await waitFor(() => {
     assert.equal(filenamesShown().length, newestUnmatched, 'one screenful -- exactly the newest, unmatched block');
   });
@@ -868,7 +885,7 @@ test('paging does not re-walk the pages already read', async () => {
 
 /** Opens the one card on screen and returns its Retry button. */
 async function openAndFindRetry(): Promise<HTMLButtonElement> {
-  const heading = await screen.findByRole('button', { name: /\.mkv$/ });
+  const heading = await findHeadingButton();
   fireEvent.click(heading);
   return screen.getByRole<HTMLButtonElement>('button', { name: 'Retry' });
 }
@@ -882,7 +899,7 @@ test('an expanded card offers a retry, and asks for that release by id', async (
     return Promise.resolve({ accepted: true });
   };
 
-  render(<Unmatched retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
   fireEvent.click(await openAndFindRetry());
 
   // Spelled literally rather than read back off the seeded row: a card
@@ -899,9 +916,9 @@ test('a collapsed card offers no retry', async () => {
   const db = await freshDb();
   await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
 
-  await screen.findByRole('button', { name: /\.mkv$/ });
+  await findHeadingButton();
   assert.ok(!screen.queryByRole('button', { name: 'Retry' }), 'nothing to retry until the card is open');
 });
 
@@ -928,7 +945,7 @@ test('an accepted retry stays pending until the row actually changes', async () 
   const settled = new Promise<void>((resolve) => { accept = resolve; });
   const retry: RetrySubmit = () => settled.then(() => ({ accepted: true as const }));
 
-  render(<Unmatched retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
   fireEvent.click(await openAndFindRetry());
 
   await waitFor(() => {
@@ -963,7 +980,7 @@ test('a refused retry says why, in this page’s own words, and re-enables', asy
   await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
   const retry: RetrySubmit = () => Promise.resolve({ refusal: 'already-matched' });
 
-  render(<Unmatched retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
   fireEvent.click(await openAndFindRetry());
 
   // The literal sentence, not `RETRY_REFUSAL_MESSAGES['already-matched']`:
@@ -984,7 +1001,7 @@ test('a refusal is announced, not merely printed', async () => {
   await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10 })]);
   const retry: RetrySubmit = () => Promise.resolve({ refusal: 'offline' });
 
-  render(<Unmatched retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={retry} identify={neverIdentifies} source={sourceFor(db)} />);
   fireEvent.click(await openAndFindRetry());
 
   const alert = await screen.findByRole('alert');
@@ -1002,7 +1019,7 @@ test('Edit appears beside Retry only once the feed row is known', async () => {
   const db = await freshDb();
   await seed(db, [rssOp({ id: 7, filename: 'unknown.mkv', mediaItemId: null, updatedAt: 10, feedId: 3 })]);
 
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await openAndFindRetry();
   assert.ok(!screen.queryByRole('button', { name: 'Edit' }), 'no feed row, so no Edit');
 
@@ -1027,7 +1044,7 @@ test('Edit opens the combobox for the feed’s plugin, and Cancel puts the butto
     },
   };
 
-  render(<Unmatched retry={neverRetries} identify={identify} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={identify} source={sourceFor(db)} />);
   fireEvent.click(await screen.findByRole('button', { name: /^unknown\.mkv/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
 
@@ -1058,7 +1075,7 @@ test('saving an edit posts it for that release and holds Edit disabled until the
     suggest: () => Promise.resolve([]),
   };
 
-  render(<Unmatched retry={neverRetries} identify={identify} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={identify} source={sourceFor(db)} />);
   fireEvent.click(await screen.findByRole('button', { name: /^unknown\.mkv/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
   fireEvent.change(screen.getByRole('combobox', { name: 'Title' }), { target: { value: 'Dune' } });
@@ -1093,13 +1110,13 @@ test('a term narrows the list by filename and by what the lookup service suspect
     rssOp({ id: 4, filename: 'jane.doe.matched.mkv', mediaItemId: 9, updatedAt: 40 }),
   ]);
 
-  const { rerender } = render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="jane doe" />);
+  const { rerender } = render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="jane doe" />);
   await waitFor(() => { assert.deepEqual(filenamesShown(), ['cryptic.name.mkv']); }, { timeout: 4000 });
 
-  rerender(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="severance" />);
+  rerender(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="severance" />);
   await waitFor(() => { assert.deepEqual(filenamesShown(), ['severance.s01e01.mkv', 'cryptic.name.mkv']); }, { timeout: 4000 });
 
-  rerender(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="" />);
+  rerender(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} term="" />);
   await waitFor(() => { assert.deepEqual(filenamesShown(), ['severance.s01e01.mkv', 'cryptic.name.mkv', 'unrelated.mkv']); }, { timeout: 4000 });
 });
 
@@ -1109,6 +1126,7 @@ test('the search box renders when wired, reports typing, and a miss says what it
   const typed: string[] = [];
   render(
     <Unmatched
+      pick={neverPicks}
       retry={neverRetries}
       identify={neverIdentifies}
       source={sourceFor(db)}
@@ -1126,7 +1144,7 @@ test('the search box renders when wired, reports typing, and a miss says what it
 
 test('without a search wired, no box renders and the empty state is the plain sentence', async () => {
   const db = await freshDb();
-  render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
   await waitFor(() => { assert.ok(screen.getByText('Everything has been matched.')); });
   assert.ok(!screen.queryByRole('searchbox'));
 });
@@ -1145,7 +1163,7 @@ test('a release arriving while the page is scrolled is held behind "N new" until
   const scrollTo = window.scrollTo;
   window.scrollTo = (): void => { y = 0; window.dispatchEvent(new Event('scroll')); };
   try {
-    render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+    render(<Unmatched pick={neverPicks} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
     await waitFor(() => { assert.deepEqual(filenamesShown(), ['second.mkv', 'first.mkv']); });
 
     act(() => { y = 600; window.dispatchEvent(new Event('scroll')); });
@@ -1161,4 +1179,53 @@ test('a release arriving while the page is scrolled is held behind "N new" until
     window.scrollTo = scrollTo;
     Object.defineProperty(window, 'scrollY', { configurable: true, value: 0, writable: true });
   }
+});
+
+/** One `torrent_download` upsert op for a release, in the shape the host replicates. */
+function torrentOp({ id, rssItemId, status, percentage = null }: { id: number; rssItemId: number; status: string; percentage?: number | null }): SyncOp {
+  return {
+    op: 'upsert', table: 'torrent_download', id,
+    value: { id, rssItemId, downloadClientId: 1, infohash: null, clientRef: null, status, attempts: 1, createdAt: 1, updatedAt: 1, percentage, absentSince: null, deliveredAt: null, reclaimedAt: null },
+  };
+}
+
+test('each unmatched card offers Pick, named with its filename; an accepted pick stays Picking… until the download row replicates, which replaces it with the status', async () => {
+  const db = await freshDb();
+  await seed(db, [rssOp({ id: 7, filename: 'pick.me.mkv', mediaItemId: null, updatedAt: 10 })]);
+  const picked: number[] = [];
+  const accepts: PickSubmit = (rssItemId) => { picked.push(rssItemId); return Promise.resolve({ accepted: true }); };
+
+  render(<Unmatched pick={accepts} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  const button = await screen.findByRole<HTMLButtonElement>('button', { name: 'Pick pick.me.mkv' });
+  assert.equal(button.textContent, 'Pick', 'the visible half is just the verb; the filename comes from the heading');
+
+  fireEvent.click(button);
+  await waitFor(() => { assert.equal(button.textContent, 'Picking…'); });
+  assert.deepEqual(picked, [7], 'the release id reached the submit');
+  assert.ok(button.disabled);
+
+  await seed(db, [torrentOp({ id: 70, rssItemId: 7, status: 'submitted' })]);
+  await waitFor(() => { assert.ok(screen.getByText('Status: submitted')); }, { timeout: 4000 });
+  assert.ok(!screen.queryByRole('button', { name: /^Pick/ }), 'a release with a download offers no Pick');
+});
+
+test('a refused pick says why and offers the button again; a release already downloading shows its progress and no Pick', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    rssOp({ id: 1, filename: 'refused.mkv', mediaItemId: null, updatedAt: 10 }),
+    rssOp({ id: 2, filename: 'running.mkv', mediaItemId: null, updatedAt: 20 }),
+    torrentOp({ id: 20, rssItemId: 2, status: 'downloading', percentage: 42 }),
+  ]);
+  const refuses: PickSubmit = () => Promise.resolve({ refusal: 'no-client-of-type' });
+  render(<Unmatched pick={refuses} retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+  await waitFor(() => { assert.deepEqual(filenamesShown(), ['running.mkv', 'refused.mkv']); });
+
+  assert.ok(screen.getByText('Status: downloading (42%)'));
+  assert.equal(screen.getAllByRole('button', { name: /^Pick/ }).length, 1, 'only the release with no download is pickable');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Pick refused.mkv' }));
+  const alert = await screen.findByRole('alert');
+  assert.equal(alert.textContent, 'No download client that can take this kind of release is set up. Add one under Settings.');
+  const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Pick refused.mkv' });
+  assert.ok(!button.disabled, 'a refusal hands the button back');
 });

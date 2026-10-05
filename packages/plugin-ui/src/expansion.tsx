@@ -119,6 +119,8 @@ export interface CardHeadingProps {
   readonly trailing?: string;
   readonly expanded: boolean;
   readonly onToggle: () => void;
+  /** An id for the headline span, so a control beside the card can be named by it (`PickControl`'s `labelledBy`). */
+  readonly headlineId?: string;
 }
 
 /**
@@ -135,7 +137,7 @@ export interface CardHeadingProps {
  * web's stylesheet can lay out against each other. A bare text node beside
  * an element becomes an anonymous flex item, which no selector can reach.
  */
-export function CardHeading({ headline, trailing, expanded, onToggle }: CardHeadingProps): ReactElement {
+export function CardHeading({ headline, trailing, expanded, onToggle, headlineId }: CardHeadingProps): ReactElement {
   return (
     <h2>
       <button type="button" aria-expanded={expanded} onClick={onToggle}>
@@ -167,7 +169,7 @@ export function CardHeading({ headline, trailing, expanded, onToggle }: CardHead
           there, which is the change that would make the algorithm's
           answer matter.
         */}
-        <span title={headline}>{headline}</span>
+        <span id={headlineId} title={headline}>{headline}</span>
         {/*
           `<small>`, and not a `<span>` with a class, because this package
           ships markup and web ships the CSS (`plugin.ts`'s `Card` doc) and
