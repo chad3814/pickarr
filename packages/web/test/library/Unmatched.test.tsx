@@ -1130,3 +1130,35 @@ test('without a search wired, no box renders and the empty state is the plain se
   await waitFor(() => { assert.ok(screen.getByText('Everything has been matched.')); });
   assert.ok(!screen.queryByRole('searchbox'));
 });
+
+test('a release arriving while the page is scrolled is held behind "N new" until the operator is back at the top', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    rssOp({ id: 1, filename: 'first.mkv', mediaItemId: null, updatedAt: 10 }),
+    rssOp({ id: 2, filename: 'second.mkv', mediaItemId: null, updatedAt: 20 }),
+  ]);
+  // The same fake window scroll `Category.test.tsx` uses: `scrollY` is what
+  // the hold reads, `scroll` is what it listens for, `scrollTo` is what the
+  // control calls.
+  let y = 0;
+  Object.defineProperty(window, 'scrollY', { configurable: true, get: () => y });
+  const scrollTo = window.scrollTo;
+  window.scrollTo = (): void => { y = 0; window.dispatchEvent(new Event('scroll')); };
+  try {
+    render(<Unmatched retry={neverRetries} identify={neverIdentifies} source={sourceFor(db)} />);
+    await waitFor(() => { assert.deepEqual(filenamesShown(), ['second.mkv', 'first.mkv']); });
+
+    act(() => { y = 600; window.dispatchEvent(new Event('scroll')); });
+    await seed(db, [rssOp({ id: 3, filename: 'third.mkv', mediaItemId: null, updatedAt: 30 })]);
+
+    const control = await screen.findByRole('button', { name: '1 new' });
+    assert.deepEqual(filenamesShown(), ['second.mkv', 'first.mkv'], 'nothing on screen moved');
+
+    fireEvent.click(control);
+    await waitFor(() => { assert.deepEqual(filenamesShown(), ['third.mkv', 'second.mkv', 'first.mkv']); });
+    assert.ok(!screen.queryByRole('button', { name: /new/ }), 'released, so the control is gone');
+  } finally {
+    window.scrollTo = scrollTo;
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 0, writable: true });
+  }
+});
