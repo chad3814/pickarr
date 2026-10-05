@@ -17,7 +17,6 @@
     "test:server": "node --import tsx --conditions development --test \"packages/*/test/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "test:web": "TSX_TSCONFIG_PATH=tsconfig.test-web.json node --import tsx --import ./packages/web/test/setup.ts --conditions development --test \"packages/*/test/**/*.test.tsx\"",
     "test": "npm run test:server && npm run test:web",
-    "reclassify-artwork": "node --import tsx --conditions development scripts/reclassify-artwork.ts",
     "seed-feed": "node --import tsx --conditions development scripts/seed-feed.ts",
     "seed-client": "node --import tsx --conditions development scripts/seed-client.ts",
     "e2e": "npm run e2e -w @pickarr/e2e",
