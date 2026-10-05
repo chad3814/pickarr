@@ -81,6 +81,27 @@ never opened. `rss_feed.url` is `UNIQUE`: re-seeding a url already on file fails
 naming the existing row rather than silently overwriting it. Each script's docblock has
 the full argument list.
 
+### Re-fetching artwork
+
+Artwork is fetched once, when a release is identified, and never refreshed on its own.
+After a change to what a provider hands back -- more performer pictures, say -- the items
+identified before it keep their old pictures until something identifies them again. The
+catch-up is manual, per plugin, and runs inside the container because it ships in the
+host's `dist`:
+
+```bash
+docker exec -u 1000:1000 pickarr node packages/host/dist/backfill-artwork.js --plugin=xxx --dry-run
+docker exec -u 1000:1000 pickarr node packages/host/dist/backfill-artwork.js --plugin=xxx --limit=200
+```
+
+`--plugin` is `movie`, `tv` or `xxx`. `--dry-run` counts without queueing; `--limit`
+caps one run so a large library can be fed to a provider in batches, and a second run
+picks up where the first stopped because an item with an artwork job still `ready` or
+`running` is never queued twice. The running host notices the new jobs within a minute.
+Each job keeps the five best images per item and per person and prunes the rest, so this
+also drops pictures a provider no longer lists. Pass `-u` with the `PUID:PGID` the
+container runs as; see [Which user the container runs as](#which-user-the-container-runs-as) below.
+
 ### Which user the container runs as
 
 Set `PUID` and `PGID` and the container runs as that user instead of root:
