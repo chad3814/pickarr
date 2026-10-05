@@ -34,7 +34,8 @@
  * this list (picks design §7).
  *
  * **This sentence was false when it was first written, and the browser is
- * what found it.** The first version of `pick` below cleared `pending` in
+ * what found it.** The first version of the pick handler -- now
+ * `PickControl.tsx`'s -- cleared `pending` in
  * an unconditional `finally`, so an accepted pick re-enabled the button at
  * the 202 and not at the row. Measured end to end by the styling task's
  * Playwright spec, on the real submission path: **enabled and reading
@@ -42,8 +43,8 @@
  * seconds during which the host already held a `submitted` row and the
  * browser still offered a live button, and a second click there answers
  * `already-submitted`. What is written above is now what the code does;
- * see {@link ReleaseRow} for the shape, and for the hang it deliberately
- * accepts.
+ * see `PickControl.tsx` for the shape, and {@link ReleaseRow}'s doc for
+ * the hang it deliberately accepts.
  *
  * **That sentence used to end "and leaves a `failed` row behind", which
  * this list then rendered forever beside the `submitted` one.** It does
@@ -52,8 +53,8 @@
  * all. Nothing here changed for it -- the row this component would have
  * had to hide is simply never written.
  *
- * **Each row is a component, so each row owns its own pending flag and its
- * own error.** State held up here and keyed by release id would work too; a
+ * **Each row is a component rendering its own `PickControl`, so each row
+ * owns its own pending flag and its own error.** State held up here and keyed by release id would work too; a
  * single flag shared by the list would not -- it disables every button in
  * the list on any pick.
  *
@@ -82,14 +83,14 @@ import { DownloadTypeIcon } from './icons.tsx';
 import { IdentifyForm } from './IdentifyForm.tsx';
 import {
   IDENTIFY_REFUSAL_MESSAGES,
-  PICK_REFUSAL_MESSAGES,
   REQUERY_LABELS,
-  type GatheredDownloadView as GatheredDownload,
   type GatheredItemView,
   type GatheredReleaseView as GatheredRelease,
   type IdentifySubmit,
   type PickSubmit,
 } from './types.ts';
+import { PickControl } from './PickControl.tsx';
+import { downloadKey, downloadStatusText } from './downloadStatus.ts';
 
 export interface ReleaseListProps {
   releases: GatheredItemView['releases'];
@@ -99,31 +100,6 @@ export interface ReleaseListProps {
   identify: IdentifySubmit;
   /** The plugin whose card this list is on; the combobox suggests only that plugin's titles. */
   pluginId: string;
-}
-
-/**
- * One download's visible status text, e.g. `Status: downloading (42%)`.
- *
- * **The percentage only while `downloading`.** The host writes it from the
- * client's queue and nothing clears it once the download leaves the queue
- * (`host/src/clients/reconcile.ts`'s `walkQueueEntry` is its only writer),
- * so a row that left at 97% still says 97 through `completed` and
- * `delivered`. Before `downloading` there is nothing to show either.
- */
-function statusText(download: GatheredDownload): string {
-  const { status, percentage } = download.row;
-  return status === 'downloading' && percentage !== null
-    ? `Status: ${status} (${String(percentage)}%)`
-    : `Status: ${status}`;
-}
-
-/**
- * A stable key for one download, since a release can carry more than one
- * (a torrent and an nzb submitted for the same release) and neither table's
- * `id` alone is unique across both.
- */
-function downloadKey(download: GatheredDownload): string {
-  return `${download.table}:${String(download.id)}`;
 }
 
 /**
@@ -160,7 +136,7 @@ function scoreText(row: GatheredRelease['row']): string | undefined {
  * "re-measure the token" is the cheap half of that trade, and measuring a
  * string's rendered width is not something a jsdom test can do at all.
  */
-export const PICK_LABELS = { idle: 'Pick', pending: 'Picking…' } as const;
+export { PICK_LABELS } from './PickControl.tsx';
 
 interface ReleaseRowProps {
   release: GatheredRelease;
@@ -187,7 +163,7 @@ interface ReleaseRowProps {
  * and at the 202 it is not -- the host has accepted a submission whose
  * download row has not reached this browser yet (picks design §3,
  * acceptance 6; the 33ms/2934ms measurement is in this file's top
- * docblock). So `accepted` below is an explicit opt-*out* of a clear that
+ * docblock). So `accepted` in `PickControl` is an explicit opt-*out* of a clear that
  * otherwise always happens: the default is to re-enable, and only a 202
  * declines it. Writing it the other way round -- clearing on each failure
  * path instead -- would put the wedge one forgotten branch away, which is
@@ -221,8 +197,6 @@ interface ReleaseRowProps {
  * release shows none.
  */
 function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): ReactElement {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [requeryingSince, setRequeryingSince] = useState<number | undefined>(undefined);
   const [requeryError, setRequeryError] = useState<string | null>(null);
@@ -245,26 +219,6 @@ function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): R
   const editId = `release-${String(release.id)}-edit`;
   const score = scoreText(release.row);
 
-  async function pick(): Promise<void> {
-    setPending(true);
-    setError(null);
-    // Set only on the one path that keeps the button pending, and read in
-    // the `finally` -- so every other path, including one nobody has
-    // thought of, clears by default. See this component's docblock.
-    let accepted = false;
-    try {
-      const outcome = await submit(release.id);
-      if ('accepted' in outcome) {
-        accepted = true;
-        return;
-      }
-      setError(PICK_REFUSAL_MESSAGES[outcome.refusal]);
-    } catch {
-      setError(PICK_REFUSAL_MESSAGES.offline);
-    } finally {
-      if (!accepted) setPending(false);
-    }
-  }
 
   async function requery(): Promise<void> {
     setRequeryingSince(release.row.updatedAt);
@@ -304,7 +258,7 @@ function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): R
       <span>{release.row.videoResolution ?? 'unknown'}</span>
       {score !== undefined && <span> {score}</span>}
       {release.downloads.map((download) => (
-        <span key={downloadKey(download)}> {statusText(download)}</span>
+        <span key={downloadKey(download)}> {downloadStatusText(download)}</span>
       ))}
       {(lookupState === 'pending' || lookupState === 'unresolved' || lookupState === 'refused') && (
         <span> {lookupState === 'pending' ? 'Looking up…' : lookupState}</span>
@@ -325,17 +279,7 @@ function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): R
       ) : (
         <>
           {release.downloads.length === 0 && (
-            <button
-              type="button"
-              id={pickId}
-              aria-labelledby={`${pickId} ${filenameId}`}
-              disabled={pending}
-              onClick={() => {
-                void pick();
-              }}
-            >
-              {pending ? PICK_LABELS.pending : PICK_LABELS.idle}
-            </button>
+            <PickControl id={pickId} labelledBy={filenameId} rssItemId={release.id} submit={submit} />
           )}
           <button
             type="button"
@@ -363,21 +307,6 @@ function ReleaseRow({ release, submit, identify, pluginId }: ReleaseRowProps): R
       {requeryError !== null && (
         <div role="alert">
           <span>{requeryError}</span>
-        </div>
-      )}
-      {error !== null && (
-        <div role="alert">
-          {/*
-            Real text in a real element, never an `aria-label` on an empty
-            one (`CLAUDE.md`'s longest testing hazard, and the defect a
-            previous slice shipped): the announced string and the visible
-            one are the same string here, so they cannot drift apart.
-            `styles/library.css` is what makes the visible half legible --
-            an `aria-label` would have passed a `getByRole` name query with
-            no stylesheet rule reaching it at all, which is exactly how
-            `IdentityChangeConfirm` shipped.
-          */}
-          <span>{error}</span>
         </div>
       )}
     </li>

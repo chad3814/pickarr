@@ -302,7 +302,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           renders Unmatched, not a category" now asserts this route's rendered
           content through `Unmatched`'s own `data-testid`.
         */}
-        <Route path="unmatched" element={store === undefined || identify === undefined ? null : <UnmatchedPage source={store} retry={postRetry} identify={identify} />} />
+        <Route path="unmatched" element={store === undefined || identify === undefined ? null : <UnmatchedPage source={store} retry={postRetry} pick={postPick} identify={identify} />} />
         {/*
           `fetchActivity` is the page's one real network call, wired here like
           the settings screen's submits below. A 401 on it is `sendJson`'s

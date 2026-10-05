@@ -104,7 +104,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { RETRY_REFUSAL_MESSAGES, type RetrySubmit } from './postRetry.ts';
-import { CardHeading, IdentifyForm, useExpansion, type IdentifySubmit } from '@pickarr/plugin-ui';
+import {
+  CardHeading,
+  IdentifyForm,
+  PickControl,
+  downloadKey,
+  downloadStatusText,
+  useExpansion,
+  type GatheredDownloadView,
+  type IdentifySubmit,
+  type PickSubmit,
+} from '@pickarr/plugin-ui';
+import { isNzbDownload, isTorrentDownload } from '../store/gather.ts';
 import type { Store } from '../store/index.ts';
 import { PAGE_SIZE } from './useMediaItems.ts';
 import { useFeedNames, type FeedIdentity } from './useFeedNames.ts';
@@ -128,6 +139,8 @@ import { useBrowseQuery } from './useBrowseQuery.ts';
  */
 export interface UnmatchedSource {
   listByTable: Store['listByTable'];
+  /** A release's download rows, for the status line and for whether Pick is still offered. */
+  byRssItem: Store['byRssItem'];
   subscribeInserts: Store['subscribeInserts'];
   subscribe: Store['subscribe'];
   subscribeTable: Store['subscribeTable'];
@@ -142,6 +155,8 @@ export interface UnmatchedSearch {
 
 export interface UnmatchedProps {
   source: UnmatchedSource;
+  /** Submits one pick. Required, never defaulted, for the reason `ReleaseList` gives: a default that did nothing would pass every test and refuse every operator. */
+  pick: PickSubmit;
   /** The normalised search term (`normalizeTerm`); `''` or absent lists everything. Matched against `unmatchedHaystack`. */
   term?: string;
   /** Renders the search box when given. `Unmatched` itself reads no URL, so its tests need no router. */
@@ -292,7 +307,17 @@ interface UnmatchedRow {
    * advances even when the retry produces the very same answer, which a
    * comparison of `lookupState` would not catch.
    */
-  readonly updatedAt: number;
+  readonly updatedAt: number;  /** The release's downloads, in `by_rss_item` order; empty is what makes it pickable. */
+  readonly downloads: readonly GatheredDownloadView[];
+}
+
+/** The release's download rows as the status line reads them, from `byRssItem`'s mixed rows. */
+function downloadsOf(rows: readonly { table: string; id: number; value?: unknown }[]): GatheredDownloadView[] {
+  return rows.flatMap((row): GatheredDownloadView[] => {
+    if (row.table === 'torrent_download' && isTorrentDownload(row.value)) return [{ table: 'torrent_download', id: row.id, row: row.value }];
+    if (row.table === 'nzb_download' && isNzbDownload(row.value)) return [{ table: 'nzb_download', id: row.id, row: row.value }];
+    return [];
+  });
 }
 
 /** The full key `by_table_updated` orders by -- what {@link readUnmatched} resumes a walk from, and what it hands back as where it stopped. */
@@ -366,6 +391,9 @@ async function readUnmatched(source: UnmatchedSource, term: string, from?: Curso
         lookupStateDetail: textOf(value, 'lookupStateDetail'),
         updatedAt: updatedAtOf(row),
         lookupJson,
+        // One `by_rss_item` read per unmatched row kept, after the walk has
+        // decided to keep it -- not per row seen.
+        downloads: downloadsOf(await source.byRssItem(row.id)),
       });
     }
 
@@ -730,24 +758,42 @@ function UnmatchedDetail(
  * `<small>` at all only for the absent one.
  */
 function UnmatchedCard(
-  { row, feed, submit, identify }: {
+  { row, feed, submit, pick, identify }: {
     row: UnmatchedRow;
     feed: FeedIdentity | undefined;
     submit: RetrySubmit;
+    pick: PickSubmit;
     identify: IdentifySubmit;
   },
 ): ReactElement {
   const feedName = feedLabel(feed);
   const { expanded, toggle } = useExpansion(REPORTS_NOTHING);
+  const filenameId = `unmatched-${String(row.id)}-filename`;
 
   return (
     <article>
       <CardHeading
         headline={row.filename}
+        headlineId={filenameId}
         {...(feedName === undefined ? {} : { trailing: feedName })}
         expanded={expanded}
         onToggle={toggle}
       />
+      {/*
+        The release line, visible without expanding, the way a release row
+        reads inside a category card: its download status once it has one,
+        and Pick until it does. A picked unmatched release downloads like
+        any other and lands in the plugin's `_unmatched` directory
+        (`host/src/media/import.ts`'s `unmatchedDestination`).
+      */}
+      <p>
+        {row.downloads.map((download) => (
+          <span key={downloadKey(download)}>{downloadStatusText(download)} </span>
+        ))}
+        {row.downloads.length === 0 && (
+          <PickControl id={`unmatched-${String(row.id)}-pick`} labelledBy={filenameId} rssItemId={row.id} submit={pick} />
+        )}
+      </p>
       {expanded && <UnmatchedDetail row={row} feed={feed} submit={submit} identify={identify} />}
     </article>
   );
@@ -759,12 +805,13 @@ function UnmatchedCard(
  * use; `filter` and `view` are read too and ignored, since this page has
  * neither), handed to {@link Unmatched} as its term and its search box.
  */
-export function UnmatchedPage({ source, retry, identify }: Omit<UnmatchedProps, 'term' | 'search'>): ReactElement {
+export function UnmatchedPage({ source, retry, pick, identify }: Omit<UnmatchedProps, 'term' | 'search'>): ReactElement {
   const { query, controls } = useBrowseQuery();
   return (
     <Unmatched
       source={source}
       retry={retry}
+      pick={pick}
       identify={identify}
       term={query.term}
       search={{ input: controls.input, q: query.q, onInput: controls.setInput }}
@@ -772,7 +819,7 @@ export function UnmatchedPage({ source, retry, identify }: Omit<UnmatchedProps, 
   );
 }
 
-export function Unmatched({ source, retry, identify, term = '', search }: UnmatchedProps): ReactElement {
+export function Unmatched({ source, retry, pick, identify, term = '', search }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
@@ -862,11 +909,17 @@ export function Unmatched({ source, retry, identify, term = '', search }: Unmatc
     refreshRef.current = refresh;
 
     refresh();
-    const unsubscribe = source.subscribeInserts('rss_item', refresh);
+    // A pick lands as a download row, and the status line reads those, so
+    // the two download tables wake the walk the way a new release does.
+    const unsubscribes = [
+      source.subscribeInserts('rss_item', refresh),
+      source.subscribeTable('torrent_download', refresh),
+      source.subscribeTable('nzb_download', refresh),
+    ];
     return () => {
       cancelled = true;
       refreshRef.current = undefined;
-      unsubscribe();
+      for (const unsubscribe of unsubscribes) unsubscribe();
     };
   }, [source, term]);
 
@@ -976,6 +1029,7 @@ export function Unmatched({ source, retry, identify, term = '', search }: Unmatc
             {shown.items.map((row) => (
               <UnmatchedCard
                 submit={retry}
+                pick={pick}
                 identify={identify}
                 key={row.id}
                 row={row}

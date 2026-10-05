@@ -1,5 +1,8 @@
 export type { BrowserPlugin, CardProps, PluginRows } from './plugin.ts';
 export { ReleaseList } from './ReleaseList.tsx';
+export { PickControl, PICK_LABELS } from './PickControl.tsx';
+export type { PickControlProps } from './PickControl.tsx';
+export { downloadKey, downloadStatusText } from './downloadStatus.ts';
 export { CardHeading, useExpansion } from './expansion.tsx';
 export type { CardHeadingProps, Expansion } from './expansion.tsx';
 export {

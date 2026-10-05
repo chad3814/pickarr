@@ -108,11 +108,11 @@ function isRssItem(value: unknown): value is RssItemSyncRead {
   return isRecord(value) && typeof value.feedId === 'number';
 }
 
-function isTorrentDownload(value: unknown): value is TorrentDownloadSyncRead {
+export function isTorrentDownload(value: unknown): value is TorrentDownloadSyncRead {
   return isRecord(value);
 }
 
-function isNzbDownload(value: unknown): value is NzbDownloadSyncRead {
+export function isNzbDownload(value: unknown): value is NzbDownloadSyncRead {
   return isRecord(value);
 }
 
