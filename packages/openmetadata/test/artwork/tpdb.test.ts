@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { HostFetch } from '@pickarr/contract';
 import { createTpdbSource } from '../../src/artwork/tpdb.ts';
+import { rankImages } from '../../src/artwork/source.ts';
 
 interface Sent {
   url: string;
@@ -68,6 +69,7 @@ interface PerformerInit {
   thumbnail?: string | null;
   face?: string | null;
   parent?: Record<string, unknown> | null;
+  posters?: readonly unknown[];
 }
 
 function performer(id: string, init: PerformerInit = {}): Record<string, unknown> {
@@ -346,4 +348,186 @@ test('a secret-resolution failure that is not "no key configured" still propagat
 
   await assert.rejects(() => source.imagesFor('scene', SCENE_REF, ['someone'], []), /could not be read/);
   assert.equal(sent.length, 0);
+});
+
+/**
+ * The embedded `parent`'s `posters`, read live from one scene on
+ * 2026-10-05 and copied rather than invented. Five entries -- the scene
+ * payload caps a parent's list there; the same performer's `/performers/`
+ * record carried sixteen -- each `{id, order, size, url}`, with
+ * `posters[0].url` equal to the outer `image`.
+ *
+ * The urls are hashed paths, and the hashes do not sort the way `order`
+ * does: order 2 (`/7d/96/45/…`) sorts before order 1 (`/8d/0d/12/…`), and
+ * order 5 (`/17/79/8f/…`) sorts before everything. That is what makes
+ * them the right fixture for the ordering test below.
+ */
+const OBSERVED_PARENT_POSTERS = [
+  { id: 7739998, order: 1, size: 188532, url: 'https://cdn.theporndb.net/performer/8d/0d/12/ceb8fe278f324cb54bdc33748b1d4fc/poster/82cc9dba0cf0afbe3ecc24cfaebc16192d131adc' },
+  { id: 7739996, order: 2, size: 166126, url: 'https://cdn.theporndb.net/performer/7d/96/45/7df177e1b96e9a0b4b27f338680d154/poster/c459a8e59e1d84088dae4e2824cac3b1c9dfff2b' },
+  { id: 2450134, order: 3, size: 122946, url: 'https://cdn.theporndb.net/performer/8b/48/32/6422a18373fe6ee5d4b3ed396be8b5d/poster/audrey-lords.jpg' },
+  { id: 2501557, order: 4, size: 60908, url: 'https://cdn.theporndb.net/performer/fe/c7/9b/eacee41c60a90e3a165f5adde144453/poster/audrey-lords.jpg' },
+  { id: 25247451, order: 5, size: 48176, url: 'https://cdn.theporndb.net/performer/17/79/8f/48eda2af081c26c0c8d7b3cbea7b512/poster/audrey-lords-on-bang-bros.jpeg' },
+] as const;
+
+test('returns every poster under the embedded parent, scored so rankImages keeps the provider\'s order', async () => {
+  const canonicalRef = '77d5c67b-f51c-4019-8bc5-c420f3c965e2';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer('scene-specific-0000-0000-000000000000', {
+          image: null,
+          thumbnail: null,
+          face: null,
+          parent: {
+            id: canonicalRef,
+            image: OBSERVED_PARENT_POSTERS[0].url,
+            thumbnail: 'https://cdn.theporndb.net/performer/8d/0d/12/ceb8fe278f324cb54bdc33748b1d4fc/poster/c/thumb.jpg',
+            face: 'https://thumb.theporndb.net/x=/500x500/smart/performer%2F8d%2F0d%2F12',
+            posters: [...OBSERVED_PARENT_POSTERS],
+          },
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [canonicalRef], []);
+
+  // Every poster, not just the one the outer `image` repeats, and the
+  // `score` is `-order`: `rankImages` tie-breaks equal scores on the url
+  // string, which for these hashed paths would put order 5 first and
+  // order 2 before order 1. A descending score that mirrors `order`
+  // is what keeps the provider's ranking through that sort.
+  assert.deepEqual(
+    answer.people.get(canonicalRef),
+    [
+      { url: OBSERVED_PARENT_POSTERS[0].url, language: null, score: -1 },
+      { url: OBSERVED_PARENT_POSTERS[1].url, language: null, score: -2 },
+      { url: OBSERVED_PARENT_POSTERS[2].url, language: null, score: -3 },
+      { url: OBSERVED_PARENT_POSTERS[3].url, language: null, score: -4 },
+      { url: OBSERVED_PARENT_POSTERS[4].url, language: null, score: -5 },
+    ],
+  );
+});
+
+test('the parent\'s posters survive rankImages in provider order, which the alphabetical url tie-break alone would scramble', async () => {
+  const canonicalRef = '77d5c67b-f51c-4019-8bc5-c420f3c965e2';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer('scene-specific-0000-0000-000000000000', {
+          parent: { id: canonicalRef, image: OBSERVED_PARENT_POSTERS[0].url, thumbnail: null, face: null, posters: [...OBSERVED_PARENT_POSTERS] },
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [canonicalRef], []);
+  const found = answer.people.get(canonicalRef);
+  assert.ok(found !== undefined);
+
+  // What `job.ts` actually does with the answer, so a scoring that looks
+  // fine in isolation but loses to the url sort is caught here.
+  assert.deepEqual(
+    rankImages(found, 'en').map((image) => image.url),
+    OBSERVED_PARENT_POSTERS.map((poster) => poster.url),
+  );
+});
+
+test('posters are read from the performer\'s own record when there is no parent, and the outer image is not added twice', async () => {
+  const ref = 'own-posters-0000-0000-0000-000000000000';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer(ref, {
+          image: 'https://cdn.test/own-1.jpg',
+          thumbnail: 'https://cdn.test/own-thumb.jpg',
+          face: 'https://cdn.test/own-face.jpg',
+          posters: [
+            { id: 1, order: 1, size: 10, url: 'https://cdn.test/own-1.jpg' },
+            { id: 2, order: 2, size: 10, url: 'https://cdn.test/own-2.jpg' },
+          ],
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [ref], []);
+
+  assert.deepEqual(
+    answer.people.get(ref),
+    [
+      { url: 'https://cdn.test/own-1.jpg', language: null, score: -1 },
+      { url: 'https://cdn.test/own-2.jpg', language: null, score: -2 },
+    ],
+  );
+});
+
+test('a parent with an empty posters list falls back to the single image fields, as before', async () => {
+  // Observed live too: one embedded parent carried `posters: []` with
+  // `image`, `thumbnail` and `face` all set. The list being empty must
+  // not mean "no picture".
+  const canonicalRef = 'empty-posters-0000-0000-0000-000000000000';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer('scene-specific-0000-0000-000000000000', {
+          parent: { id: canonicalRef, image: 'https://cdn.test/parent-image.jpg', thumbnail: null, face: null, posters: [] },
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [canonicalRef], []);
+
+  assert.deepEqual(
+    answer.people.get(canonicalRef),
+    [{ url: 'https://cdn.test/parent-image.jpg', language: null, score: 0 }],
+  );
+});
+
+test('a posters entry that is not an object, or whose url or order is malformed, fails loudly', async () => {
+  const ref = 'bad-posters-0000-0000-0000-000000000000';
+  for (const posters of [['not-an-object'], [{ id: 1, order: 'first', url: 'https://cdn.test/x.jpg' }], [{ id: 1, order: 1, url: 7 }]]) {
+    const { fetch } = recordingFetch([sceneBody({ performers: [performer(ref, { posters })] })]);
+    const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+    await assert.rejects(source.imagesFor('scene', SCENE_REF, [ref], []), (error: unknown) => {
+      assert.ok(error instanceof TypeError);
+      assert.match(error.message, /^tpdb: data\.performers\[0\]\.posters/);
+      return true;
+    });
+  }
+});
+
+test('the parent\'s posters beat the own record\'s single image, which is the shape every live scene had', async () => {
+  // On every sampled scene the embedded record carried its own `image`,
+  // `thumbnail` and `face` and no `posters`, while the `parent` carried
+  // the list. Own-first -- the order this source used when each record
+  // offered one url -- would return the lone scene-specific picture and
+  // never reach the gallery.
+  const canonicalRef = '77d5c67b-f51c-4019-8bc5-c420f3c965e2';
+  const { fetch } = recordingFetch([
+    sceneBody({
+      performers: [
+        performer('scene-specific-0000-0000-000000000000', {
+          image: 'https://cdn.test/scene-specific-image.jpg',
+          thumbnail: 'https://cdn.test/scene-specific-thumb.jpg',
+          face: 'https://cdn.test/scene-specific-face.jpg',
+          parent: { id: canonicalRef, image: OBSERVED_PARENT_POSTERS[0].url, thumbnail: null, face: null, posters: [...OBSERVED_PARENT_POSTERS] },
+        }),
+      ],
+    }),
+  ]);
+  const source = createTpdbSource({ fetch, resolveSecret: async () => TOKEN });
+
+  const answer = await source.imagesFor('scene', SCENE_REF, [canonicalRef], []);
+
+  assert.deepEqual(
+    answer.people.get(canonicalRef)?.map((image) => image.url),
+    OBSERVED_PARENT_POSTERS.map((poster) => poster.url),
+  );
 });

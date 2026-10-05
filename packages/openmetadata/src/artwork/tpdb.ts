@@ -30,6 +30,12 @@
  *   Both are populated with `image`, `thumbnail` and `face`, which is why
  *   one request still answers the whole cast -- but only if the match is
  *   made on the parent. See the loop in `imagesFor`.
+ * - The `parent` also carries `posters`, the canonical performer's gallery
+ *   as `{id, order, size, url}[]`, capped at five in the scene payload
+ *   (measured 2026-10-05: five embedded against sixteen on
+ *   `/performers/{id}`). Five is `ARTWORK_KEEP`, so the scene call still
+ *   answers everything the job would store and no per-person request is
+ *   made. See `TpdbPersonImages`.
  *
  * One shape is tolerated on the strength of a recorded observation rather
  * than a live check: 1.x's design doc records records where the outer
@@ -86,6 +92,11 @@ function nullableString(value: unknown, field: string): string | null {
   return string(value, field);
 }
 
+function number(value: unknown, field: string): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) fail(field, 'is not a number');
+  return value;
+}
+
 function array(value: unknown, field: string): readonly unknown[] {
   if (!Array.isArray(value)) fail(field, 'is not an array');
   return value;
@@ -122,18 +133,52 @@ function pickSizedUrl(sizes: TpdbSizes | null): string | null {
   return sizes.large ?? sizes.medium ?? sizes.full;
 }
 
-/** The three image fields shared by a performer and, on the shape this task tolerates but did not see live, its `parent`. */
+/**
+ * One entry of a performer's `posters` list. Only `order` and `url` are
+ * read; the live entry also carries `id` and `size`, which nothing here
+ * needs.
+ */
+interface TpdbPoster {
+  readonly order: number;
+  readonly url: string;
+}
+
+function readPoster(value: unknown, field: string): TpdbPoster {
+  const raw = object(value, field);
+  return {
+    order: number(raw['order'], `${field}.order`),
+    url: string(raw['url'], `${field}.url`),
+  };
+}
+
+/**
+ * The image fields shared by an embedded performer and its `parent`.
+ *
+ * `posters` is the list the single fields are the head of. Measured live
+ * (2026-10-05): a scene's `performers[].parent` carries `posters` as
+ * `{id, order, size, url}[]`, at most five entries, with `posters[0].url`
+ * equal to the outer `image`; the same performer's `/performers/{id}`
+ * record carried sixteen. The embedded `performers[]` record itself had no
+ * `posters` key on any of the twenty sampled, so an absent key is read as
+ * an empty list rather than an error -- and the key is still read on the
+ * own record, because nothing observed rules it out.
+ */
 interface TpdbPersonImages {
   readonly image: string | null;
   readonly thumbnail: string | null;
   readonly face: string | null;
+  readonly posters: readonly TpdbPoster[];
 }
 
 function readPersonImages(raw: Readonly<Record<string, unknown>>, field: string): TpdbPersonImages {
+  const posters = raw['posters'];
   return {
     image: nullableString(raw['image'], `${field}.image`),
     thumbnail: nullableString(raw['thumbnail'], `${field}.thumbnail`),
     face: nullableString(raw['face'], `${field}.face`),
+    posters: posters === null || posters === undefined
+      ? []
+      : array(posters, `${field}.posters`).map((entry, index) => readPoster(entry, `${field}.posters[${index}]`)),
   };
 }
 
@@ -161,6 +206,31 @@ function readPersonImages(raw: Readonly<Record<string, unknown>>, field: string)
  */
 function pickPersonUrl(images: TpdbPersonImages): string | null {
   return images.image ?? images.thumbnail ?? images.face;
+}
+
+/**
+ * Every picture one record offers for a person: the `posters` list when it
+ * has entries, otherwise the one url `pickPersonUrl` settles on.
+ *
+ * The outer `image` is `posters[0].url` on every record measured, so
+ * returning the list alone adds nothing twice and drops nothing. An empty
+ * list was also observed live -- `posters: []` beside a populated `image`
+ * -- and must not read as "no picture", hence the fallback.
+ *
+ * Each poster's `score` is `-order`. `rankImages` (`./source.ts`) sorts
+ * equal scores by url string, and these are hashed CDN paths whose hashes
+ * have nothing to do with `order`: on the sampled record the url sort put
+ * order 5 first and order 2 before order 1. A score that falls as `order`
+ * rises is what carries the provider's ranking through that sort; the
+ * `providerImage` docblock's `score: 0` is for the scene's own images,
+ * which have no order to carry.
+ */
+function pickPersonImages(images: TpdbPersonImages): readonly ProviderImage[] {
+  if (images.posters.length > 0) {
+    return images.posters.map((poster) => ({ url: poster.url, language: null, score: -poster.order }));
+  }
+  const url = pickPersonUrl(images);
+  return url === null ? [] : [providerImage(url)];
 }
 
 interface TpdbPerformer {
@@ -213,9 +283,13 @@ function readScene(value: unknown): TpdbScene {
  * Wraps a bare url as a `ProviderImage`. `score: 0` and `language: null` are
  * not stand-ins for a missing value -- ThePornDB's scene payload carries no
  * vote and no language for any image it returns, so there is nothing to
- * default *from*. `bestImage`'s language/score tiers therefore have nothing
- * to discriminate on for this provider, and degrade to "the first image
- * this source returned" by construction, not by a tie-break coincidence.
+ * default *from*. With every score equal, `rankImages`'s final tie-break is
+ * the url string, so among several zero-scored images the order is
+ * alphabetical by url, **not** the order this source returned them in.
+ * That is harmless here because this wrapper is only used where there is
+ * one image (a scene's poster, its background, a performer's lone url); a
+ * performer's `posters` list carries an `order` and is scored by it in
+ * `pickPersonImages` instead.
  */
 function providerImage(url: string): ProviderImage {
   return { url, language: null, score: 0 };
@@ -295,11 +369,19 @@ export function createTpdbSource(deps: ArtworkSourceDeps): ArtworkSource {
           (entry) => entry.parentId === ref || entry.id === ref,
         );
         if (performer === undefined) continue;
-        const personUrl = pickPersonUrl(performer.own)
-          ?? (performer.parent === null ? null : pickPersonUrl(performer.parent));
+        // The parent first when it has a `posters` list: that is the
+        // canonical performer's gallery, and the scene-specific record was
+        // never seen to carry one. Otherwise the own record, then the
+        // parent's single fields -- the own-then-parent order this source
+        // always had for records without a list.
+        const { own, parent } = performer;
+        const records = parent === null
+          ? [own]
+          : parent.posters.length > 0 ? [parent, own] : [own, parent];
+        const personImages = records.map(pickPersonImages).find((images) => images.length > 0) ?? [];
         // A performer present but with every image field null omits the key,
         // the same way a source with nothing for a person always does.
-        if (personUrl !== null) people.set(ref, [providerImage(personUrl)]);
+        if (personImages.length > 0) people.set(ref, personImages);
       }
 
       return { media, people };
