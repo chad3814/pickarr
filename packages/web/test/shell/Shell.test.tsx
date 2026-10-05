@@ -702,3 +702,15 @@ test('an unknown path inside the shell still renders the shell, not a blank page
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
   });
 });
+
+test('the /unmatched route reads q from the URL into its search box', async () => {
+  const { deps } = testDeps();
+  render(
+    <MemoryRouter initialEntries={['/unmatched?q=dune']}>
+      <Shell deps={deps} onUnauthenticated={() => {}} />
+    </MemoryRouter>,
+  );
+  await waitFor(() => { assert.ok(screen.getByTestId('unmatched')); });
+  const box = await screen.findByRole('searchbox', { name: 'Search' });
+  assert.equal(box instanceof HTMLInputElement && box.value, 'dune');
+});
