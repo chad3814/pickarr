@@ -101,7 +101,7 @@
  * actually answered, both of which the host has been sending and nothing
  * has been showing.
  */
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { RETRY_REFUSAL_MESSAGES, type RetrySubmit } from './postRetry.ts';
 import { CardHeading, IdentifyForm, useExpansion, type IdentifySubmit } from '@pickarr/plugin-ui';
@@ -110,6 +110,7 @@ import { PAGE_SIZE } from './useMediaItems.ts';
 import { useFeedNames, type FeedIdentity } from './useFeedNames.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
 import { unmatchedHaystack } from './unmatchedSearch.ts';
+import { useHeldItems, useScrolledToTop } from './useHeldItems.ts';
 import { useBrowseQuery } from './useBrowseQuery.ts';
 
 /**
@@ -907,6 +908,21 @@ export function Unmatched({ source, retry, identify, term = '', search }: Unmatc
   // too. See `useInfiniteScroll` for why both, and note the order in the
   // markup below: the sentinel sits above the button, matching `Category`.
   const sentinel = useInfiniteScroll(loadMore, !done);
+  // The same hold the category pages apply (`useHeldItems`): a release
+  // arriving while the page is scrolled waits behind `N new` rather than
+  // pushing the list down. `rows` stays the source of truth for the
+  // per-row subscriptions below; `shown` is what renders.
+  const atTop = useScrolledToTop();
+  const live = useMemo(
+    () => ({ items: rows ?? [], empty: rows !== undefined && rows.length === 0 }),
+    [rows],
+  );
+  const { shown, held, reveal } = useHeldItems(live, atTop);
+  const pending = held > 0 ? (
+    <span role="status">
+      <button type="button" onClick={reveal}>{held} new</button>
+    </span>
+  ) : null;
 
   // Wakes on a plain update to any release *currently listed here* -- the
   // one shape `subscribeInserts` cannot see (this file's docblock). Torn
@@ -948,14 +964,16 @@ export function Unmatched({ source, retry, identify, term = '', search }: Unmatc
               }}
             />
           </label>
+          {pending}
         </form>
       )}
+      {search === undefined && pending}
       {rows !== undefined &&
-        (rows.length === 0 ? (
+        (shown.items.length === 0 ? (
           <p>{term === '' ? 'Everything has been matched.' : `Nothing matches "${search?.q ?? term}"`}</p>
         ) : (
           <>
-            {rows.map((row) => (
+            {shown.items.map((row) => (
               <UnmatchedCard
                 submit={retry}
                 identify={identify}

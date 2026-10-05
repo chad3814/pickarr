@@ -31,7 +31,18 @@
  * already what they are reading.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MediaItemsResult } from './useMediaItems.ts';
+
+/**
+ * What the hold needs of a result: items with an id, and whether the
+ * source has resolved to nothing. `MediaItemsResult` and
+ * `CatalogItemsResult` satisfy it, and so does the unmatched page's row
+ * list once wrapped (`Unmatched.tsx`), which is why this is not typed
+ * against media items.
+ */
+export interface HoldableResult {
+  readonly items: readonly { readonly id: number }[];
+  readonly empty: boolean;
+}
 
 /** Whether the window is scrolled to the very top, tracked through the `scroll` event. */
 export function useScrolledToTop(): boolean {
@@ -49,7 +60,7 @@ export function useScrolledToTop(): boolean {
   return atTop;
 }
 
-export interface HeldItems<R extends MediaItemsResult> {
+export interface HeldItems<R extends HoldableResult> {
   /** `result` with its `items` replaced by what is shown: the frozen order, updated in place, plus loaded pages. */
   readonly shown: R;
   /** How many arrivals are being held above or between the shown items; 0 while live. */
@@ -62,7 +73,7 @@ export interface HeldItems<R extends MediaItemsResult> {
  * `result` as it should be rendered given whether the window is at the top.
  * Live at the top; frozen in order below it, per the module doc.
  */
-export function useHeldItems<R extends MediaItemsResult>(result: R, atTop: boolean): HeldItems<R> {
+export function useHeldItems<R extends HoldableResult>(result: R, atTop: boolean): HeldItems<R> {
   // `null` is live. Otherwise the ids on screen, in the order they are shown.
   const [frozen, setFrozen] = useState<readonly number[] | null>(null);
   const itemsRef = useRef(result.items);
