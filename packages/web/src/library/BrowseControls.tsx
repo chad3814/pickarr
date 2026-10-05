@@ -14,6 +14,12 @@ export interface BrowseControlsProps {
   onInput(v: string): void;
   view: BrowseView;
   onView(v: BrowseView): void;
+  /**
+   * Arrivals held while the page is scrolled (`useHeldItems`): how many,
+   * and the action that scrolls to the top to release them. Absent, or a
+   * count of zero, renders nothing.
+   */
+  pending?: { count: number; reveal(): void };
 }
 
 const OPTIONS: ReadonlyArray<{ value: PickedFilter; label: string }> = [
@@ -27,7 +33,7 @@ const VIEWS: ReadonlyArray<{ value: BrowseView; label: string }> = [
   { value: 'grid', label: 'Grid' },
 ];
 
-export function BrowseControls({ filter, input, onFilter, onInput, view, onView }: BrowseControlsProps): ReactElement {
+export function BrowseControls({ filter, input, onFilter, onInput, view, onView, pending }: BrowseControlsProps): ReactElement {
   return (
     <form
       role="search"
@@ -81,6 +87,16 @@ export function BrowseControls({ filter, input, onFilter, onInput, view, onView 
           }}
         />
       </label>
+      {/*
+        A status region so the count is announced when it appears, holding
+        a button rather than a link: it acts on this page (scrolls to the
+        top, which releases the held items) and navigates nowhere.
+      */}
+      {pending !== undefined && pending.count > 0 && (
+        <span role="status">
+          <button type="button" onClick={pending.reveal}>{pending.count} new</button>
+        </span>
+      )}
     </form>
   );
 }

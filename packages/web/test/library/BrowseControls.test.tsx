@@ -62,3 +62,16 @@ test('a View group with List and Grid radios, checked by the view, each firing o
   fireEvent.click(list);
   assert.deepEqual(views, ['list']);
 });
+
+test('held arrivals show as an "N new" button in a status region, and none renders at zero', () => {
+  let revealed = 0;
+  const { rerender } = render(
+    <BrowseControls filter="all" input="" onFilter={() => {}} onInput={() => {}} view="list" onView={() => {}} pending={{ count: 3, reveal: () => { revealed += 1; } }} />,
+  );
+  const button = screen.getByRole('button', { name: '3 new' });
+  assert.ok(screen.getByRole('status').contains(button), 'announced when it appears');
+  fireEvent.click(button);
+  assert.equal(revealed, 1);
+  rerender(<BrowseControls filter="all" input="" onFilter={() => {}} onInput={() => {}} view="list" onView={() => {}} pending={{ count: 0, reveal: () => {} }} />);
+  assert.ok(!screen.queryByRole('button', { name: /new/ }), 'nothing to reveal, nothing shown');
+});

@@ -825,6 +825,12 @@ form[role='search'] fieldset { display: flex; gap: var(--space-2); border: 0; pa
 form[role='search'] legend { float: left; margin-inline-end: var(--space-2); }
 form[role='search'] fieldset label { display: inline-flex; align-items: center; gap: var(--space-1); }
 form[role='search'] > label { display: inline-flex; align-items: center; gap: var(--space-2); }
+/* The `N new` control (`useHeldItems`): reads as a link, since it takes the
+   operator somewhere -- back to the top -- rather than submitting anything. */
+form[role='search'] [role='status'] button {
+  padding: 0; border: none; background: none; cursor: pointer;
+  color: var(--color-accent-text); text-decoration: underline; font: inherit;
+}
 
 /*
  * The identify form (`@pickarr/plugin-ui`'s `IdentifyForm.tsx`): a combobox

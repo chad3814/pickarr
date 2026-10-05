@@ -40,7 +40,7 @@
  * subscription costs. One listener per declared table lives here, above the
  * list, not one per card.
  */
-import { useMemo, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import { useMediaItems, type MediaItemsResult, type MediaItemsSource } from './useMediaItems.ts';
 import { useCatalogItems, type CatalogItemsSource } from './useCatalogItems.ts';
 import { useBrowseQuery, type BrowseQuery } from './useBrowseQuery.ts';
@@ -50,6 +50,7 @@ import { ItemGrid } from './ItemGrid.tsx';
 import type { GatheredSource } from './useGatheredItem.ts';
 import { usePluginRows, emptyPluginRows, type PluginRowsSource } from './usePluginRows.ts';
 import { useInfiniteScroll } from './useInfiniteScroll.ts';
+import { useHeldItems, useScrolledToTop } from './useHeldItems.ts';
 import type { IdentifySubmit } from '@pickarr/plugin-ui';
 import type { PickSubmit } from './postPick.ts';
 
@@ -90,8 +91,20 @@ export function emptySentence(query: BrowseQuery): string {
   return `Nothing matches "${query.q}"${among}`;
 }
 
+/** What a result component reports upward for the controls row: how many arrivals it is holding, and how to release them. */
+export type Pending = { count: number; reveal(): void } | null;
+
 export function Category({ store, pluginId, tables, submit, identify }: CategoryProps): ReactElement {
   const { query, controls } = useBrowseQuery();
+  // The hold lives beside each result hook (`useHeldItems`, inside the
+  // result components below), and the controls row above them shows it,
+  // so the count travels up through `onPending`; a result component that
+  // unmounts -- a view or filter change -- reports `null` on its way out.
+  const atTop = useScrolledToTop();
+  const [pending, setPending] = useState<Pending>(null);
+  const onPending = useCallback((next: Pending) => {
+    setPending(next);
+  }, []);
   return (
     <section data-testid={`category-${pluginId}`}>
       <BrowseControls
@@ -101,6 +114,7 @@ export function Category({ store, pluginId, tables, submit, identify }: Category
         onInput={controls.setInput}
         view={controls.view}
         onView={controls.setView}
+        {...(pending === null ? {} : { pending })}
       />
       {store === undefined || identify === undefined ? null : query.view === 'grid' ? (
         <GridView
@@ -111,9 +125,11 @@ export function Category({ store, pluginId, tables, submit, identify }: Category
           submit={submit}
           identify={identify}
           query={query}
+          atTop={atTop}
+          onPending={onPending}
         />
       ) : query.filter === 'all' && query.term === '' ? (
-        <DefaultList key="list" store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} />
+        <DefaultList key="list" store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} atTop={atTop} onPending={onPending} />
       ) : (
         <FilteredList
           key={`list|${query.filter}|${query.term}`}
@@ -123,6 +139,8 @@ export function Category({ store, pluginId, tables, submit, identify }: Category
           submit={submit}
           identify={identify}
           query={query}
+          atTop={atTop}
+          onPending={onPending}
         />
       )}
     </section>
@@ -135,18 +153,34 @@ interface ListProps {
   tables: readonly string[];
   submit: PickSubmit;
   identify: IdentifySubmit;
+  atTop: boolean;
+  onPending: (pending: Pending) => void;
+}
+
+/** Reports the hold's count and release upward while mounted, and `null` on unmount, so the controls row never shows a stale count. */
+function useReportPending(held: number, reveal: () => void, onPending: (pending: Pending) => void): void {
+  useEffect(() => {
+    onPending(held > 0 ? { count: held, reveal } : null);
+  }, [held, reveal, onPending]);
+  useEffect(() => () => {
+    onPending(null);
+  }, [onPending]);
 }
 
 /** The unfiltered view: pages the `rows` store directly, with no catalog read. */
-function DefaultList({ store, pluginId, tables, submit, identify }: ListProps): ReactElement | null {
-  const result = useMediaItems(store, pluginId);
-  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={result} emptyMessage="Nothing here yet." />;
+function DefaultList({ store, pluginId, tables, submit, identify, atTop, onPending }: ListProps): ReactElement | null {
+  const live = useMediaItems(store, pluginId);
+  const { shown, held, reveal } = useHeldItems(live, atTop);
+  useReportPending(held, reveal, onPending);
+  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={shown} emptyMessage="Nothing here yet." />;
 }
 
 /** A picked filter and/or a search term: pages the derived `catalog` store. */
-function FilteredList({ store, pluginId, tables, submit, identify, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
-  const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
-  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={result} emptyMessage={emptySentence(query)} />;
+function FilteredList({ store, pluginId, tables, submit, identify, query, atTop, onPending }: ListProps & { query: BrowseQuery }): ReactElement | null {
+  const live = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
+  const { shown, held, reveal } = useHeldItems(live, atTop);
+  useReportPending(held, reveal, onPending);
+  return <ItemList store={store} tables={tables} submit={submit} identify={identify} result={shown} emptyMessage={emptySentence(query)} />;
 }
 
 /**
@@ -155,8 +189,10 @@ function FilteredList({ store, pluginId, tables, submit, identify, query }: List
  * in one read (design spec 2026-10-04 §3.2). The list keeps its rows-store
  * fast path for the unfiltered case.
  */
-function GridView({ store, pluginId, tables, submit, identify, query }: ListProps & { query: BrowseQuery }): ReactElement | null {
-  const result = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
+function GridView({ store, pluginId, tables, submit, identify, query, atTop, onPending }: ListProps & { query: BrowseQuery }): ReactElement | null {
+  const live = useCatalogItems(store, { pluginId, filter: query.filter, term: query.term });
+  const { shown: result, held, reveal } = useHeldItems(live, atTop);
+  useReportPending(held, reveal, onPending);
   const emptyMessage = query.filter === 'all' && query.term === '' ? 'Nothing here yet.' : emptySentence(query);
   return <ItemGrid store={store} pluginId={pluginId} tables={tables} submit={submit} identify={identify} result={result} emptyMessage={emptyMessage} />;
 }
