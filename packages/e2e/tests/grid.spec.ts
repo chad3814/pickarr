@@ -100,3 +100,33 @@ test('a television tile shows the background, opens the card in a dialog, takes 
   await expect(dialog).toBeHidden();
   await expect(tile).toBeFocused();
 });
+
+test('an item arriving while the grid is scrolled is held behind "1 new", and the control brings it in at the top', async ({ page, harness }) => {
+  // Forty items: more than one page, and tall enough to scroll.
+  for (let index = 0; index < 40; index += 1) {
+    harness.seedMediaItem('tv', `Show ${String(index + 1).padStart(2, '0')}`);
+  }
+
+  await page.goto(harness.origin);
+  await claimInstall(page, 'owner@example.invalid', harness.claimToken);
+  await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
+
+  await page.goto(`${harness.origin}/tv?view=grid`);
+  const grid = page.getByTestId('category-tv').getByRole('list');
+  const first = grid.getByRole('button').first();
+  // The tile's `title` attribute is its caption, which for a bare item is the title.
+  await expect(first).toHaveAttribute('title', 'Show 40', { timeout: 15_000 });
+
+  await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight); });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  harness.seedMediaItem('tv', 'Show 41');
+  const control = page.getByRole('button', { name: '1 new' });
+  await expect(control).toBeVisible({ timeout: 15_000 });
+  await expect(first).toHaveAttribute('title', 'Show 40');
+
+  await control.click();
+  await expect.poll(() => page.evaluate(() => window.scrollY), { timeout: 10_000 }).toBe(0);
+  await expect(grid.getByRole('button').first()).toHaveAttribute('title', 'Show 41', { timeout: 15_000 });
+  await expect(control).toBeHidden();
+});

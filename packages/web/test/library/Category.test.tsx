@@ -594,3 +594,34 @@ test('the grid honours the filter and the search, and a grid with nothing to sho
   renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />, '/tv?view=grid&filter=unpicked&q=zzz');
   await waitFor(() => { assert.ok(screen.getByText('Nothing matches "zzz" among unpicked items')); });
 });
+
+test('an item arriving while the page is scrolled is held behind an "N new" control until the operator is back at the top', async () => {
+  const db = await freshDb();
+  await seed(db, [
+    mediaItem({ id: 1, pluginId: 'tv', title: 'Alpha Show', updatedAt: 10 }),
+    mediaItem({ id: 2, pluginId: 'tv', title: 'Beta Show', updatedAt: 20 }),
+  ]);
+  // A fake window scroll: `scrollY` is what the hold reads, `scroll` is what
+  // it listens for, and `scrollTo` is what the control calls.
+  let y = 0;
+  Object.defineProperty(window, 'scrollY', { configurable: true, get: () => y });
+  const scrollTo = window.scrollTo;
+  window.scrollTo = (): void => { y = 0; window.dispatchEvent(new Event('scroll')); };
+  try {
+    renderAt(<Category store={sourceFor(db)} pluginId="tv" tables={NO_TABLES} submit={acceptsPick} identify={throwsOnUse} />);
+    await waitFor(() => { assert.deepEqual(titlesShown(), ['Beta Show', 'Alpha Show']); });
+
+    act(() => { y = 600; window.dispatchEvent(new Event('scroll')); });
+    await seed(db, [mediaItem({ id: 3, pluginId: 'tv', title: 'Gamma Show', updatedAt: 30 })]);
+
+    const control = await screen.findByRole('button', { name: '1 new' });
+    assert.deepEqual(titlesShown(), ['Beta Show', 'Alpha Show'], 'nothing on screen moved');
+
+    fireEvent.click(control);
+    await waitFor(() => { assert.deepEqual(titlesShown(), ['Gamma Show', 'Beta Show', 'Alpha Show']); });
+    assert.ok(!screen.queryByRole('button', { name: /new/ }), 'released, so the control is gone');
+  } finally {
+    window.scrollTo = scrollTo;
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 0, writable: true });
+  }
+});
