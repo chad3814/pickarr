@@ -9,7 +9,7 @@ async function claimInstall(page: Page, email: string, claimToken: string): Prom
   await page.getByLabel('Email').fill(email);
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByLabel('Claim token').fill(claimToken);
-  await page.getByRole('button', { name: 'Claim this install' }).click();
+  await page.getByRole('button', { name: 'Claim this install', exact: true }).click();
 }
 
 test('a fetch host limit saved on Settings is written to the config file and shown pinned after a reload', async ({ page, harness }) => {
@@ -18,20 +18,19 @@ test('a fetch host limit saved on Settings is written to the config file and sho
   await expect(page.getByRole('heading', { name: 'Pickarr' })).toBeVisible();
 
   await page.goto(`${harness.origin}/settings`);
-  const section = page.getByRole('region', { name: 'Fetching' });
-  await expect(section.getByRole('listitem', { name: 'Any other host' })).toBeVisible({ timeout: 10_000 });
+  const def = page.getByRole('region', { name: 'Fetching' }).getByRole('listitem', { name: 'Any other host' });
+  await expect(def).toBeVisible({ timeout: 10_000 });
 
   // The default row is always present; pin it to 2 and 45 s.
-  const def = section.getByRole('listitem', { name: 'Any other host' });
   await def.getByLabel('In flight').fill('2');
   await def.getByLabel('Timeout (s)').fill('45');
-  await def.getByRole('button', { name: 'Save Any other host' }).click();
-  await expect(def.getByLabel('In flight')).toHaveValue('2', { timeout: 10_000 });
+  const saved = page.waitForResponse((r) => r.url().endsWith('/api/fetch-hosts/default') && r.request().method() === 'PUT', { timeout: 10_000 });
+  await def.getByRole('button', { name: 'Save Any other host', exact: true }).click();
+  expect((await saved).status()).toBe(200);
 
   const written = JSON.parse(await readFile(harness.configPath, 'utf8')) as { fetch: { default: { concurrency: number; timeoutMs: number } } };
   expect(written.fetch.default).toEqual({ concurrency: 2, timeoutMs: 45000 });
 
   await page.reload();
-  const again = page.getByRole('region', { name: 'Fetching' }).getByRole('listitem', { name: 'Any other host' });
-  await expect(again.getByLabel('Timeout (s)')).toHaveValue('45', { timeout: 10_000 });
+  await expect(def.getByLabel('Timeout (s)')).toHaveValue('45', { timeout: 10_000 });
 });
