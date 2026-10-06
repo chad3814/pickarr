@@ -15,6 +15,8 @@ import type { AddDownloadClientOutcome } from '../../src/settings/AddDownloadCli
 import type { MappingSubmit } from '../../src/settings/postMapping.ts';
 import type { FeedRemovalSubmit } from '../../src/settings/postFeedRemoval.ts';
 import type { DestinationSubmit } from '../../src/settings/postDestination.ts';
+import type { FetchHostsLoader } from '../../src/settings/useFetchHosts.ts';
+import type { FetchHostSubmit } from '../../src/settings/putFetchHost.ts';
 
 /**
  * `afterEach(cleanup)`, never a per-test `cleanup()` (`CLAUDE.md`): a test
@@ -94,6 +96,16 @@ const neverSubmitMapping: MappingSubmit = {
   edit: () => assert.fail('a listing test must not edit a path mapping'),
   remove: () => assert.fail('a listing test must not remove a path mapping'),
 };
+/** The Fetching section's read: no hosts, the shipped default. */
+const emptyFetchHosts: FetchHostsLoader = async () => ({
+  outcome: 'answered',
+  status: 200,
+  body: { default: { concurrency: 1, timeoutMs: 30000 }, hosts: [] },
+});
+/** Nothing here saves a fetch host. */
+const neverSubmitFetchHost: FetchHostSubmit = () => {
+  assert.fail('a listing test must not save a fetch host');
+};
 /** Nothing here saves a destination either. */
 const neverSubmitDestination: DestinationSubmit = () => {
   assert.fail('a listing test must not save a destination');
@@ -108,6 +120,8 @@ function renderSettings(source: SettingsSource): void {
       submitDownloadClient={neverSubmitClient}
       submitMapping={neverSubmitMapping}
       submitDestination={neverSubmitDestination}
+      fetchHosts={emptyFetchHosts}
+      submitFetchHost={neverSubmitFetchHost}
     />,
   );
 }
@@ -130,7 +144,7 @@ test('the settings screen carries the route-mapping marker on its root element',
   // marked root contains the sections, rather than sitting beside them, is
   // what keeps that rule pointing at exactly one thing.
   const inner = Array.from(root.children).filter((child) => child.tagName === 'SECTION');
-  assert.equal(inner.length, 3, 'feeds, download clients and destinations are all inside the one root');
+  assert.equal(inner.length, 4, 'feeds, download clients, destinations and fetching are all inside the one root');
 });
 
 test('the feeds and download client sections each list from the replica, through their own hooks', async () => {
@@ -187,6 +201,9 @@ test('the /settings heading hierarchy is three tiers deep in the markup, not onl
   await waitFor(() => {
     assert.equal(screen.getAllByRole('heading', { name: 'Seedbox' }).length, 1, 'the client rendered, so the list tier is present to be checked');
   });
+  await waitFor(() => {
+    assert.equal(screen.getAllByRole('heading', { name: 'Any other host' }).length, 1, 'the fetch hosts read resolved, so its row tier is present');
+  });
 
   assert.deepEqual(headingOutline(screen.getByTestId('settings')), [
     '1 Settings',
@@ -200,6 +217,8 @@ test('the /settings heading hierarchy is three tiers deep in the markup, not onl
     '3 TV',
     '3 Movies',
     '3 XXX',
+    '2 Fetching',
+    '3 Any other host',
   ], 'one page heading, a section heading each, and everything inside a section one level further down');
 });
 
@@ -226,6 +245,8 @@ test('a download client list that never resolves leaves the feeds list rendered'
       submitDownloadClient={neverSubmitClient}
       submitMapping={neverSubmitMapping}
       submitDestination={neverSubmitDestination}
+      fetchHosts={emptyFetchHosts}
+      submitFetchHost={neverSubmitFetchHost}
     />,
   );
 

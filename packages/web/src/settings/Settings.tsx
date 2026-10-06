@@ -1,6 +1,7 @@
 /**
  * The `/settings` route's whole screen: the feeds section, the download
- * clients section and the destinations section, one under the other (design
+ * clients section, the destinations section and the fetching section, one
+ * under the other (design
  * spec §6 -- "the existing
  * `/settings` route gains a second section ... a separate route would split
  * one page across two urls for no reason a user could name").
@@ -44,6 +45,9 @@ import type { MappingSubmit } from './postMapping.ts';
 import type { FeedRemovalSubmit } from './postFeedRemoval.ts';
 import type { DestinationsSource } from './useDestinations.ts';
 import type { DestinationSubmit } from './postDestination.ts';
+import { Fetching } from './Fetching.tsx';
+import type { FetchHostsLoader } from './useFetchHosts.ts';
+import type { FetchHostSubmit } from './putFetchHost.ts';
 import { type AddDownloadClientInput, type AddFeedInput, TOKEN_NAMES_BY_PLUGIN } from '@pickarr/contract';
 
 /**
@@ -100,6 +104,10 @@ export interface SettingsProps {
   submitMapping: MappingSubmit;
   /** Saves one plugin's destination root and path shape. Required for the same reason. */
   submitDestination: DestinationSubmit;
+  /** Reads the fetch hosts over REST. Required for the same reason. */
+  fetchHosts: FetchHostsLoader;
+  /** Saves one fetch host's concurrency and timeout. Required for the same reason. */
+  submitFetchHost: FetchHostSubmit;
 }
 
 export function Settings({
@@ -109,6 +117,8 @@ export function Settings({
   feedRemoval,
   submitMapping,
   submitDestination,
+  fetchHosts,
+  submitFetchHost,
 }: SettingsProps): ReactElement {
   return (
     <section aria-labelledby="settings-heading" data-testid="settings">
@@ -116,6 +126,7 @@ export function Settings({
       <Feeds source={source} submit={submitFeed} removal={feedRemoval} />
       <DownloadClients source={source} submit={submitDownloadClient} submitMapping={submitMapping} />
       <Destinations source={source} plugins={PLUGINS} submit={submitDestination} />
+      <Fetching load={fetchHosts} submit={submitFetchHost} />
     </section>
   );
 }

@@ -635,6 +635,14 @@ test('the /activities route renders the Activities page, and the nav links to it
  */
 test('the /settings route renders the settings screen, not a category', async () => {
   const { deps, sched } = testDeps();
+  // The Fetching section reads `/api/fetch-hosts` over REST through the
+  // global `fetch`, not through the store's sync fetch; answer it with no
+  // hosts so the section reaches its empty state.
+  globalThis.fetch = fetchStub(async (url) =>
+    url === '/api/fetch-hosts'
+      ? jsonResponse({ default: { concurrency: 1, timeoutMs: 30000 }, hosts: [] }, 200)
+      : jsonResponse({ error: 'not stubbed' }, 404),
+  );
   render(
     <MemoryRouter initialEntries={['/settings']}>
       <Shell deps={deps} onUnauthenticated={() => {}} />
@@ -648,6 +656,8 @@ test('the /settings route renders the settings screen, not a category', async ()
   assert.ok(!screen.queryByTestId('category-movie'), 'not the movie category');
   assert.ok(!screen.queryByTestId('category-xxx'), 'not the xxx category');
   assert.ok(!screen.queryByTestId('unmatched'), 'not unmatched');
+  assert.ok(await screen.findByRole('heading', { name: 'Fetching' }));
+  assert.ok(await screen.findByText('No hosts fetched yet'), 'Shell wires the real fetch-hosts loader');
 
   await waitFor(() => {
     assert.ok(sched.hasPending('tail'), 'the tail loop has been scheduled');
