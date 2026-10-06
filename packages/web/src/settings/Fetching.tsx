@@ -95,8 +95,15 @@ function HostRow({ row, isDefault, submit, onSaved }: RowProps): ReactElement {
       if (seconds === undefined) { setError(FETCH_REFUSAL_MESSAGES['invalid-timeout']); return; }
       patch.timeoutMs = seconds === null ? null : seconds * 1000;
     }
-    if (isDefault && (patch.concurrency === null || patch.timeoutMs === null)) {
-      setError(FETCH_REFUSAL_MESSAGES['default-required']);
+    if (isDefault) {
+      if (patch.concurrency === null || patch.timeoutMs === null) {
+        setError(FETCH_REFUSAL_MESSAGES['default-required']);
+        return;
+      }
+      // The host refuses a default missing either field, so an untouched one
+      // is sent as the server's own value -- not the rounded seconds shown,
+      // which would rewrite a hand-edited 1500 ms as 2000.
+      void send({ concurrency: patch.concurrency ?? row.concurrency, timeoutMs: patch.timeoutMs ?? row.timeoutMs });
       return;
     }
     void send(patch);

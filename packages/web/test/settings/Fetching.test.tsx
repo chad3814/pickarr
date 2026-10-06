@@ -121,3 +121,26 @@ test('loading and empty states', async () => {
   await screen.findByText('No hosts fetched yet');
   assert.ok(screen.getByRole('listitem', { name: 'Any other host' }), 'the default row is always there');
 });
+
+test('the default row saves a one-field edit with both values, the untouched one as the server sent it', async () => {
+  const { load } = loaderOf([READ]);
+  const { submit, sent } = submitRecording({ concurrency: 2, timeoutMs: 30000 });
+  render(<Fetching load={load} submit={submit} />);
+  const def = await screen.findByRole('listitem', { name: 'Any other host' });
+  fireEvent.change(within(def).getByLabelText('In flight'), { target: { value: '2' } });
+  fireEvent.click(within(def).getByRole('button', { name: /^Save/ }));
+  await waitFor(() => { assert.equal(sent.length, 1); });
+  assert.deepEqual(sent[0], { hostname: 'default', patch: { concurrency: 2, timeoutMs: 30000 } });
+  assert.ok(!within(def).queryByRole('alert'), 'no default-required refusal');
+});
+
+test('an untouched non-whole-second default timeout is sent as its milliseconds, not the rounded display', async () => {
+  const { load } = loaderOf([{ ...READ, default: { concurrency: 1, timeoutMs: 1500 } }]);
+  const { submit, sent } = submitRecording({ concurrency: 2, timeoutMs: 1500 });
+  render(<Fetching load={load} submit={submit} />);
+  const def = await screen.findByRole('listitem', { name: 'Any other host' });
+  fireEvent.change(within(def).getByLabelText('In flight'), { target: { value: '2' } });
+  fireEvent.click(within(def).getByRole('button', { name: /^Save/ }));
+  await waitFor(() => { assert.equal(sent.length, 1); });
+  assert.deepEqual(sent[0], { hostname: 'default', patch: { concurrency: 2, timeoutMs: 1500 } });
+});
