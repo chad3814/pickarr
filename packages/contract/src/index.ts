@@ -51,6 +51,15 @@ export type {
   SaveDestinationRequest,
 } from './destinations.ts';
 export { DESTINATION_REFUSALS } from './destinations.ts';
+export type { FetchHostPatch, FetchHostRead, FetchHostsRead, FetchPair, FetchRefusalBody, FetchRefusalCode } from './fetch.ts';
+export {
+  FETCH_CONCURRENCY_MAX,
+  FETCH_CONCURRENCY_MIN,
+  FETCH_DEFAULT_HOST,
+  FETCH_REFUSALS,
+  FETCH_TIMEOUT_MAX_MS,
+  FETCH_TIMEOUT_MIN_MS,
+} from './fetch.ts';
 export type { MovieTokenName, TokensFor, TvTokenName, XxxTokenName } from './tokens.ts';
 export {
   MOVIE_TOKEN_NAMES,
