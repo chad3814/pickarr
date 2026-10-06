@@ -41,22 +41,43 @@ function wholeNumber(text: string): number | null | undefined {
 
 interface RowProps {
   row: FetchHostRead;
+  /** Where the row sits in the list: element ids derive from it, so two hostnames can never share one. */
+  index: number;
   isDefault: boolean;
   submit: FetchHostSubmit;
   onSaved: () => void;
 }
 
-function HostRow({ row, isDefault, submit, onSaved }: RowProps): ReactElement {
+/**
+ * The key a row is rendered under: every server-side value it shows, so a
+ * reload that changes any of them remounts the row with a fresh `draft`.
+ * That remount is what clears the typed values after a save -- not the save
+ * itself, which would show the old values until the reload arrived.
+ */
+function rowKey(row: FetchHostRead): string {
+  return [
+    row.hostname,
+    String(row.concurrency),
+    String(row.timeoutMs),
+    String(row.inherited.concurrency),
+    String(row.inherited.timeoutMs),
+    String(row.configured),
+  ].join(':');
+}
+
+function HostRow({ row, index, isDefault, submit, onSaved }: RowProps): ReactElement {
   const initial = shownFor(row, isDefault);
   const [draft, setDraft] = useState<{ concurrency?: string; timeoutS?: string }>({});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const label = isDefault ? DEFAULT_LABEL : row.hostname;
-  const idPrefix = `fetch-host-${isDefault ? FETCH_DEFAULT_HOST : row.hostname.replaceAll('.', '-')}`;
+  const idPrefix = `fetch-host-${isDefault ? FETCH_DEFAULT_HOST : String(index)}`;
   const nameId = `${idPrefix}-name`;
   const concurrencyId = `${idPrefix}-concurrency`;
+  const concurrencyLabelId = `${concurrencyId}-label`;
   const timeoutId = `${idPrefix}-timeout`;
+  const timeoutLabelId = `${timeoutId}-label`;
   const saveId = `${idPrefix}-save`;
   const revertId = `${idPrefix}-revert`;
 
@@ -73,7 +94,8 @@ function HostRow({ row, isDefault, submit, onSaved }: RowProps): ReactElement {
         setError(FETCH_REFUSAL_MESSAGES[outcome.refusal]);
         return;
       }
-      setDraft({});
+      // The draft stays until the reload: the row then remounts under its
+      // new `rowKey`, so the typed values show until the server's replace them.
       onSaved();
     } catch {
       setError(FETCH_REFUSAL_MESSAGES.offline);
@@ -114,9 +136,10 @@ function HostRow({ row, isDefault, submit, onSaved }: RowProps): ReactElement {
       <h3 id={nameId}>{label}</h3>
       <form onSubmit={save}>
         <div>
-          <label htmlFor={concurrencyId}>In flight</label>
+          <label id={concurrencyLabelId} htmlFor={concurrencyId}>In flight</label>
           <input
             id={concurrencyId}
+            aria-labelledby={`${concurrencyLabelId} ${nameId}`}
             inputMode="numeric"
             value={concurrency}
             placeholder={initial.concurrencyPlaceholder}
@@ -125,9 +148,10 @@ function HostRow({ row, isDefault, submit, onSaved }: RowProps): ReactElement {
           />
         </div>
         <div>
-          <label htmlFor={timeoutId}>Timeout (s)</label>
+          <label id={timeoutLabelId} htmlFor={timeoutId}>Timeout (s)</label>
           <input
             id={timeoutId}
+            aria-labelledby={`${timeoutLabelId} ${nameId}`}
             inputMode="numeric"
             value={timeoutS}
             placeholder={initial.timeoutPlaceholder}
@@ -162,25 +186,22 @@ export interface FetchingProps {
 
 export function Fetching({ load, submit }: FetchingProps): ReactElement {
   const { data, error, reload } = useFetchHosts(load);
+  const defaultRow: FetchHostRead | undefined = data === undefined
+    ? undefined
+    : { hostname: FETCH_DEFAULT_HOST, ...data.default, inherited: { concurrency: false, timeoutMs: false }, configured: true };
   return (
     <section aria-labelledby="fetching-heading">
       <h2 id="fetching-heading">Fetching</h2>
       <p>How many requests Pickarr makes to a host at once, and how long one may take. Blank fields inherit from Any other host.</p>
       {error !== null && <Refusal message={error} />}
-      {data === undefined ? (
-        <p>Loading…</p>
+      {data === undefined || defaultRow === undefined ? (
+        error === null && <p>Loading…</p>
       ) : (
         <>
           <ul aria-label="Fetch hosts">
-            <HostRow
-              key={FETCH_DEFAULT_HOST}
-              isDefault
-              row={{ hostname: FETCH_DEFAULT_HOST, ...data.default, inherited: { concurrency: false, timeoutMs: false }, configured: true }}
-              submit={submit}
-              onSaved={reload}
-            />
-            {data.hosts.map((row) => (
-              <HostRow key={`${row.hostname}:${String(row.concurrency)}:${String(row.timeoutMs)}:${String(row.configured)}`} row={row} isDefault={false} submit={submit} onSaved={reload} />
+            <HostRow key={rowKey(defaultRow)} row={defaultRow} index={0} isDefault submit={submit} onSaved={reload} />
+            {data.hosts.map((row, index) => (
+              <HostRow key={rowKey(row)} row={row} index={index} isDefault={false} submit={submit} onSaved={reload} />
             ))}
           </ul>
           {data.hosts.length === 0 && <p>No hosts fetched yet</p>}

@@ -16,3 +16,13 @@ test('refuses anything the queue would never key a request on', () => {
     assert.equal(isHostname(value), false, JSON.stringify(value));
   }
 });
+
+test('refuses a spelling the URL parser rewrites, which only the parse-and-compare catches', () => {
+  // Neither contains a forbidden character or an uppercase letter, so only
+  // the equality with `new URL(...).hostname` refuses them: the parser
+  // reads `0x7f.1` as 127.0.0.1 and punycodes `bücher.example` to
+  // `xn--bcher-kva.example`, and a request is keyed on those spellings.
+  for (const value of ['0x7f.1', 'bücher.example']) {
+    assert.equal(isHostname(value), false, value);
+  }
+});

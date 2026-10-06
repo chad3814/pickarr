@@ -80,8 +80,11 @@ beside the other three and carried on `HostSettings` as `fetch`:
   optional `concurrency` and optional `timeoutMs`. An absent field inherits
   from `default`.
 - `concurrency`: integer, 1 to 64. `timeoutMs`: integer, 1 000 to
-  3 600 000. A key must satisfy `isHostname` (§1.2). The schema is `strict`
-  at every level, like `serverConfigSchema`.
+  300 000. The ceiling sits below `JOB_TIMEOUT_MS` (360 000) so a slow
+  service fails as a timeout naming the url rather than as a job killed for
+  running long. A key must satisfy `isHostname` (§1.2) and must not be the
+  reserved `default`. The schema is `strict` at every level, like
+  `serverConfigSchema`.
 - A file that fails the schema fails boot with the path and the rule named,
   the way a bad `server.port` does. The queue's own construction-time
   validation (`assertValidLimits`, `assertValidTimeouts`) is removed; the
@@ -233,10 +236,10 @@ In `packages/contract/src/fetch.ts`:
 
 ```ts
 export const FETCH_REFUSALS = [
-  'invalid-shape',        // body is not an object, or a field is not an integer or null
+  'invalid-shape',        // body is not an object, or a field is neither a number nor null
   'invalid-hostname',     // path segment fails isHostname
   'invalid-concurrency',  // outside 1..64
-  'invalid-timeout',      // outside 1000..3600000
+  'invalid-timeout',      // outside 1000..300000
   'default-required',     // null or absent field on the default row
 ] as const;
 ```
@@ -265,7 +268,7 @@ with `aria-label="Fetch hosts"` and columns `Host`, `In flight`,
   answer, labelled `Saving…` while in flight. On success the row is
   replaced from the response. A refusal renders as `role="alert"` text in the
   row: `In flight must be a whole number from 1 to 64`, `Timeout must be a
-  whole number of seconds from 1 to 3600`, or `Could not save` for the rest,
+  whole number of seconds from 1 to 300`, or `Could not save` for the rest,
   with the session-expired and offline messages the other helpers use.
 - `Revert to default` appears only on rows with `configured: true`; it
   sends both fields as `null` and the row re-renders inherited.
@@ -291,10 +294,10 @@ as `postDestination.ts` does). The Shell wires both into Settings as
 - The lookup hostname with no entry shows `configured: false` and both
   fields `inherited: false`, since its values come from the fallback. Pinning
   one field leaves the other on the fallback.
-- A hand edit to the file while the host runs is not read until the next
-  boot; the next UI save re-reads the document (`update` does) and writes the
-  merged result, so the hand edit is not lost, but it is not in force either
-  until restart. The README says so.
+- A hand edit to the `fetch` section while the host runs is not read until
+  the next boot, and the next UI save overwrites it: `settings.ts` writes its
+  in-memory view and `update` replaces the whole `fetch` key. Every other
+  section of the file is kept. The README says so.
 
 ## 6. Testing
 

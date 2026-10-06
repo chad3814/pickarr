@@ -48,9 +48,9 @@ export const FETCH_REFUSAL_MESSAGES: Record<FetchRefusalCode | 'offline' | 'expi
   'invalid-shape': 'Pickarr did not understand that value. Enter whole numbers only.',
   'invalid-hostname': 'Pickarr does not know that host. Reload the page to see the hosts it has fetched.',
   'invalid-concurrency': 'In flight must be a whole number from 1 to 64.',
-  'invalid-timeout': 'Timeout must be a whole number of seconds from 1 to 3600.',
+  'invalid-timeout': 'Timeout must be a whole number of seconds from 1 to 300.',
   'default-required': 'The default row needs both values; it has nothing to inherit from.',
   offline: 'Could not reach Pickarr. Check your connection and try again.',
   expired: SESSION_EXPIRED_MESSAGE,
-  unrecognised: 'Pickarr refused this change, but did not say why. The host may be a different version than this page expects — reload and try again.',
+  unrecognised: 'Could not save. Pickarr answered with something this page did not understand; check the host log.',
 };

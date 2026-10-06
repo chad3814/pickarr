@@ -12,6 +12,12 @@
  * service's hostname alone -- the fallback `main.ts` always gave it, then
  * `default`. The fallback lives here rather than in the file so an install
  * that never touched the section has an empty section.
+ *
+ * **Why per hostname, and not one number.** A tracker that has not answered
+ * in 30 seconds will not answer at all, so waiting longer only holds a slot;
+ * the lookup service's platform allows five minutes, and a lookup cut off
+ * before that is a failed job and a retry that takes just as long. One
+ * global timeout cannot suit both.
  */
 import type { FetchHostPatch, FetchHostRead, FetchHostsRead, FetchPair, FetchRefusalCode } from '@pickarr/contract';
 import {

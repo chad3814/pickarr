@@ -85,7 +85,13 @@ test('null clears a field to inherited, and clearing both removes the key from t
 test('an empty patch on an unconfigured host writes nothing and answers the effective row', async () => {
   const { settings, written } = settingsOver({});
   const row = await settings.saveHost('cdn.example', {});
-  assert.equal('refusal' in row, false);
+  assert.deepEqual(row, {
+    hostname: 'cdn.example',
+    concurrency: 1,
+    timeoutMs: 30000,
+    inherited: { concurrency: true, timeoutMs: true },
+    configured: false,
+  });
   assert.deepEqual(written, [], 'nothing to write');
 });
 
@@ -97,7 +103,7 @@ test('saveHost refusals, each by name, and none of them writes', async () => {
   assert.deepEqual(await settings.saveHost('cdn.example', { concurrency: 65 }), { refusal: 'invalid-concurrency' });
   assert.deepEqual(await settings.saveHost('cdn.example', { concurrency: 2.5 }), { refusal: 'invalid-concurrency' });
   assert.deepEqual(await settings.saveHost('cdn.example', { timeoutMs: 999 }), { refusal: 'invalid-timeout' });
-  assert.deepEqual(await settings.saveHost('cdn.example', { timeoutMs: 3_600_001 }), { refusal: 'invalid-timeout' });
+  assert.deepEqual(await settings.saveHost('cdn.example', { timeoutMs: 300_001 }), { refusal: 'invalid-timeout' });
   assert.deepEqual(written, []);
 });
 
@@ -152,4 +158,39 @@ test('saveDefault racing saveHost keeps both the new default and the host entry'
     default: { concurrency: 2, timeoutMs: 20000 },
     hosts: { 'a.example': { concurrency: 3 } },
   });
+});
+
+test('a save whose write fails does not stall the chain: the save queued behind it still lands', async () => {
+  let updates = 0;
+  const written: FetchConfig[] = [];
+  let current = fetchConfigSchema.parse({});
+  const handle: ConfigHandle<FetchConfig> = {
+    get current() { return current; },
+    async update(next) {
+      updates += 1;
+      if (updates === 1) throw new Error('disk full');
+      written.push(next);
+      current = next;
+    },
+  };
+  const settings = createFetchSettings({ handle, lookupHostname: LOOKUP, lookupFallback: LOOKUP_FALLBACK });
+
+  // Both issued before either settles, so the second is queued behind the
+  // first on the save chain.
+  const first = settings.saveHost('a.example', { concurrency: 3 });
+  const second = settings.saveHost('b.example', { concurrency: 5 });
+  await assert.rejects(first, /disk full/);
+  assert.deepEqual(await second, {
+    hostname: 'b.example',
+    concurrency: 5,
+    timeoutMs: 30000,
+    inherited: { concurrency: false, timeoutMs: true },
+    configured: true,
+  });
+  assert.deepEqual(written, [{
+    default: { concurrency: 1, timeoutMs: 30000 },
+    hosts: { 'b.example': { concurrency: 5 } },
+  }], 'the failed save left nothing behind; the next one wrote only its own change');
+  assert.equal(settings.limitFor('a.example'), 1);
+  assert.equal(settings.limitFor('b.example'), 5);
 });

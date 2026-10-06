@@ -78,9 +78,11 @@ export class FetchFailedError extends Error {
  * Those two numbers come from two resolver functions, `limitFor` and
  * `timeoutFor`, rather than from values fixed at construction;
  * `fetch/settings.ts` is where the real ones are built. `limitFor` is asked
- * on every enqueue, so a changed limit applies from the next request to that
- * hostname and, as a side effect, releases waiters then; until another
- * request arrives, waiters and `snapshot().limit` stay at the old value.
+ * on every enqueue and again as every request settles, so a changed limit
+ * applies at the next enqueue or the next completion to that hostname,
+ * whichever comes first, and waiters are released (or held back) under it
+ * then; until one of those happens, `snapshot().limit` stays at the old
+ * value.
  * `timeoutFor` is asked when a request starts, so a changed timeout reaches
  * every request that has not yet started. A plugin cannot reach either one
  * -- it holds only `HostFetch` -- so both stay properties of the host's
@@ -89,7 +91,7 @@ export class FetchFailedError extends Error {
 export function createHostFetch(
   deps: {
     fetch: typeof globalThis.fetch;
-    /** How many requests to `hostname` may run at once. Asked on every enqueue; see `fetch/settings.ts`. */
+    /** How many requests to `hostname` may run at once. Asked on every enqueue and every completion; see `fetch/settings.ts`. */
     limitFor: (hostname: string) => number;
     /** How long one request to `hostname` may take. Asked when the request starts, not when it is enqueued. */
     timeoutFor: (hostname: string) => number;
@@ -126,7 +128,17 @@ export function createHostFetch(
     // Re-read on every request so a saved change is in force for this
     // request's slot decision. `setLimit` with the same value is a no-op.
     state.queue.setLimit(deps.limitFor(hostname));
-    return state.queue.run(task);
+    return state.queue.run(async () => {
+      try {
+        return await task();
+      } finally {
+        // Re-read again as this request settles, before `run`'s own
+        // `finally` frees the slot: that release then starts waiters under
+        // the current limit, so a lowered limit holds them back and a raised
+        // one lets them go without waiting for another request to arrive.
+        state.queue.setLimit(deps.limitFor(hostname));
+      }
+    });
   }
 
   /**
@@ -161,7 +173,8 @@ export function createHostFetch(
    * signal, composed below: every plugin call originates in a job, and
    * `run-job.ts` races the handler against `JOB_TIMEOUT_MS`, passing that
    * signal down (see `openmetadata/src/client.ts`'s `signal` doc). That
-   * ceiling is deliberately above the largest per-hostname timeout, so a
+   * ceiling, `JOB_TIMEOUT_MS`, is deliberately above `FETCH_TIMEOUT_MAX_MS`,
+   * the largest per-hostname timeout an operator can configure, so a
    * slow service fails as a timeout naming the url rather than as a job
    * killed for running long -- two very different things to read in a log.
    * A caller outside a job, passing no signal, is the one shape with no

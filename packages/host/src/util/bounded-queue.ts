@@ -41,7 +41,7 @@ export interface BoundedQueue {
  * schema enforces the same range on its own side, so a bad value is refused
  * where it is entered as well as where it is applied.
  */
-export function isValidLimit(value: number): boolean {
+function isValidLimit(value: number): boolean {
   return Number.isInteger(value) && value >= 1;
 }
 

@@ -2,14 +2,16 @@ import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMapping
 import type { SaveDestinationInput } from '../media/destinations.ts';
 
 /**
- * The shape guard for every write route's body -- one `is*Body` predicate
- * per `POST`/`PATCH`/`PUT` route, plus `destinationBodyFrom` for the one
- * body with an optional field a predicate cannot honestly express.
+ * The shape guard for every write route's body -- an `is*Body` predicate
+ * per `POST`/`PATCH`/`PUT` route, except the two bodies with optional
+ * fields a predicate cannot honestly express: `destinationBodyFrom` and
+ * `fetchHostPatchFrom` read those instead, returning the body as its typed
+ * input, or `undefined` for a body of the wrong shape.
  *
  * Split out of `server.ts` (issue #89): body-shape validation is not
- * routing. None of these checks a field's *value* -- only that it is
- * present and of the right primitive type -- because the value-level
- * invariants belong to whichever host function the route hands the body to:
+ * routing. None of these checks a field's *value* -- only that a required
+ * one is present and that each is of the right primitive type -- because
+ * the value-level invariants belong to whichever host function the route hands the body to:
  * per `server.ts`'s module doc, no business rule belongs in a shape guard
  * either.
  */

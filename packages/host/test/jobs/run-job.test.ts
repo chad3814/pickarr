@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import type { JobHandler, JobRecord, PluginContext } from '@pickarr/contract';
+import { FETCH_TIMEOUT_MAX_MS, type JobHandler, type JobRecord, type PluginContext } from '@pickarr/contract';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
 import { createRunner } from '../../src/jobs/runner.ts';
@@ -432,4 +432,16 @@ test("a grace wait that rejects is logged, not left an unhandled rejection", asy
 
   assert.equal(seenMessage, 'job timeout handler failed', 'a rejecting grace wait must be caught and logged, not left unhandled');
   assert.equal(seenDetail?.err, sleepFailure, 'the log must carry the actual rejection');
+});
+
+test('the largest configurable fetch timeout stays below the job ceiling', () => {
+  // A request armed at `FETCH_TIMEOUT_MAX_MS` must time out before the job
+  // that issued it is killed at `JOB_TIMEOUT_MS`: otherwise a slow service
+  // surfaces as a job killed for running long instead of a timeout naming
+  // the url. The job's clock starts first, so equal would not be enough.
+  assert.ok(
+    FETCH_TIMEOUT_MAX_MS < JOB_TIMEOUT_MS,
+    `FETCH_TIMEOUT_MAX_MS (${FETCH_TIMEOUT_MAX_MS}, expected 300000) must be below JOB_TIMEOUT_MS (${JOB_TIMEOUT_MS}, expected 360000)`,
+  );
+  assert.equal(FETCH_TIMEOUT_MAX_MS, 300_000);
 });

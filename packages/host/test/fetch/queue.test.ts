@@ -617,6 +617,54 @@ test('limitFor is re-read on every enqueue and applied to the hostname\'s queue'
   await Promise.all([a, b, c]);
 });
 
+test('a lowered limit reaches waiting requests at the next completion, not only the next enqueue', async () => {
+  let limit = 3;
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => limit, timeoutFor: () => 30_000 });
+  const requests = [1, 2, 3, 4, 5].map((n) => hostFetch.json<Echo>(`https://a.example/${n}`));
+  await tick();
+  assert.equal(track.activeNow(), 3, 'three run under the limit of three; two wait');
+
+  limit = 1; // saved while three run and two wait; no new request arrives
+  track.releaseNext();
+  await tick();
+  assert.equal(track.activeNow(), 2, 'the completion applied the limit of one, so no waiter started');
+  assert.equal(hostFetch.snapshot()[0]?.limit, 1);
+
+  track.releaseNext();
+  await tick();
+  assert.equal(track.activeNow(), 1, 'still above the limit of one, so no waiter started');
+
+  track.releaseNext();
+  await tick();
+  assert.equal(track.activeNow(), 1, 'the last of the three finished, so exactly one waiter started');
+
+  track.releaseNext();
+  await tick();
+  assert.equal(track.activeNow(), 1, 'the last waiter starts once the one before it finishes');
+  track.releaseNext();
+  await Promise.all(requests);
+});
+
+test('timeoutFor is not re-read once a request has started, so a change after start does not apply to it', async () => {
+  let timeoutMs = 10_000;
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => 1, timeoutFor: () => timeoutMs });
+  let settled = false;
+  const request = hostFetch.json<Echo>('https://a.example/1');
+  void request.then(() => { settled = true; }, () => { settled = true; });
+  await tick();
+  assert.equal(track.activeNow(), 1, 'the request has started under the 10000ms ceiling');
+
+  timeoutMs = 20;
+  await tick();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settled, false, 'a ceiling of 20ms saved after start must not cut a running request off');
+
+  track.releaseNext();
+  assert.deepEqual(await request, { url: 'https://a.example/1' });
+});
+
 test('seen lists every hostname that has had a request, in first-seen order', async () => {
   const track = trackingFetch();
   const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => 2, timeoutFor: () => 30_000 });

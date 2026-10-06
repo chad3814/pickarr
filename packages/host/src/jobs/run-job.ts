@@ -9,10 +9,12 @@ import { redactText } from '../clients/redact.ts';
  * its row. Enforced here, never requested of the handler: nothing can kill a
  * JavaScript function mid-execution, so this bounds the row, not the work.
  *
- * **Deliberately above the largest per-hostname fetch timeout**
- * (the one `fetch/settings.ts` resolves, whose slowest is the lookup
- * service's five minutes -- the hard ceiling of the platform it runs on).
- * When the two were both five minutes this one always won, because it is
+ * **Deliberately above the largest per-hostname fetch timeout an operator
+ * can configure**, `FETCH_TIMEOUT_MAX_MS` in `@pickarr/contract` (300 000:
+ * the lookup service's five minutes, the hard ceiling of the platform it
+ * runs on). `fetch/settings.ts` refuses any timeout above that constant and
+ * the config schema refuses it at boot, so no hostname can be given a
+ * timeout this one would beat. When the two were both five minutes this one always won, because it is
  * armed when the job starts and the fetch timeout only when the request is
  * issued: the fetch ceiling could never fire, and a slow lookup surfaced as
  * a job killed for running long rather than as a timeout naming the url.

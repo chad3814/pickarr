@@ -56,16 +56,21 @@ export const FETCH_DEFAULT_HOST = 'default';
 export const FETCH_CONCURRENCY_MIN = 1;
 export const FETCH_CONCURRENCY_MAX = 64;
 export const FETCH_TIMEOUT_MIN_MS = 1_000;
-export const FETCH_TIMEOUT_MAX_MS = 3_600_000;
+/**
+ * Five minutes: the lookup service's own platform ceiling, and below the
+ * host's `JOB_TIMEOUT_MS` (360 000) so a slow service fails as a timeout
+ * naming the url rather than as a job killed for running long.
+ */
+export const FETCH_TIMEOUT_MAX_MS = 300_000;
 
 export const FETCH_REFUSALS = [
-  /** The body is not an object, or a field is neither an integer nor null. */
+  /** The body is not an object, or a field is neither a number nor null. */
   'invalid-shape',
   /** The hostname fails `isHostname`, or is the reserved `default` passed as a host. */
   'invalid-hostname',
   /** `concurrency` outside 1..64. */
   'invalid-concurrency',
-  /** `timeoutMs` outside 1000..3600000. */
+  /** `timeoutMs` outside 1000..300000. */
   'invalid-timeout',
   /** `null` or an absent field on the default row. */
   'default-required',

@@ -4021,6 +4021,7 @@ test('PUT /api/fetch-hosts refusals and statuses', async () => {
     for (const [segment, status] of [['CDN.example', 404], ['a.b:80', 404], ['a%20b', 404]] as const) {
       const answer = await send(server, 'PUT', `/api/fetch-hosts/${segment}`, cookie, { concurrency: 2 });
       assert.equal(answer.status, status, segment);
+      assert.deepEqual(JSON.parse(answer.text), { error: 'unknown route' }, segment);
     }
     const shape = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 'two' });
     assert.equal(shape.status, 400);
@@ -4050,6 +4051,7 @@ test('a config write that throws is a 500 and the live values are untouched', as
   try {
     const answer = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 7 });
     assert.equal(answer.status, 500);
+    assert.deepEqual(JSON.parse(answer.text), { error: 'read failed' });
     assert.equal(settings.limitFor('cdn.example'), 3);
   } finally {
     await server.close();

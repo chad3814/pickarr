@@ -1,8 +1,8 @@
 /**
- * Reads an id or a plugin id back off a request's path -- `server.ts`'s
- * router matches a template like `/api/mappings/:id` by segment count
- * alone and never binds the `:name` segment itself, so each of these is
- * what recovers the value for the one route that named it.
+ * Reads an id, a plugin id or a fetch hostname back off a request's path --
+ * `server.ts`'s router matches a template like `/api/mappings/:id` by
+ * segment count alone and never binds the `:name` segment itself, so each
+ * of these is what recovers the value for the one route that named it.
  *
  * Split out of `server.ts` (issue #89): this is parsing, not routing, and
  * every function here is pure -- a pathname in, a value or `undefined` out.

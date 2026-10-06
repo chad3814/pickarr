@@ -86,7 +86,25 @@ test('fetch bounds are enforced and the path names the host and field', () => {
   assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { concurrency: 0 } } }), /hosts.*a\.b.*concurrency/s);
   assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { concurrency: 65 } } }), /concurrency/);
   assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 999 } } }), /timeoutMs/);
-  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 3600001 } } }), /timeoutMs/);
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 300001 } } }), /timeoutMs/);
   assert.throws(() => fetchConfigSchema.parse({ default: { concurrency: 1.5, timeoutMs: 30000 } }), /concurrency/);
   assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { retries: 2 } } }), /retries|unrecognized/i);
+});
+
+test('fetch bounds accept their ceilings: 300000 ms and 64 in flight', () => {
+  assert.deepEqual(
+    fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 300000 } } }).hosts,
+    { 'a.b': { timeoutMs: 300000 } },
+  );
+  assert.deepEqual(
+    fetchConfigSchema.parse({ hosts: { 'a.b': { concurrency: 64 } } }).hosts,
+    { 'a.b': { concurrency: 64 } },
+  );
+});
+
+test('the reserved `default` is refused as a fetch.hosts key', () => {
+  assert.throws(
+    () => fetchConfigSchema.parse({ hosts: { default: { concurrency: 3 } } }),
+    /not the reserved `default`/,
+  );
 });
