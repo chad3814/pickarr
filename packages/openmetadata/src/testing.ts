@@ -397,7 +397,8 @@ export interface TestHarness {
   /** Inserts an `rss_item` row and returns its id. */
   insertRssItem(filename: string, feedId?: number): number;
   /** Inserts an `rss_feed` row and returns its id. */
-  insertFeed(downloadClientId: number | null): number;
+  /** `pluginId` is read by `requery.ts`'s sweep alone; every other test leaves it null. */
+  insertFeed(downloadClientId: number | null, pluginId?: string): number;
 }
 
 /**
@@ -434,8 +435,8 @@ export interface TestHarness {
 export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number } = {}): TestHarness {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys = OFF');
-  raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER)');
-  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, media_item_id INTEGER, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT)");
+  raw.exec('CREATE TABLE rss_feed (id INTEGER PRIMARY KEY, download_client_id INTEGER, plugin_id TEXT)');
+  raw.exec("CREATE TABLE rss_item (id INTEGER PRIMARY KEY, feed_id INTEGER, filename TEXT NOT NULL, media_item_id INTEGER, lookup_state TEXT NOT NULL DEFAULT 'pending', video_resolution TEXT, lookup_json TEXT, updated_at INTEGER NOT NULL DEFAULT 0, auto_requery_count INTEGER NOT NULL DEFAULT 0)");
   raw.exec('CREATE TABLE media_item (id INTEGER PRIMARY KEY)');
   raw.exec(`CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
@@ -507,8 +508,9 @@ export function createTestHarness(deps: { fetch?: HostFetch; now?: () => number 
         .run(filename, feedId ?? null);
       return Number(result.lastInsertRowid);
     },
-    insertFeed(downloadClientId: number | null): number {
-      const result = raw.prepare('INSERT INTO rss_feed (download_client_id) VALUES (?)').run(downloadClientId);
+    insertFeed(downloadClientId: number | null, pluginId?: string): number {
+      const result = raw.prepare('INSERT INTO rss_feed (download_client_id, plugin_id) VALUES (?, ?)')
+        .run(downloadClientId, pluginId ?? null);
       return Number(result.lastInsertRowid);
     },
   };

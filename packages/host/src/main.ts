@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
-import { API_KEY_SECRET } from '@pickarr/openmetadata';
+import { API_KEY_SECRET, REQUERY_SWEEP_JOB, REQUERY_SWEEP_PAYLOAD } from '@pickarr/openmetadata';
 import { createMoviePlugin } from '@pickarr/plugin-movie';
 import { createTvPlugin } from '@pickarr/plugin-tv';
 import { createXxxPlugin } from '@pickarr/plugin-xxx';
@@ -213,6 +213,23 @@ export function defaultWebRoot(moduleUrl: string): string {
  * poll a single feed, forever, with no test and no log line anywhere to say
  * so.
  */
+/**
+ * Books the daily requery sweep (`@pickarr/openmetadata`'s `requery.ts`) for
+ * every registered plugin that declares one -- the three lookup plugins --
+ * and skips any that does not. Idempotent through `Host.scheduleJob`, so a
+ * restart while a sweep is pending books nothing new. Answers the plugin
+ * ids it booked, for the boot log.
+ */
+export function scheduleRequerySweeps(host: Host, plugins: readonly MediaPlugin[]): readonly string[] {
+  const booked: string[] = [];
+  for (const plugin of plugins) {
+    if (!(REQUERY_SWEEP_JOB in plugin.jobs)) continue;
+    host.scheduleJob(plugin.id, REQUERY_SWEEP_JOB, REQUERY_SWEEP_PAYLOAD);
+    booked.push(plugin.id);
+  }
+  return booked;
+}
+
 export function scheduleKnownFeeds(host: Host, raw: DatabaseSync): readonly number[] {
   // `disabled_at IS NULL`: a disabled feed keeps its row and its releases
   // and stops polling, which is the whole of what disabling means
@@ -1005,6 +1022,7 @@ export async function main(
 
   const recovered = host.start();
   const feedIds = scheduleKnownFeeds(host, raw);
+  const sweeps = scheduleRequerySweeps(host, plugins);
   const clientIds = await scheduleKnownDownloadClients(host, raw);
 
   // Once, here, before the listener opens -- not per request, and not
@@ -1034,6 +1052,7 @@ export async function main(
     // `ReadServerDeps.requestPick`.
     requestPick: (rssItemId) => host.requestPick(rssItemId),
     retryLookup: (rssItemId) => host.retryLookup(rssItemId),
+    retryAllUnresolved: () => host.retryAllUnresolved(),
     identifyRelease: (rssItemId, request) => host.identifyRelease(rssItemId, request),
     // The three `/api/mappings` operations, wired the same way again --
     // one function each, never the `Host` itself. None of the three
@@ -1117,7 +1136,7 @@ export async function main(
     + `lookups to ${settings.openmetadataUrl}, `
     + `read api on http://${server.host}:${server.port}, `
     + `${recovered} job(s) recovered, ${feedIds.length} feed(s) scheduled, `
-    + `${clientIds.length} download client(s) scheduled`,
+    + `${clientIds.length} download client(s) scheduled, ${sweeps.length} requery sweep(s) booked`,
   );
 
   // Last, and only while there is something to claim -- see the order above.

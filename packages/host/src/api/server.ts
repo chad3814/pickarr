@@ -381,6 +381,8 @@ export interface ReadServerDeps {
    * Resolves a refusal value; throws only on a fault.
    */
   retryLookup: (rssItemId: number) => Promise<RetryLookupOutcome>;
+  /** `Host.retryAllUnresolved`: every unresolved release re-asked about at once; answers how many a plugin took. */
+  retryAllUnresolved: () => Promise<{ readonly accepted: number }>;
   /**
    * Identifies a release by hand -- `Host.identifyRelease`, handed in as one
    * function for the same reason. Resolves a refusal value; throws only on a
@@ -1228,6 +1230,17 @@ export const ROUTES: readonly Route[] = [
       }
       return json(202, { accepted: true });
     },
+  },
+  {
+    path: '/api/unmatched/retry-all',
+    // Three segments against the four of `/api/unmatched/:id/retry`, so
+    // `matchesPath`'s segment count keeps the two apart; no release may be
+    // named `retry-all` because `retryIdFrom` reads digits only.
+    methods: ['POST'],
+    open: false,
+    // 202 for the reason the single retry gives: nothing is finished when
+    // this answers, the lookups are queued.
+    answer: async ({ deps }) => json(202, await deps.retryAllUnresolved()),
   },
   {
     path: '/api/unmatched/:id/retry',

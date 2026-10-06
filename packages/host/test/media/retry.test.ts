@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { retryLookup } from '../../src/media/retry.ts';
+import { retryAllUnresolved, retryLookup } from '../../src/media/retry.ts';
 import type { NotifyOutcome } from '../../src/host.ts';
 
 function setup(): DatabaseSync {
@@ -138,5 +138,54 @@ test('a release that is unowned and also failed is refused rather than thrown', 
   });
 
   assert.deepEqual(await retryLookup({ raw, notify }, 7), { refusal: 'plugin-not-registered' });
+  raw.close();
+});
+
+function seedReleaseIn(raw: DatabaseSync, id: number, lookupState: string, mediaItemId: number | null = null): void {
+  raw.prepare(`
+    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, lookup_state, media_item_id)
+    VALUES (?, 1, 'a.mkv', 'https://tracker.example/a.torrent', 10, 10, 'torrent', ?, ?)
+  `).run(id, lookupState, mediaItemId);
+}
+
+test('retryAllUnresolved hands every unresolved, unlinked release over in one call, in id order, and answers how many', async () => {
+  const raw = setup();
+  seedMediaItem(raw, 1);
+  seedReleaseIn(raw, 9, 'unresolved');
+  seedReleaseIn(raw, 3, 'unresolved');
+  seedReleaseIn(raw, 4, 'refused');
+  seedReleaseIn(raw, 5, 'pending');
+  seedReleaseIn(raw, 6, 'unresolved', 1);
+  const { calls, notify } = recordingNotify();
+
+  const outcome = await retryAllUnresolved({ raw, notify });
+
+  assert.deepEqual(outcome, { accepted: 2 });
+  assert.deepEqual(calls, [[3, 9]], 'refused is a definitive answer, pending is already in flight, linked is matched');
+  raw.close();
+});
+
+test('retryAllUnresolved with nothing unresolved asks nothing and answers zero', async () => {
+  const raw = setup();
+  seedReleaseIn(raw, 4, 'refused');
+  const { calls, notify } = recordingNotify();
+
+  assert.deepEqual(await retryAllUnresolved({ raw, notify }), { accepted: 0 });
+  assert.deepEqual(calls, []);
+  raw.close();
+});
+
+test('retryAllUnresolved does not count releases nobody owns, and surfaces a plugin fault', async () => {
+  const raw = setup();
+  seedReleaseIn(raw, 1, 'unresolved');
+  seedReleaseIn(raw, 2, 'unresolved');
+
+  const partial = await retryAllUnresolved({ raw, notify: async () => ({ unowned: [2], failures: [] }) });
+  assert.deepEqual(partial, { accepted: 1 });
+
+  await assert.rejects(
+    retryAllUnresolved({ raw, notify: async () => ({ unowned: [], failures: [{ pluginId: 'tv', error: new Error('boom') }] }) }),
+    /boom/,
+  );
   raw.close();
 });
