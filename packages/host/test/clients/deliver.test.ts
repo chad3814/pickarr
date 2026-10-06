@@ -143,7 +143,7 @@ function baseDeps(
   clientId: number,
   overrides: Partial<Omit<DeliverDeps, 'raw' | 'clientId'>> = {},
 ): DeliverDeps {
-  const { remove, ...rest } = overrides;
+  const { remove, discard, ...rest } = overrides;
   const deps: DeliverDeps = {
     raw,
     clientId,
@@ -152,7 +152,16 @@ function baseDeps(
     deliver: rest.deliver ?? unusedDeliver,
     log: rest.log ?? (() => {}),
   };
-  return remove === undefined ? deps : { ...deps, remove };
+  return {
+    ...deps,
+    ...(remove === undefined ? {} : { remove }),
+    ...(discard === undefined ? {} : { discard }),
+  };
+}
+
+/** A `discard` for tests that only need the reclaim to proceed: records the path and deletes nothing. */
+function recordingDiscard(paths: string[]): (mappedPath: string) => Promise<void> {
+  return async (path) => { paths.push(path); };
 }
 
 test('a completed row is delivered to the plugin owning its feed', async () => {
@@ -451,6 +460,7 @@ test('a delivered row is reclaimed when the adapter can reclaim', async () => {
   const result = await deliverCompleted(baseDeps(raw, clientId, {
     now: 900,
     remove: async (ref) => { removedRefs.push(ref); },
+    discard: recordingDiscard([]),
   }));
 
   assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
@@ -493,6 +503,7 @@ test('a delivered row is reclaimed exactly once, however many passes follow -- t
   const deps = baseDeps(raw, clientId, {
     now: 900,
     remove: async (ref) => { removedRefs.push(ref); },
+    discard: recordingDiscard([]),
   });
 
   const first = await deliverCompleted(deps);
@@ -517,6 +528,7 @@ test('a remove that throws leaves the row unreclaimed, and the next pass retries
   let calls = 0;
   const deps = baseDeps(raw, clientId, {
     now: 900,
+    discard: recordingDiscard([]),
     remove: async () => {
       calls += 1;
       if (calls === 1) throw new Error('client unreachable');
@@ -542,8 +554,8 @@ test("a SABnzbd delete refused at HTTP 200 leaves the row unreclaimed, and the n
   // The real adapter, not a hand-written `remove`: the defect was that
   // `remove` read nothing out of the response, so a refusal answered with a
   // 200 came back as success, `reclaimed_at` was stamped, the row was never
-  // offered again, and -- because the request carries `del_files=1` -- the
-  // files stayed on disk forever. Wiring the actual client in is what makes
+  // offered again, and the job sat in SABnzbd's history forever. Wiring
+  // the actual client in is what makes
   // this test see that, rather than testing a double that agrees with it.
   const raw = setup();
   const clientId = seedClient(raw);
@@ -572,7 +584,7 @@ test("a SABnzbd delete refused at HTTP 200 leaves the row unreclaimed, and the n
   const sabnzbd = createSabnzbdClient({
     kind: 'sabnzbd', id: 41, baseUrl: 'https://sab.example.com', apiKey: 'not-a-real-key', category: 'movies',
   }, fetch);
-  const deps = baseDeps(raw, clientId, { now: 900, remove: (ref) => sabnzbd.remove(ref) });
+  const deps = baseDeps(raw, clientId, { now: 900, remove: (ref) => sabnzbd.remove(ref), discard: recordingDiscard([]) });
 
   const first = await deliverCompleted(deps);
 
@@ -610,6 +622,7 @@ test('one ref the client will not delete does not starve the rows behind it', as
   const asked: string[] = [];
   const deps = baseDeps(raw, clientId, {
     now: 900,
+    discard: recordingDiscard([]),
     remove: async (ref: string) => {
       asked.push(ref);
       if (ref === 'ref-poison') throw new Error('will never delete this one');
@@ -685,4 +698,125 @@ test('a refused import is counted, and waits on a doubling ladder before it is t
   const second = await deliverCompleted(baseDeps(raw, clientId, { now: 11_000, deliver: refuse, stat: async () => ({ sizeBytes: 10 }) }));
   assert.equal(second.refused, 1);
   assert.equal(readColumn(raw, rowId, 'import_retry_at'), 11_000 + 20_000);
+});
+
+test('reclaim discards the mapped completed path before asking the client to forget the job', async () => {
+  // SABnzbd's `history&name=delete&del_files=1` deletes a job's *incomplete*
+  // folder, and only for a failed job (`_api_history_delete` in its api.py,
+  // read 2026-10-06): a completed job's folder is never touched by that
+  // call. Import mode is `copy`, so until this step existed every completed
+  // nzb folder stayed on disk forever.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/mnt/usenet');
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'nzo-1', status: 'delivered', deliveredAt: 500,
+    storagePath: '/downloads/complete/Some.Movie.2026',
+  });
+
+  const order: string[] = [];
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    now: 900,
+    discard: async (path) => { order.push(`discard ${path}`); },
+    remove: async (ref) => { order.push(`remove ${ref}`); },
+  }));
+
+  assert.deepEqual(order, ['discard /mnt/usenet/complete/Some.Movie.2026', 'remove nzo-1'],
+    'the mapped path, not the client\'s own; files first, so a refused delete retried next tick re-runs an idempotent discard');
+  assert.deepEqual(result, { delivered: 0, reclaimed: 1, unowned: 0, reclaimFailures: 0, undeliverable: 0, refused: 0 });
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
+test('a delivered row with no storage path skips the discard and is still reclaimed', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'nzo-1', status: 'delivered', deliveredAt: 500, storagePath: null,
+  });
+  const discarded: string[] = [];
+  const removed: string[] = [];
+
+  await deliverCompleted(baseDeps(raw, clientId, {
+    now: 900, discard: recordingDiscard(discarded), remove: async (ref) => { removed.push(ref); },
+  }));
+
+  assert.deepEqual(discarded, []);
+  assert.deepEqual(removed, ['nzo-1']);
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), 900);
+});
+
+test('a discard that throws leaves the row unreclaimed, never asks the client, and is retried next pass', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  const itemId = seedRssItem(raw, 'movie', 'alpha');
+  const id = insertTorrentRow(raw, {
+    rssItemId: itemId, downloadClientId: clientId, clientRef: 'nzo-1', status: 'delivered', deliveredAt: 500,
+    storagePath: '/downloads/complete/Stuck',
+  });
+  const removed: string[] = [];
+  const logs: string[] = [];
+  let attempts = 0;
+  const deps = baseDeps(raw, clientId, {
+    now: 900,
+    discard: async () => { attempts += 1; throw new Error('EACCES: permission denied'); },
+    remove: async (ref) => { removed.push(ref); },
+    log: (message) => { logs.push(message); },
+  });
+
+  const first = await deliverCompleted(deps);
+  assert.deepEqual(first, { delivered: 0, reclaimed: 0, unowned: 0, reclaimFailures: 1, undeliverable: 0, refused: 0 });
+  assert.deepEqual(removed, [], 'the client is not told to forget a job whose files are still there');
+  assert.equal(readColumn(raw, id, 'reclaimed_at'), null);
+  assert.deepEqual(logs, ['reclaim failed, leaving the download for the next tick']);
+
+  await deliverCompleted(deps);
+  assert.equal(attempts, 2, 'the next pass tries the discard again');
+});
+
+test('a mapped path that is a mapping target or the filesystem root is refused, not deleted', async () => {
+  // A `filepath_mapping` whose `to_path` is the whole download share, and a
+  // client that reports the share itself as a job\'s storage path, would
+  // otherwise hand `rm -rf` the share. Refused here, before any call.
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/mnt/usenet');
+  const share = insertTorrentRow(raw, {
+    rssItemId: seedRssItem(raw, 'share', 'alpha'), downloadClientId: clientId, clientRef: 'nzo-share',
+    status: 'delivered', deliveredAt: 500, storagePath: '/downloads',
+  });
+  const root = insertTorrentRow(raw, {
+    rssItemId: seedRssItem(raw, 'root', 'alpha'), downloadClientId: clientId, clientRef: 'nzo-root',
+    status: 'delivered', deliveredAt: 500, storagePath: '/',
+  });
+  const discarded: string[] = [];
+  const removed: string[] = [];
+  const details: unknown[] = [];
+
+  const result = await deliverCompleted(baseDeps(raw, clientId, {
+    now: 900,
+    discard: recordingDiscard(discarded),
+    remove: async (ref) => { removed.push(ref); },
+    log: (_message, detail) => { details.push(detail); },
+  }));
+
+  assert.deepEqual(discarded, []);
+  assert.deepEqual(removed, []);
+  assert.equal(result.reclaimFailures, 2);
+  assert.equal(readColumn(raw, share, 'reclaimed_at'), null);
+  assert.equal(readColumn(raw, root, 'reclaimed_at'), null);
+  assert.deepEqual(details, [
+    { rowId: share, reason: 'refusing to discard /mnt/usenet: it is a mapping target or the filesystem root' },
+    { rowId: root, reason: 'refusing to discard /: it is a mapping target or the filesystem root' },
+  ]);
+});
+
+test('a remove without a discard is a wiring error, refused before any row is touched', async () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  await assert.rejects(
+    deliverCompleted(baseDeps(raw, clientId, { remove: async () => {} })),
+    /deliver: a client that can remove a job must also be able to discard its files/,
+  );
 });

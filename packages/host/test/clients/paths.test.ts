@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { openTestDatabase } from '../../src/db/open.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
-import { mapClientPath } from '../../src/clients/paths.ts';
+import { isDiscardable, mapClientPath } from '../../src/clients/paths.ts';
 
 function setup(): DatabaseSync {
   const { raw } = openTestDatabase();
@@ -130,4 +130,19 @@ test('the tie this function does not resolve cannot be reached, because the inde
 
   assert.equal(mapClientPath(raw, clientId, '/downloads/movie.mkv'), '/media/movie.mkv',
     'so the surviving mapping is the only candidate and the answer is not a draw');
+});
+
+test('isDiscardable refuses a mapping target, the filesystem root and an empty path, and allows anything below a target', () => {
+  const raw = setup();
+  const clientId = seedClient(raw);
+  seedMapping(raw, clientId, '/downloads', '/mnt/usenet');
+  seedMapping(raw, clientId, '/other', '/mnt/other/');
+
+  assert.equal(isDiscardable(raw, clientId, '/mnt/usenet'), false);
+  assert.equal(isDiscardable(raw, clientId, '/mnt/usenet/'), false, 'a trailing slash is the same directory');
+  assert.equal(isDiscardable(raw, clientId, '/mnt/other'), false, 'a target stored with a trailing slash still matches');
+  assert.equal(isDiscardable(raw, clientId, '/'), false);
+  assert.equal(isDiscardable(raw, clientId, ''), false);
+  assert.equal(isDiscardable(raw, clientId, '/mnt/usenet/complete/Job'), true);
+  assert.equal(isDiscardable(raw, clientId, '/elsewhere/Job'), true, 'a path no mapping produced is still a path the client named');
 });

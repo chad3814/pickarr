@@ -77,7 +77,7 @@
  * executes; without that exclusion the guard would find it, decline to
  * schedule anything, and silence this client's reconcile cycle for good.
  */
-import { stat } from 'node:fs/promises';
+import { rm, stat } from 'node:fs/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile, JobHandler, JobQueue, JobRecord } from '@pickarr/contract';
 import { HOST_PLUGIN_ID } from '../host-id.ts';
@@ -155,6 +155,12 @@ type ReconcileAdapter =
     snapshot(ask: SnapshotAsk): Promise<ClientSnapshot>;
     /** Present only on this arm -- an nzb client's history delete costs nothing but the history entry. */
     remove(ref: string): Promise<void>;
+    /**
+     * Also only here: deletes the job's completed folder, which SABnzbd's
+     * own delete never does (see `deliver.ts`'s module doc). A torrent's
+     * files are its seed, so the other arm has no such member to misuse.
+     */
+    discard(mappedPath: string): Promise<void>;
   }
   | {
     transport: 'torrent';
@@ -200,7 +206,12 @@ export function buildReconcileAdapter(config: ClientConfig, fetch: QueuedFetch):
   switch (kind) {
     case 'sabnzbd': {
       const client = createSabnzbdClient(config, fetch);
-      return { transport: 'nzb', snapshot: (ask) => client.snapshot(ask), remove: (ref: string) => client.remove(ref) };
+      return {
+        transport: 'nzb',
+        snapshot: (ask) => client.snapshot(ask),
+        remove: (ref: string) => client.remove(ref),
+        discard: discardForDeliver,
+      };
     }
     case 'qbittorrent-bearer':
     case 'qbittorrent-login': {
@@ -277,6 +288,18 @@ function logTickSummary(
 async function statForDeliver(path: string): Promise<{ sizeBytes: number }> {
   const stats = await stat(path);
   return { sizeBytes: stats.size };
+}
+
+/**
+ * `deliverCompleted`'s `discard` dependency: `rm -rf` over a mapped
+ * completed path, file or directory. `force` makes a path that is already
+ * gone a no-op, which is what lets `deliver.ts` run this before the
+ * client's own delete and repeat it on a retry without harm. The guard
+ * against deleting a mapping target or the root lives in `deliver.ts`,
+ * which has the database this function does not.
+ */
+async function discardForDeliver(mappedPath: string): Promise<void> {
+  await rm(mappedPath, { recursive: true, force: true });
 }
 
 /**
@@ -456,7 +479,7 @@ async function runTick(
       ? { raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver, log: deps.log }
       : {
         raw: deps.raw, clientId, now: deps.now(), stat: statForDeliver, deliver: deps.deliver,
-        remove: adapter.remove, log: deps.log,
+        remove: adapter.remove, discard: adapter.discard, log: deps.log,
       };
     const delivery = await deliverCompleted(deliverDeps);
 
