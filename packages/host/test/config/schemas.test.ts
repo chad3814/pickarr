@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_TRUSTED_PROXIES, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from '../../src/config/schemas.ts';
+import { DEFAULT_TRUSTED_PROXIES, databaseConfigSchema, fetchConfigSchema, secretsConfigSchema, serverConfigSchema } from '../../src/config/schemas.ts';
 
 test('every host namespace parses an absent section into its defaults', () => {
   assert.deepEqual(serverConfigSchema.parse(undefined), {
@@ -59,4 +59,34 @@ test('webRoot is absent by default, and a configured one passes through unmodifi
   // for any thrown value at all, proving only that something threw. A
   // `RegExp` is validated against `error.message`.
   assert.throws(() => serverConfigSchema.parse({ webRoot: '' }), /too_small/, 'an empty string is not a path');
+});
+
+test('an absent fetch section yields the two constants the queue used to carry', () => {
+  assert.deepEqual(fetchConfigSchema.parse(undefined), {
+    default: { concurrency: 1, timeoutMs: 30000 },
+    hosts: {},
+  });
+});
+
+test('a fetch host entry may pin one field and inherit the other', () => {
+  assert.deepEqual(
+    fetchConfigSchema.parse({ hosts: { 'cdn.example': { concurrency: 3 } } }),
+    { default: { concurrency: 1, timeoutMs: 30000 }, hosts: { 'cdn.example': { concurrency: 3 } } },
+  );
+});
+
+test('a fetch host key that is not a bare lowercase hostname is refused naming the key', () => {
+  assert.throws(
+    () => fetchConfigSchema.parse({ hosts: { 'CDN.example:443': { concurrency: 3 } } }),
+    /CDN\.example:443/,
+  );
+});
+
+test('fetch bounds are enforced and the path names the host and field', () => {
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { concurrency: 0 } } }), /hosts.*a\.b.*concurrency/s);
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { concurrency: 65 } } }), /concurrency/);
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 999 } } }), /timeoutMs/);
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { timeoutMs: 3600001 } } }), /timeoutMs/);
+  assert.throws(() => fetchConfigSchema.parse({ default: { concurrency: 1.5, timeoutMs: 30000 } }), /concurrency/);
+  assert.throws(() => fetchConfigSchema.parse({ hosts: { 'a.b': { retries: 2 } } }), /retries|unrecognized/i);
 });
