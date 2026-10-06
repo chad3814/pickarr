@@ -534,6 +534,10 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
  * job and a retry that will take just as long. `fetch/settings.ts` has the
  * reasoning for why this is per-hostname.
  *
+ * This is the lookup hostname's per-field fallback in `fetch/settings.ts`: it
+ * applies when the config file's `fetch.hosts` has no entry for that hostname
+ * or the entry lacks a timeout, rather than being an entry in a map built here.
+ *
  * `run-job.ts`'s `JOB_TIMEOUT_MS` is deliberately above this; see its doc.
  */
 export const LOOKUP_TIMEOUT_MS = 300_000;
@@ -545,6 +549,11 @@ export const LOOKUP_TIMEOUT_MS = 300_000;
  * service would have done concurrently. Four is chosen to cut that without
  * becoming a burst: the service is a shared deployment, and its own rate
  * limiting, not this number, is what should decide when it has had enough.
+ *
+ * This is the lookup hostname's per-field fallback in `fetch/settings.ts`: it
+ * applies when the config file's `fetch.hosts` has no entry for that hostname
+ * or the entry lacks a concurrency, rather than being an entry in a map built
+ * here.
  */
 export const LOOKUP_CONCURRENCY = 4;
 

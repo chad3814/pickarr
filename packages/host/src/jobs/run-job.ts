@@ -10,7 +10,7 @@ import { redactText } from '../clients/redact.ts';
  * JavaScript function mid-execution, so this bounds the row, not the work.
  *
  * **Deliberately above the largest per-hostname fetch timeout**
- * (`fetch/queue.ts`'s `FetchTimeouts`, whose slowest entry is the lookup
+ * (the one `fetch/settings.ts` resolves, whose slowest is the lookup
  * service's five minutes -- the hard ceiling of the platform it runs on).
  * When the two were both five minutes this one always won, because it is
  * armed when the job starts and the fetch timeout only when the request is
