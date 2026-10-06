@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadClients, MediaPlugin } from '@pickarr/contract';
-import { API_KEY_SECRET } from '@pickarr/openmetadata';
+import { API_KEY_SECRET, REQUERY_SWEEP_JOB } from '@pickarr/openmetadata';
 import type { Host } from '../src/host.ts';
 import { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from '../src/host.ts';
 import { migrateHost } from '../src/db/migrate.ts';
@@ -42,6 +42,7 @@ import {
   resolveReadPort,
   resolveSettings,
   scheduleKnownFeeds,
+  scheduleRequerySweeps,
   shippedPlugins,
 } from '../src/main.ts';
 import { DEFAULT_CONFIG_PATH } from '../src/config/schemas.ts';
@@ -101,6 +102,8 @@ function fakeHost(overrides: Partial<Host>): Host {
     requestDownload: async () => { throw new Error('requestDownload: not used by this test'); },
     requestPick: async () => { throw new Error('requestPick: not used by this test'); },
     retryLookup: async () => { throw new Error('retryLookup: not used by this test'); },
+    retryAllUnresolved: async () => { throw new Error('retryAllUnresolved: not used by this test'); },
+    scheduleJob: () => { throw new Error('scheduleJob: not used by this test'); },
     identifyRelease: async () => { throw new Error('identifyRelease: not used by this test'); },
     deliverToPlugin: async () => { throw new Error('deliverToPlugin: not used by this test'); },
     schedulePoll: () => { throw new Error('schedulePoll: not used by this test'); },
@@ -1718,4 +1721,27 @@ test('the lookup service gets more than one request in flight, so chunks do not 
   // eighty-one seconds of wall clock. A value of 1 here would silently
   // restore that.
   assert.ok(LOOKUP_CONCURRENCY > 1, 'chunked lookups must be able to overlap');
+});
+
+test('scheduleRequerySweeps books the sweep for every plugin that declares one, and skips the rest', () => {
+  const scheduled: { pluginId: string; kind: string; payload: unknown }[] = [];
+  const host = fakeHost({
+    scheduleJob: (pluginId, kind, payload) => {
+      scheduled.push({ pluginId, kind, payload });
+      return scheduled.length;
+    },
+  });
+  const withSweep = (id: string): MediaPlugin => ({
+    id, mediaType: 'movie', migrations: [], synced: [], tokens: {},
+    jobs: { [REQUERY_SWEEP_JOB]: async () => {} },
+    onNewRssItems: async () => {}, onDownloadedFile: async () => {}, onDownloadRequest: async () => {},
+    onMediaItemDropped: async () => {}, onLookupRequest: async () => { throw new Error('unused'); },
+  });
+  const without: MediaPlugin = { ...withSweep('books'), jobs: {} };
+
+  assert.deepEqual(scheduleRequerySweeps(host, [withSweep('movie'), without, withSweep('xxx')]), ['movie', 'xxx']);
+  assert.deepEqual(scheduled, [
+    { pluginId: 'movie', kind: 'requery-sweep', payload: { sweep: 1 } },
+    { pluginId: 'xxx', kind: 'requery-sweep', payload: { sweep: 1 } },
+  ]);
 });

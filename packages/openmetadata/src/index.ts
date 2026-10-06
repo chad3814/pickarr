@@ -60,3 +60,4 @@ export type {
 export { bestImage, createArtworkSources, rankImages } from './artwork/source.ts';
 export type { ArtworkJobDeps, ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
 export { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';
+export { AUTO_REQUERY_LIMIT, REQUERY_SWEEP_INTERVAL_MS, REQUERY_SWEEP_JOB, REQUERY_SWEEP_PAYLOAD } from './requery.ts';

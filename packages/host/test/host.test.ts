@@ -979,3 +979,27 @@ test('a destination is validated against the tokens the plugin registered with',
     });
   assert.deepEqual(rows, [['alpha', '/library/alpha'], ['beta', '/library/beta']]);
 });
+
+test('scheduleJob books one job per plugin and kind, dedupes on the payload key, and runs the plugin\'s own handler', async () => {
+  const { raw, host, setTimeoutCalls } = setup({ now: () => 5000 });
+  const sweeps: unknown[] = [];
+  host.register(makePlugin({ id: 'alpha', jobs: { 'requery-sweep': async (job) => { sweeps.push(job.payload); } } }));
+  host.register(makePlugin({ id: 'beta', jobs: { 'requery-sweep': async () => {} } }));
+
+  const first = host.scheduleJob('alpha', 'requery-sweep', { sweep: 1 });
+  const again = host.scheduleJob('alpha', 'requery-sweep', { sweep: 1 });
+  const other = host.scheduleJob('beta', 'requery-sweep', { sweep: 1 });
+
+  assert.equal(again, first, 'a second call while the first is pending answers the same job');
+  assert.notEqual(other, first, 'another plugin gets its own');
+  const rows = raw.prepare("SELECT plugin_id, kind, payload_json, state FROM jobs WHERE kind = 'requery-sweep' ORDER BY id").all()
+    .map((row) => ({ pluginId: String((row as { plugin_id: unknown }).plugin_id), payload: String((row as { payload_json: unknown }).payload_json), state: String((row as { state: unknown }).state) }));
+  assert.deepEqual(rows, [
+    { pluginId: 'alpha', payload: '{"sweep":1}', state: 'ready' },
+    { pluginId: 'beta', payload: '{"sweep":1}', state: 'ready' },
+  ]);
+
+  host.start();
+  await runDue(host, setTimeoutCalls);
+  assert.deepEqual(sweeps, [{ sweep: 1 }], 'dispatched to alpha\'s handler, under alpha\'s id');
+});

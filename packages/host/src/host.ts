@@ -37,7 +37,7 @@ import type { AddFeedRefusal } from './feeds/add.ts';
 import { addDownloadClient as addDownloadClientRule } from './clients/add.ts';
 import type { AddDownloadClientRefusal } from './clients/add.ts';
 import { requestPick as requestPickRule } from './clients/pick.ts';
-import { retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
+import { retryAllUnresolved as retryAllUnresolvedRule, retryLookup as retryLookupRule, type RetryLookupOutcome } from './media/retry.ts';
 import { identifyRelease as identifyReleaseRule } from './media/identify.ts';
 import type { PickAccepted, PickRefusal } from './clients/pick.ts';
 import {
@@ -188,6 +188,8 @@ export interface Host {
    * its three refusals it decides itself.
    */
   retryLookup(rssItemId: number): Promise<RetryLookupOutcome>;
+  /** Asks for every unresolved, unlinked release to be identified again; answers how many were handed to a plugin. */
+  retryAllUnresolved(): Promise<{ readonly accepted: number }>;
   /**
    * Identifies a release by hand: asks its plugin to look it up again
    * (`requery`), to look it up under a corrected name (`name`), or links it
@@ -350,6 +352,16 @@ export interface Host {
   deliverToPlugin(pluginId: string, file: DownloadedFile): Promise<void>;
   /** Enqueues the first `poll` job for a feed. Idempotent per feed. */
   schedulePoll(feedId: number, runAt?: number): number;
+  /**
+   * Books one job of `kind` for a registered plugin, unless one with the
+   * same payload key is already `ready` or `running` -- the same guarded,
+   * idempotent shape `schedulePoll` has, for a plugin's own job rather
+   * than the host's. `payload` carries exactly one numeric key, which is
+   * what `pendingJobId` dedupes on. Answers the job id, new or pending.
+   * The lookup plugins' daily requery sweep is the caller
+   * (`main.ts`'s `scheduleRequerySweeps`).
+   */
+  scheduleJob(pluginId: string, kind: string, payload: Readonly<Record<string, number>>): number;
   /**
    * Enqueues the first `reconcile` job for a download client. Idempotent
    * per client, the same shape as `schedulePoll` -- a client that already
@@ -817,6 +829,20 @@ export function createHost(deps: {
 
     notifyNewRssItems,
 
+    scheduleJob(pluginId, kind, payload) {
+      if (!plugins.has(pluginId)) throw new PluginNotRegisteredError(pluginId);
+      const [entry] = Object.entries(payload);
+      if (entry === undefined || Object.keys(payload).length !== 1) {
+        throw new Error(`scheduleJob: the payload must carry exactly one numeric key, got ${JSON.stringify(payload)}`);
+      }
+      const [key, value] = entry;
+      const existing = pendingJobId(deps.raw, pluginId, kind, key, value, undefined, hostLog);
+      if (existing !== undefined) return existing;
+      const id = runner.enqueue(pluginId, { kind, payload });
+      if (started) dispatcher.rearm();
+      return id;
+    },
+
     schedulePoll(feedId, runAt) {
       // No `exceptJobId`: an outside caller is not a poll job, so every
       // pending row it finds is a real reason not to schedule a second.
@@ -861,6 +887,10 @@ export function createHost(deps: {
       // ids nothing claims, and a retry that re-implemented either would be
       // a second copy free to drift.
       return retryLookupRule({ raw: deps.raw, notify: notifyNewRssItems }, rssItemId);
+    },
+
+    async retryAllUnresolved() {
+      return retryAllUnresolvedRule({ raw: deps.raw, notify: notifyNewRssItems });
     },
 
     identifyRelease(rssItemId, request) {

@@ -102,6 +102,23 @@ Each job keeps the five best images per item and per person and prunes the rest,
 also drops pictures a provider no longer lists. Pass `-u` with the `PUID:PGID` the
 container runs as; see [Which user the container runs as](#which-user-the-container-runs-as) below.
 
+### Asking again about unmatched releases
+
+A release the lookup service did not recognise sits on the Unmatched page as
+`unresolved`. Each card has its own Retry, and the page has `Retry all unresolved (N)`,
+which hands every unresolved release to its plugin for a fresh lookup in one request.
+Refused releases are left alone: a refusal is the service's definitive answer that the
+name is not a media file.
+
+Releases named after something that has not come out yet are also retried on their own.
+Once a day, each plugin sweeps its unresolved releases and re-asks about any whose
+stored answer suggests a date (`parsed.releasedOn` for a scene, `parsed.airDate` for an
+episode, or a low-confidence match's `releaseDate`) that is today or later, or within
+the two days before today. A release the sweep has started on is re-asked once a day
+until it resolves or five sweeps have tried, whatever its date says by then. A film
+carries only a year, so films never start a chain. The count lives in
+`rss_item.auto_requery_count`; a manual Retry does not touch it.
+
 ### Which user the container runs as
 
 Set `PUID` and `PGID` and the container runs as that user instead of root:

@@ -176,6 +176,9 @@ export const rssItem = sqliteTable('rss_item', {
   // lets a host with no plugin registered still poll safely instead of
   // destroying every item's identity through the (feed_id, guid) dedup.
   deliveredAt: integer('delivered_at'),
+  // Migration 28: how many daily requery sweeps have re-asked about this
+  // unresolved release. Not in the synced read.
+  autoRequeryCount: integer('auto_requery_count').notNull().default(0),
 }, (t) => [
   // The client's update flow asks "what changed since", so updated_at leads.
   index('rss_item_updated').on(t.updatedAt, t.id),

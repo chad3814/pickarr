@@ -1458,6 +1458,19 @@ function migration27(db: DatabaseSync): void {
 }
 
 /**
+ * `rss_item.auto_requery_count`: how many times the daily requery sweep
+ * (`@pickarr/openmetadata`'s `requery.ts`) has re-asked the lookup service
+ * about this unresolved release. `0` for every existing row and every new
+ * one; the sweep increments it and stops at its cap. A plain `ADD COLUMN`,
+ * which keeps `rss_item`'s sync triggers in place
+ * (docs/database-migrations.md); the column is not in the synced read, so
+ * no client sees it.
+ */
+const MIGRATION_28 = `
+ALTER TABLE rss_item ADD COLUMN auto_requery_count INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
  * Exported for tests: lets a test apply a prefix of the real migrations (e.g.
  * only version 1) rather than a synthetic list, so it can seed a row on the
  * pre-migration-2 schema and then watch the real `MIGRATION_2` DDL act on it.
@@ -1490,6 +1503,7 @@ export const HOST_MIGRATIONS: readonly Migration[] = [
   { version: 25, up: (db) => db.exec(MIGRATION_25) },
   { version: 26, up: (db) => db.exec(MIGRATION_26) },
   { version: 27, up: (db) => migration27(db) },
+  { version: 28, up: (db) => db.exec(MIGRATION_28) },
 ];
 
 /**

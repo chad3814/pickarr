@@ -224,6 +224,9 @@ async function start(
     retryLookup: () => {
       throw new Error('retryLookup not stubbed in this test');
     },
+    retryAllUnresolved: () => {
+      throw new Error('retryAllUnresolved not stubbed in this test');
+    },
     // Same reasoning once more: the guard probes reach `/api/releases/:id/identify`
     // with a session and a body the shape guard refuses ahead of this.
     identifyRelease: () => {
@@ -4053,6 +4056,25 @@ test('a config write that throws is a 500 and the live values are untouched', as
     assert.equal(answer.status, 500);
     assert.deepEqual(JSON.parse(answer.text), { error: 'read failed' });
     assert.equal(settings.limitFor('cdn.example'), 3);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /api/unmatched/retry-all is accepted with 202 and the count the host answers; anonymous is 401, GET is 405', async () => {
+  const { raw, db } = setup();
+  let calls = 0;
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    retryAllUnresolved: async () => { calls += 1; return { accepted: 12 }; },
+  });
+  try {
+    const answer = await post(server, '/api/unmatched/retry-all', cookie, null);
+    assert.equal(answer.status, 202, 'nothing is finished when this answers; the lookups are queued');
+    assert.deepEqual(JSON.parse(answer.text), { accepted: 12 });
+    assert.equal(calls, 1);
+
+    assert.equal((await post(server, '/api/unmatched/retry-all', ANONYMOUS, null)).status, 401);
+    assert.equal((await get(server, '/api/unmatched/retry-all', cookie)).status, 405);
   } finally {
     await server.close();
   }

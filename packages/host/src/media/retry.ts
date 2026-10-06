@@ -91,3 +91,28 @@ export async function retryLookup(deps: RetryLookupDeps, rssItemId: number): Pro
 
   return { accepted: true };
 }
+
+/**
+ * `Host.retryAllUnresolved`: the Unmatched page's "Retry all" -- every
+ * release that is `unresolved` and linked to nothing, handed to its owning
+ * plugin in one `notify` call, in id order.
+ *
+ * `unresolved` only. A `refused` release is a definitive answer -- the
+ * service said the name is not a media file -- and re-asking changes
+ * nothing; a `pending` one is already in flight. The count answered is the
+ * releases a plugin actually took: ids whose feed names no registered
+ * plugin are reported by `notify` and subtracted, since nothing was
+ * dispatched for them. A plugin that throws surfaces as a fault, exactly
+ * as `retryLookup` treats one.
+ */
+export async function retryAllUnresolved(deps: RetryLookupDeps): Promise<{ readonly accepted: number }> {
+  const ids = deps.raw.prepare(`
+    SELECT id FROM rss_item WHERE media_item_id IS NULL AND lookup_state = 'unresolved' ORDER BY id
+  `).all().map((row) => Number((row as { id: unknown }).id));
+  if (ids.length === 0) return { accepted: 0 };
+
+  const outcome = await deps.notify(ids);
+  const failure = outcome.failures[0];
+  if (failure !== undefined) throw failure.error;
+  return { accepted: ids.length - outcome.unowned.length };
+}

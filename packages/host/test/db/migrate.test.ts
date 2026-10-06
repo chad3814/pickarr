@@ -2024,3 +2024,32 @@ test('migration 26 indexes done jobs by updated_at, for the prune', () => {
   assert.ok(index, 'the index exists');
   assert.match(String(index['sql']), /WHERE state = 'done'/);
 });
+
+test('migration 28 adds auto_requery_count to rss_item, zero for existing rows, with the sync triggers intact', () => {
+  const { raw } = openTestDatabase();
+  migrateHostWith(raw, HOST_MIGRATIONS.filter((m) => m.version <= 27));
+  raw.prepare("INSERT INTO rss_feed (id, plugin_id, name, url, created_at, updated_at) VALUES (1, 'xxx', 'f', 'https://f', 1, 1)").run();
+  raw.prepare(`
+    INSERT INTO rss_item (id, feed_id, filename, link, created_at, updated_at, download_type, lookup_state)
+    VALUES (1, 1, 'a.mkv', 'https://a', 1, 1, 'torrent', 'unresolved')
+  `).run();
+
+  migrateHost(raw);
+
+  const columns = (raw.prepare('PRAGMA table_info(rss_item)').all() as { name: string; dflt_value: unknown; notnull: number }[])
+    .filter((column) => column.name === 'auto_requery_count');
+  assert.deepEqual(columns.map((c) => ({ name: c.name, dflt_value: String(c.dflt_value), notnull: c.notnull })),
+    [{ name: 'auto_requery_count', dflt_value: '0', notnull: 1 }]);
+  const row = raw.prepare('SELECT auto_requery_count FROM rss_item WHERE id = 1').get() as { auto_requery_count: unknown };
+  assert.equal(row.auto_requery_count, 0, 'an existing row reads as never auto-requeried');
+
+  // `ADD COLUMN` keeps the sync triggers (docs/database-migrations.md); an
+  // update after the migration still reaches the log. The update trigger
+  // deletes the row's entry and inserts a fresh one, so the count does not
+  // grow -- the entry's own id does.
+  const entry = raw.prepare("SELECT MAX(id) AS id FROM sync_log WHERE table_name = 'rss_item' AND row_id = 1");
+  const before = Number((entry.get() as { id: unknown }).id);
+  raw.prepare('UPDATE rss_item SET auto_requery_count = 1 WHERE id = 1').run();
+  const after = Number((entry.get() as { id: unknown }).id);
+  assert.ok(after > before, `the update trigger on rss_item survived the column addition (entry ${String(before)} -> ${String(after)})`);
+});

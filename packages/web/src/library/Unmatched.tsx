@@ -104,6 +104,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { LOOKUP_JSON_TOO_LARGE, type RssItemSyncRead } from '@pickarr/contract';
 import { RETRY_REFUSAL_MESSAGES, type RetrySubmit } from './postRetry.ts';
+import { RETRY_ALL_REFUSAL_MESSAGES, type RetryAllSubmit } from './postRetryAll.ts';
 import {
   CardHeading,
   IdentifyForm,
@@ -169,6 +170,8 @@ export interface UnmatchedProps {
    * which hangs rather than failing, with nothing pointing at the cause.
    */
   retry: RetrySubmit;
+  /** Asks the host to identify every unresolved release again. Required, for the reason `retry` is. */
+  retryAll: RetryAllSubmit;
   /**
    * The seam the Edit form identifies a release through, handed to
    * `IdentifyForm` and never called here. Required for the same reason
@@ -805,12 +808,13 @@ function UnmatchedCard(
  * use; `filter` and `view` are read too and ignored, since this page has
  * neither), handed to {@link Unmatched} as its term and its search box.
  */
-export function UnmatchedPage({ source, retry, pick, identify }: Omit<UnmatchedProps, 'term' | 'search'>): ReactElement {
+export function UnmatchedPage({ source, retry, retryAll, pick, identify }: Omit<UnmatchedProps, 'term' | 'search'>): ReactElement {
   const { query, controls } = useBrowseQuery();
   return (
     <Unmatched
       source={source}
       retry={retry}
+      retryAll={retryAll}
       pick={pick}
       identify={identify}
       term={query.term}
@@ -819,7 +823,61 @@ export function UnmatchedPage({ source, retry, pick, identify }: Omit<UnmatchedP
   );
 }
 
-export function Unmatched({ source, retry, pick, identify, term = '', search }: UnmatchedProps): ReactElement {
+/**
+ * The page-level "ask again about everything": the count is of the
+ * unresolved rows the replica has handed this page so far, which is what
+ * the host will requery -- refused rows are a definitive answer and are
+ * neither counted nor sent (`media/retry.ts`'s `retryAllUnresolved`).
+ *
+ * `Retrying N…` lasts for the request alone, not until rows change: unlike
+ * one card's Retry, there is no single row whose `updated_at` says the
+ * work landed, and the N-new hold is what keeps the answers from
+ * reflowing the page as they arrive. The outcome is a `role="status"`
+ * line with real text, so what is announced is what is shown.
+ */
+function RetryAllButton({ unresolved, submit }: { unresolved: number; submit: RetryAllSubmit }): ReactElement {
+  const [pending, setPending] = useState(false);
+  const [outcome, setOutcome] = useState<{ accepted: number } | { message: string } | null>(null);
+
+  async function retryAll(): Promise<void> {
+    setPending(true);
+    setOutcome(null);
+    try {
+      const answer = await submit();
+      setOutcome('refusal' in answer ? { message: RETRY_ALL_REFUSAL_MESSAGES[answer.refusal] } : { accepted: answer.accepted });
+    } catch {
+      setOutcome({ message: RETRY_ALL_REFUSAL_MESSAGES.offline });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={pending || unresolved === 0}
+        onClick={() => {
+          void retryAll();
+        }}
+      >
+        {pending ? `Retrying ${unresolved}\u2026` : `Retry all unresolved (${unresolved})`}
+      </button>
+      {outcome !== null && 'accepted' in outcome && (
+        <span role="status" aria-label="Retry all outcome">
+          {`Requeued ${outcome.accepted} release${outcome.accepted === 1 ? '' : 's'}`}
+        </span>
+      )}
+      {outcome !== null && 'message' in outcome && (
+        <div role="alert">
+          <span>{outcome.message}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+export function Unmatched({ source, retry, retryAll, pick, identify, term = '', search }: UnmatchedProps): ReactElement {
   // `undefined` means "still loading" -- distinct from an empty array, which
   // means "loaded, and there is nothing" (Global Constraint: zero is an
   // answer, and the two must not render the same way).
@@ -976,6 +1034,8 @@ export function Unmatched({ source, retry, pick, identify, term = '', search }: 
       <button type="button" onClick={reveal}>{held} new</button>
     </span>
   ) : null;
+  const unresolvedCount = (rows ?? []).filter((row) => row.lookupState === 'unresolved').length;
+  const retryAllControl = rows === undefined ? null : <RetryAllButton unresolved={unresolvedCount} submit={retryAll} />;
 
   // Wakes on a plain update to any release *currently listed here* -- the
   // one shape `subscribeInserts` cannot see (this file's docblock). Torn
@@ -1017,10 +1077,16 @@ export function Unmatched({ source, retry, pick, identify, term = '', search }: 
               }}
             />
           </label>
+          {retryAllControl}
           {pending}
         </form>
       )}
-      {search === undefined && pending}
+      {search === undefined && (
+        <>
+          {retryAllControl}
+          {pending}
+        </>
+      )}
       {rows !== undefined &&
         (shown.items.length === 0 ? (
           <p>{term === '' ? 'Everything has been matched.' : `Nothing matches "${search?.q ?? term}"`}</p>

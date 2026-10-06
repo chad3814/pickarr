@@ -23,6 +23,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { drizzle as createDrizzle } from 'drizzle-orm/node-sqlite';
 import type { ArtworkJobPayload, ArtworkJobPerson } from './artwork/job.ts';
 import { ARTWORK_JOB, createArtworkJob } from './artwork/job.ts';
+import { REQUERY_SWEEP_JOB, createRequerySweep } from './requery.ts';
 import { VIDEO_RESOLUTION_BACKFILL_JOB, createVideoResolutionBackfillJob } from './backfill.ts';
 import type { LookupCategory, SecretResolver } from './types.ts';
 import type { LookupEnvelope, Media, MediaSuggestions } from './types.ts';
@@ -806,6 +807,65 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
   // One handler for the plugin's whole life, not one per job: it caches a
   // provider registry per `HostFetch` and reports an unregistered provider
   // once rather than once per release. See `createArtworkJob`.
+  /**
+   * Looks `ids` up: one engine-state row per id, then one lookup job per
+   * `MAX_BATCH`. Shared by `onNewRssItems` (a feed's new releases) and the
+   * daily requery sweep (`./requery.ts`), so a requery is a lookup like any
+   * other and there is one place that knows how a lookup is enqueued.
+   */
+  async function enqueueLookups(ids: readonly number[], ctx: PluginContext): Promise<void> {
+    if (ids.length === 0) return;
+    const { db } = ownTables(ctx);
+    const at = deps.now();
+
+    // `DO NOTHING`, not a plain insert, because this whole call is offered
+    // again after it fails. `feeds/reader.ts` marks *nothing* delivered
+    // when a plugin's `onNewRssItems` rejects -- a feed names exactly one
+    // plugin, so a failure is all-or-nothing for the batch -- and every
+    // undelivered row is re-offered on the next poll. So if the insert
+    // below succeeded and the enqueue loop after it then failed (or the
+    // process died between chunks), a plain insert would meet its own rows
+    // on the retry, throw `UNIQUE constraint failed`, and throw again on
+    // every later poll: that feed would never deliver another item, with
+    // nothing but a log line to say so.
+    //
+    // Tolerating the conflict is what makes the re-invocation a recovery
+    // rather than a wedge: the rows are already there and are unchanged by
+    // the second insert, the loop below enqueues a fresh lookup job, and
+    // the `lookup_job_id` update points every row in the chunk at it. The
+    // only cost is a duplicate lookup job for rows the first call did get
+    // as far as enqueuing for, which identifies the same items twice and
+    // writes the same rows twice -- every write downstream of here is an
+    // upsert or a claim for exactly that reason.
+    await db.insert(table).values(ids.map((rssItemId) => ({
+      rssItemId,
+      mediaItemId: null,
+      lookupJobId: null,
+      lookupId: null,
+      providerRef: null,
+      confidence: null,
+      createdAt: at,
+      updatedAt: at,
+    }))).onConflictDoNothing();
+
+    // One job per chunk the service will accept, so a poll that delivered
+    // three hundred names does not enqueue a job that cannot be sent as one
+    // request. `enqueue`'s return is recorded rather than discarded: a job
+    // id nothing keeps is a job nobody can trace back to the rows it is
+    // identifying.
+    for (let start = 0; start < ids.length; start += MAX_BATCH) {
+      const chunk = ids.slice(start, start + MAX_BATCH);
+      // eslint-disable-next-line no-await-in-loop -- each chunk's job id is recorded on its own rows before the next chunk is enqueued, so a crash between chunks leaves no row pointing at a job that covers different items
+      const jobId = await ctx.jobs.enqueue({ kind: LOOKUP_JOB, payload: { rssItemIds: [...chunk] } });
+      // eslint-disable-next-line no-await-in-loop -- see above
+      await db.update(table)
+        .set({ lookupJobId: jobId, updatedAt: at })
+        .where(inArray(table.rssItemId, [...chunk]));
+    }
+  }
+
+  const sweep = createRequerySweep(spec.id, enqueueLookups, deps.now);
+
   const artwork = createArtworkJob({ resolveSecret: deps.resolveSecret });
 
   const backfill = createVideoResolutionBackfillJob({
@@ -836,7 +896,14 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     id: spec.id,
     mediaType: spec.mediaType,
     migrations: [lookupTableMigration(spec.id), ...spec.migrations],
-    jobs: { ...spec.jobs, [LOOKUP_JOB]: lookup, [POLL_JOB]: poll, [ARTWORK_JOB]: artwork, [VIDEO_RESOLUTION_BACKFILL_JOB]: backfill },
+    jobs: {
+      ...spec.jobs,
+      [LOOKUP_JOB]: lookup,
+      [POLL_JOB]: poll,
+      [ARTWORK_JOB]: artwork,
+      [VIDEO_RESOLUTION_BACKFILL_JOB]: backfill,
+      [REQUERY_SWEEP_JOB]: sweep,
+    },
     // Defaults to empty: `LookupPluginSpec.synced` is optional, so a spec
     // that declares nothing still produces a valid `MediaPlugin`, whose own
     // `synced` is required.
@@ -844,54 +911,7 @@ export function createLookupPlugin(spec: LookupPluginSpec, deps: LookupPluginDep
     tokens: spec.tokens,
 
     async onNewRssItems(ids, ctx) {
-      if (ids.length === 0) return;
-      const { db } = ownTables(ctx);
-      const at = deps.now();
-
-      // `DO NOTHING`, not a plain insert, because this whole call is offered
-      // again after it fails. `feeds/reader.ts` marks *nothing* delivered
-      // when a plugin's `onNewRssItems` rejects -- a feed names exactly one
-      // plugin, so a failure is all-or-nothing for the batch -- and every
-      // undelivered row is re-offered on the next poll. So if the insert
-      // below succeeded and the enqueue loop after it then failed (or the
-      // process died between chunks), a plain insert would meet its own rows
-      // on the retry, throw `UNIQUE constraint failed`, and throw again on
-      // every later poll: that feed would never deliver another item, with
-      // nothing but a log line to say so.
-      //
-      // Tolerating the conflict is what makes the re-invocation a recovery
-      // rather than a wedge: the rows are already there and are unchanged by
-      // the second insert, the loop below enqueues a fresh lookup job, and
-      // the `lookup_job_id` update points every row in the chunk at it. The
-      // only cost is a duplicate lookup job for rows the first call did get
-      // as far as enqueuing for, which identifies the same items twice and
-      // writes the same rows twice -- every write downstream of here is an
-      // upsert or a claim for exactly that reason.
-      await db.insert(table).values(ids.map((rssItemId) => ({
-        rssItemId,
-        mediaItemId: null,
-        lookupJobId: null,
-        lookupId: null,
-        providerRef: null,
-        confidence: null,
-        createdAt: at,
-        updatedAt: at,
-      }))).onConflictDoNothing();
-
-      // One job per chunk the service will accept, so a poll that delivered
-      // three hundred names does not enqueue a job that cannot be sent as one
-      // request. `enqueue`'s return is recorded rather than discarded: a job
-      // id nothing keeps is a job nobody can trace back to the rows it is
-      // identifying.
-      for (let start = 0; start < ids.length; start += MAX_BATCH) {
-        const chunk = ids.slice(start, start + MAX_BATCH);
-        // eslint-disable-next-line no-await-in-loop -- each chunk's job id is recorded on its own rows before the next chunk is enqueued, so a crash between chunks leaves no row pointing at a job that covers different items
-        const jobId = await ctx.jobs.enqueue({ kind: LOOKUP_JOB, payload: { rssItemIds: [...chunk] } });
-        // eslint-disable-next-line no-await-in-loop -- see above
-        await db.update(table)
-          .set({ lookupJobId: jobId, updatedAt: at })
-          .where(inArray(table.rssItemId, [...chunk]));
-      }
+      await enqueueLookups(ids, ctx);
     },
 
     async onDownloadedFile(file, ctx) {
