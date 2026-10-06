@@ -118,3 +118,38 @@ test('a rejected config write propagates and leaves the live values unchanged', 
   await assert.rejects(settings.saveDefault({ concurrency: 9, timeoutMs: 9_000 }), /disk full/);
   assert.equal(settings.limitFor('other.example'), 1);
 });
+
+test('two concurrent saveHost calls on different hostnames both land', async () => {
+  const { settings, written } = settingsOver({});
+  await Promise.all([
+    settings.saveHost('a.example', { concurrency: 3 }),
+    settings.saveHost('b.example', { concurrency: 5 }),
+  ]);
+  assert.deepEqual(written.at(-1), {
+    default: { concurrency: 1, timeoutMs: 30000 },
+    hosts: { 'a.example': { concurrency: 3 }, 'b.example': { concurrency: 5 } },
+  });
+  assert.equal(settings.limitFor('a.example'), 3);
+  assert.equal(settings.limitFor('b.example'), 5);
+});
+
+test('saveDefault racing saveHost keeps both the new default and the host entry', async () => {
+  const { settings, written } = settingsOver({});
+  await Promise.all([
+    settings.saveDefault({ concurrency: 2, timeoutMs: 20_000 }),
+    settings.saveHost('a.example', { concurrency: 3 }),
+  ]);
+  assert.deepEqual(written.at(-1), {
+    default: { concurrency: 2, timeoutMs: 20000 },
+    hosts: { 'a.example': { concurrency: 3 } },
+  });
+  const reversed = settingsOver({});
+  await Promise.all([
+    reversed.settings.saveHost('a.example', { concurrency: 3 }),
+    reversed.settings.saveDefault({ concurrency: 2, timeoutMs: 20_000 }),
+  ]);
+  assert.deepEqual(reversed.written.at(-1), {
+    default: { concurrency: 2, timeoutMs: 20000 },
+    hosts: { 'a.example': { concurrency: 3 } },
+  });
+});

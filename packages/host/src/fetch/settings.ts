@@ -89,6 +89,19 @@ export function createFetchSettings(deps: {
     };
   }
 
+  // The tail of the save chain. `handle.update` serializes whole documents
+  // but does not merge them, so each save must build its document from what
+  // the previous save committed; otherwise two saves in flight both copy the
+  // same `config` and the second write drops the first's change.
+  let saves: Promise<unknown> = Promise.resolve();
+
+  /** Runs `body` after every earlier save has settled. The chain advances even when `body` rejects; the caller still sees the rejection. */
+  function serialized<T>(body: () => Promise<T>): Promise<T> {
+    const run = saves.then(body);
+    saves = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   async function write(next: FetchConfig): Promise<void> {
     await deps.handle.update(next);
     config = next;
@@ -113,12 +126,11 @@ export function createFetchSettings(deps: {
       }
       const refused = checkConcurrency(patch.concurrency) ?? checkTimeout(patch.timeoutMs);
       if (refused !== undefined) return refused;
-      const next: FetchConfig = {
-        default: { concurrency: patch.concurrency, timeoutMs: patch.timeoutMs },
-        hosts: config.hosts,
-      };
-      await write(next);
-      return next.default;
+      const pair: FetchPair = { concurrency: patch.concurrency, timeoutMs: patch.timeoutMs };
+      return serialized(async () => {
+        await write({ default: pair, hosts: config.hosts });
+        return pair;
+      });
     },
 
     async saveHost(hostname, patch) {
@@ -126,17 +138,20 @@ export function createFetchSettings(deps: {
       const refused = checkConcurrency(patch.concurrency) ?? checkTimeout(patch.timeoutMs);
       if (refused !== undefined) return refused;
 
-      const previous = config.hosts[hostname];
-      const entry = patched(previous ?? {}, patch);
-      const hosts: Record<string, FetchHostEntry> = { ...config.hosts };
-      if (Object.keys(entry).length === 0) delete hosts[hostname];
-      else hosts[hostname] = entry;
+      return serialized(async () => {
+        const previous = config.hosts[hostname];
+        const entry = patched(previous ?? {}, patch);
+        const hosts: Record<string, FetchHostEntry> = { ...config.hosts };
+        if (Object.keys(entry).length === 0) delete hosts[hostname];
+        else hosts[hostname] = entry;
 
-      // An unconfigured host patched with nothing is the one case with
-      // nothing to write; answering the row is still right.
-      const unchanged = previous === undefined && Object.keys(entry).length === 0;
-      if (!unchanged) await write({ default: config.default, hosts });
-      return resolve(hostname);
+        // An unconfigured host patched with nothing has nothing to write.
+        // Any other patch writes the document, even one that leaves it
+        // identical (a configured host patched with `{}`).
+        const unchanged = previous === undefined && Object.keys(entry).length === 0;
+        if (!unchanged) await write({ default: config.default, hosts });
+        return resolve(hostname);
+      });
     },
   };
 }
