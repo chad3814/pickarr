@@ -177,3 +177,62 @@ test('idle resolves immediately on an untouched queue', async () => {
 
   assert.equal(idleResolved, true);
 });
+
+test('setLimit raised releases exactly the new headroom\'s worth of waiters', async () => {
+  const queue = createBoundedQueue(1);
+  const gates = [deferred<void>(), deferred<void>(), deferred<void>(), deferred<void>()];
+  let started = 0;
+  const runs = gates.map((gate) => queue.run(async () => {
+    started += 1;
+    await gate.promise;
+  }));
+  await tick();
+  assert.equal(started, 1, 'one slot, one task running');
+
+  queue.setLimit(3);
+  await tick();
+  assert.equal(started, 3, 'raising to three starts two more and no more');
+  assert.equal(queue.limit(), 3);
+
+  for (const gate of gates) gate.resolve();
+  await Promise.all(runs);
+});
+
+test('setLimit lowered cancels nothing and opens no slot until running drops below the new limit', async () => {
+  const queue = createBoundedQueue(3);
+  const gates = [deferred<void>(), deferred<void>(), deferred<void>(), deferred<void>()];
+  let started = 0;
+  const runs = gates.map((gate) => queue.run(async () => {
+    started += 1;
+    await gate.promise;
+  }));
+  await tick();
+  assert.equal(started, 3);
+
+  queue.setLimit(1);
+  await tick();
+  assert.equal(started, 3, 'the three in flight keep running');
+  assert.equal(queue.active(), 3);
+
+  gates[0]!.resolve();
+  await tick();
+  assert.equal(started, 3, 'two still running is not below a limit of one, so the fourth waits');
+
+  gates[1]!.resolve();
+  await tick();
+  assert.equal(started, 3, 'one running equals the limit; still no slot');
+
+  gates[2]!.resolve();
+  await tick();
+  assert.equal(started, 4, 'running fell to zero, so the waiter resumes');
+
+  gates[3]!.resolve();
+  await Promise.all(runs);
+});
+
+test('setLimit refuses the same values the constructor does', () => {
+  const queue = createBoundedQueue(2);
+  assert.throws(() => queue.setLimit(0), /bounded queue limit must be an integer of at least 1, got 0/);
+  assert.throws(() => queue.setLimit(1.5), /got 1\.5/);
+  assert.equal(queue.limit(), 2, 'a refused value changes nothing');
+});

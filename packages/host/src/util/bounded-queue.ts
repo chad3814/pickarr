@@ -1,7 +1,8 @@
 /**
  * A limit of a caller's own choosing on how many `run()`ed tasks may be
  * executing at once. `active` counts tasks currently inside `task()`,
- * capped at the limit passed to `createBoundedQueue`; a task that arrives
+ * capped at the current limit (the one passed to `createBoundedQueue`, or the
+ * last `setLimit`); a task that arrives
  * once the cap is already hit waits in arrival order for a slot a finished
  * (or rejected) task frees.
  */
@@ -22,6 +23,16 @@ export interface BoundedQueue {
    * shutdown hang the job dispatcher exists to remove.
    */
   idle(): Promise<void>;
+  /** The number of tasks allowed to run at once, as of the last `setLimit` or construction. */
+  limit(): number;
+  /**
+   * Changes the ceiling for every task from now on. Raising it starts as
+   * many waiting tasks as the new headroom allows; lowering it starts
+   * none and cancels none -- running tasks finish, and `run` opens no new
+   * slot until `active()` is below the new limit. Refuses the same values
+   * the constructor does.
+   */
+  setLimit(limit: number): void;
 }
 
 /**
@@ -57,8 +68,9 @@ function assertValidLimit(value: number): void {
  * job dispatcher. A running count, a FIFO of waiters woken one at a time as
  * slots free, and an `idle()` that resolves only once both are empty.
  */
-export function createBoundedQueue(limit: number): BoundedQueue {
-  assertValidLimit(limit);
+export function createBoundedQueue(initialLimit: number): BoundedQueue {
+  assertValidLimit(initialLimit);
+  let limit = initialLimit;
 
   let running = 0;
   const waiting: Array<() => void> = [];
@@ -74,12 +86,23 @@ export function createBoundedQueue(limit: number): BoundedQueue {
     }
   }
 
+  /** Starts waiters while there is headroom. One waiter per free slot; each one is counted in `running` here, before it resumes. */
+  function release(): void {
+    while (running < limit && waiting.length > 0) {
+      running += 1;
+      waiting.shift()?.();
+    }
+    if (isIdle()) settleIdleWaiters();
+  }
+
   return {
     async run<T>(task: () => Promise<T>): Promise<T> {
       if (running >= limit) {
+        // Resumed by `release`, which has already counted this task.
         await new Promise<void>((resolve) => { waiting.push(resolve); });
+      } else {
+        running += 1;
       }
-      running += 1;
       try {
         return await task();
       } finally {
@@ -89,13 +112,18 @@ export function createBoundedQueue(limit: number): BoundedQueue {
         // decrement) or waits on a wake that never comes (skip the wake) --
         // the queue is wedged forever, silently.
         running -= 1;
-        const next = waiting.shift();
-        if (next) {
-          next();
-        } else if (isIdle()) {
-          settleIdleWaiters();
-        }
+        release();
       }
+    },
+
+    limit(): number {
+      return limit;
+    },
+
+    setLimit(next: number): void {
+      assertValidLimit(next);
+      limit = next;
+      release();
     },
 
     active(): number {
