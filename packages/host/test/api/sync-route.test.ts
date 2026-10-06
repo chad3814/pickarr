@@ -15,6 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
+import { fetchConfigSchema } from '../../src/config/schemas.ts';
+import { createFetchSettings } from '../../src/fetch/settings.ts';
 import { ensureClaimToken } from '../../src/auth/claim.ts';
 import { createAuth } from '../../src/auth/instance.ts';
 import { migrateHost } from '../../src/db/migrate.ts';
@@ -141,6 +143,12 @@ async function start(raw: DatabaseSync, db: HostDb, registry: SyncRegistry): Pro
     }),
     // Nor `/api/activity`: an empty queue answers the guard the same way.
     fetchSnapshot: () => [],
+    fetchSettings: createFetchSettings({
+      handle: { current: fetchConfigSchema.parse({}), async update() {} },
+      lookupHostname: 'openmetadata.nexus',
+      lookupFallback: { concurrency: 4, timeoutMs: 300_000 },
+    }),
+    fetchSeen: () => [],
     host: undefined,
     port: 0,
     webRoot: MISSING_WEB_ROOT,

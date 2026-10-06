@@ -161,6 +161,8 @@ import type { PickAccepted, PickRefusal } from '../clients/pick.ts';
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { SyncRegistry } from '../sync/registry.ts';
 import type { SyncEvents } from '../sync/events.ts';
+import type { FetchSettings } from '../fetch/settings.ts';
+import { FETCH_DEFAULT_HOST } from '@pickarr/contract';
 import { readActivity } from './activity.ts';
 import type { ArtworkKind } from './artwork-route.ts';
 import { ARTWORK_QUERY, readArtwork } from './artwork-route.ts';
@@ -168,10 +170,11 @@ import { json } from './answer.ts';
 import type { Answer } from './answer.ts';
 import { MAX_BODY_BYTES, PAYLOAD_TOO_LARGE, readBody } from './body.ts';
 import { decodeCursor, decodeUnionCursor } from './cursor.ts';
-import { DIGITS, feedIdFrom, identifyIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
+import { DIGITS, feedIdFrom, hostnameFrom, identifyIdFrom, mappingIdFrom, pluginIdFrom, retryIdFrom } from './path-params.ts';
 import { deletionsSince, downloadsSince, mediaItemsSince, rssItemsSince } from './reads.ts';
 import {
   destinationBodyFrom,
+  fetchHostPatchFrom,
   isDownloadClientBody,
   isFeedBody,
   isIdentifyBody,
@@ -185,6 +188,7 @@ import {
   statusForDestinationRefusal,
   statusForDownloadClientRefusal,
   statusForFeedRefusal,
+  statusForFetchRefusal,
   statusForIdentifyRefusal,
   statusForMappingRefusal,
   statusForPickRefusal,
@@ -495,6 +499,10 @@ export interface ReadServerDeps {
   events: SyncEvents;
   /** The fetch layer's `snapshot`, which `GET /api/activity` reads; a test hands in a constant. */
   fetchSnapshot: () => readonly ActivityHost[];
+  /** The live fetch settings `GET`/`PUT /api/fetch-hosts` read and write; `fetch/settings.ts`. */
+  fetchSettings: FetchSettings;
+  /** The fetch layer's `seen`, merged into the `GET` so a hostname with traffic is editable before it is configured. */
+  fetchSeen: () => readonly string[];
   /**
    * The interface to bind, or `undefined` for `DEFAULT_HOST`.
    *
@@ -1037,6 +1045,30 @@ export const ROUTES: readonly Route[] = [
     open: false,
     // The host's own work is as private as the library it works on.
     answer: ({ deps }) => json(200, readActivity(deps.raw, deps.fetchSnapshot)),
+  },
+  {
+    path: '/api/fetch-hosts',
+    methods: ['GET'],
+    open: false,
+    answer: ({ deps }) => json(200, deps.fetchSettings.read(deps.fetchSeen())),
+  },
+  {
+    path: '/api/fetch-hosts/:hostname',
+    // A `PUT` for the reason `/api/destinations/:pluginId` gives: a host
+    // either has an entry or it does not, and the request names it in full.
+    methods: ['PUT'],
+    open: false,
+    answer: async ({ deps, pathname, body }) => {
+      const hostname = hostnameFrom(pathname);
+      if (hostname === undefined) return UNKNOWN_ROUTE;
+      const patch = fetchHostPatchFrom(body);
+      if (patch === undefined) return json(400, { refusal: 'invalid-shape' });
+      const result = hostname === FETCH_DEFAULT_HOST
+        ? await deps.fetchSettings.saveDefault(patch)
+        : await deps.fetchSettings.saveHost(hostname, patch);
+      if ('refusal' in result) return json(statusForFetchRefusal(result.refusal), { refusal: result.refusal });
+      return json(200, result);
+    },
   },
   {
     path: '/api/sync/bootstrap',

@@ -1,6 +1,6 @@
 import type { AddFeedRefusal } from '../feeds/add.ts';
 import type { AddDownloadClientRefusal } from '../clients/add.ts';
-import type { IdentifyReleaseRefusalCode } from '@pickarr/contract';
+import type { FetchRefusalCode, IdentifyReleaseRefusalCode } from '@pickarr/contract';
 import type { RetryLookupOutcome } from '../media/retry.ts';
 import type { PickRefusal } from '../clients/pick.ts';
 import type { MappingRefusal } from '../clients/mappings.ts';
@@ -227,5 +227,18 @@ export function statusForDestinationRefusal(refusal: DestinationRefusal['refusal
     case 'empty-path':
     case 'escaping-path':
       return 422;
+  }
+}
+
+/** `invalid-hostname` is the 404 a hostname that cannot exist gets; the rest are the caller's values. */
+export function statusForFetchRefusal(refusal: FetchRefusalCode): number {
+  switch (refusal) {
+    case 'invalid-hostname':
+      return 404;
+    case 'invalid-shape':
+    case 'invalid-concurrency':
+    case 'invalid-timeout':
+    case 'default-required':
+      return 400;
   }
 }
