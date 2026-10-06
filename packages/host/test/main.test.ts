@@ -1325,6 +1325,7 @@ test('with neither a variable nor a file, the schema defaults apply', async () =
     assert.equal(settings.readHost, '0.0.0.0');
     assert.equal(settings.port, 7676);
     assert.equal(settings.databasePath, '/config/pickarr.db');
+    assert.deepEqual(settings.fetch.current, { default: { concurrency: 1, timeoutMs: 30000 }, hosts: {} });
   });
 });
 

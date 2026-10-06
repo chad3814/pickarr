@@ -113,14 +113,17 @@ import {
   createDownloadClients,
   randomIndex,
   createHost,
+  createFetchSettings,
   createHostFetch,
   createReadServer,
   createSyncEvents,
   createSyncRegistry,
   ensureClaimToken,
   ensureSyncGeneration,
+  fetchConfigSchema,
   installActivityTriggers,
   migrateHost,
+  openConfig,
   openDatabase,
   setActivityChangedListener,
   setSyncChangedListener,
@@ -428,6 +431,8 @@ export interface Harness {
    * this way rather than from a log.
    */
   claimToken: string;
+  /** The config file the host's fetch settings read and write; a spec may read it back to see what a save wrote. */
+  configPath: string;
   /**
    * Inserts one `media_item` row directly and returns its id. `pluginId` is
    * one of the shell's three real categories, not the host suite's synthetic
@@ -619,6 +624,8 @@ interface Booted {
   posterPath: string;
   /** The hub `GET /api/sync/events` attaches to -- closed in teardown before the listener drains. */
   events: SyncEvents;
+  /** The config file this boot's fetch settings read and write, in `dir`. */
+  configPath: string;
 }
 
 /**
@@ -680,7 +687,19 @@ async function boot(): Promise<Booted> {
   setSyncChangedListener(raw, () => { events.notify(); });
   setActivityChangedListener(raw, () => { events.notifyActivity(); });
 
-  const hostFetch = createHostFetch({ fetch: globalThis.fetch, onChange: () => { events.notifyActivity(); } });
+  const configPath = join(dir, 'pickarr.config.json');
+  const config = await openConfig({ path: configPath });
+  const fetchSettings = createFetchSettings({
+    handle: config.register('fetch', fetchConfigSchema),
+    lookupHostname: 'openmetadata.nexus',
+    lookupFallback: { concurrency: 4, timeoutMs: 300_000 },
+  });
+  const hostFetch = createHostFetch({
+    fetch: globalThis.fetch,
+    limitFor: (hostname) => fetchSettings.limitFor(hostname),
+    timeoutFor: (hostname) => fetchSettings.timeoutFor(hostname),
+    onChange: () => { events.notifyActivity(); },
+  });
 
   // An in-memory `Secrets`, not the host's own `createSecrets`: that one is
   // not exported from `@pickarr/host`, and the chain it builds (environment,
@@ -788,6 +807,8 @@ async function boot(): Promise<Booted> {
     generation,
     events,
     fetchSnapshot: () => hostFetch.snapshot(),
+    fetchSettings,
+    fetchSeen: () => hostFetch.seen(),
     host: '127.0.0.1',
     port: 0,
     webRoot: webDist,
@@ -811,7 +832,7 @@ async function boot(): Promise<Booted> {
     log: dropLine,
   });
 
-  return { raw, dir, server, host, qbittorrent, posterPath, events };
+  return { raw, dir, server, host, qbittorrent, posterPath, events, configPath };
 }
 
 /**
@@ -856,7 +877,7 @@ async function boot(): Promise<Booted> {
  */
 export const test = base.extend<{ harness: Harness }>({
   harness: async ({ context }, use) => {
-    const { raw, dir, server, host, qbittorrent, posterPath, events } = await boot();
+    const { raw, dir, server, host, qbittorrent, posterPath, events, configPath } = await boot();
     try {
       const claimToken = ensureClaimToken(raw, Date.now());
       // How many feeds {@link Harness.seedUnmatchedRelease} has created in
@@ -962,6 +983,7 @@ export const test = base.extend<{ harness: Harness }>({
       await use({
         origin: `http://${server.host}:${server.port}`,
         claimToken,
+        configPath,
         seedMediaItem,
         seedTvRelease,
         seedPoster,

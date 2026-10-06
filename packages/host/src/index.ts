@@ -25,6 +25,14 @@ export { migrateHost, migratePlugin } from './db/migrate.ts';
 export { ensureSyncGeneration } from './db/host-state.ts';
 export type { QueuedFetch } from './fetch/queue.ts';
 export { createHostFetch } from './fetch/queue.ts';
+/** `createFetchSettings`: the e2e harness is the consumer, building the `fetchSettings` a hand-assembled `ReadServerDeps` needs. */
+export { createFetchSettings } from './fetch/settings.ts';
+/** `FetchSettings`: the e2e harness is the consumer, naming the type of what `createFetchSettings` returns. */
+export type { FetchSettings } from './fetch/settings.ts';
+/** `fetchConfigSchema`: the e2e harness is the consumer, registering the `fetch` section the way `main` does. */
+export { fetchConfigSchema } from './config/schemas.ts';
+/** `openConfig`: the e2e harness is the consumer, opening a config file in its temp directory. */
+export { openConfig } from './config/instance.ts';
 export type { Host, NotifyOutcome } from './host.ts';
 export { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from './host.ts';
 // `Timers` names the type of `createHost`'s own optional `timers` override
