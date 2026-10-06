@@ -471,9 +471,9 @@ test('the hostname comes from the url, so a caller cannot opt out of its limit',
 });
 
 /**
- * For the tests below that build a `createHostFetch` and never issue a
- * request through it, so it only has to satisfy the type, not do anything
- * real.
+ * For the unparseable-url test below, which builds a `createHostFetch` and
+ * never issues a request through it, so it only has to satisfy the type, not
+ * do anything real.
  */
 const unusedFetch: typeof globalThis.fetch = async () => new Response('{}');
 

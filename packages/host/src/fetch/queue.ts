@@ -72,16 +72,19 @@ export class FetchFailedError extends Error {
  * passed into `enqueue`, never accepted from the caller as its own
  * parameter, so a plugin has no way to opt out of its queue -- that stays a
  * property of this function, not a habit a caller could skip. What is
- * configurable is only how many requests to that hostname may be in flight
- * together.
+ * configurable is how many requests to that hostname may be in flight
+ * together, and how long one may take.
  *
- * Both numbers come from two resolver functions, `limitFor` and
- * `timeoutFor`, rather than from values fixed at construction; `fetch/settings.ts`
- * is where the real ones are built. `limitFor` is asked on every enqueue and
- * `timeoutFor` when a request starts, so a saved change reaches requests
- * already waiting. A plugin cannot reach either one -- it holds only
- * `HostFetch` -- so both stay properties of the host's configuration rather
- * than something a caller can opt out of.
+ * Those two numbers come from two resolver functions, `limitFor` and
+ * `timeoutFor`, rather than from values fixed at construction;
+ * `fetch/settings.ts` is where the real ones are built. `limitFor` is asked
+ * on every enqueue, so a changed limit applies from the next request to that
+ * hostname and, as a side effect, releases waiters then; until another
+ * request arrives, waiters and `snapshot().limit` stay at the old value.
+ * `timeoutFor` is asked when a request starts, so a changed timeout reaches
+ * every request that has not yet started. A plugin cannot reach either one
+ * -- it holds only `HostFetch` -- so both stay properties of the host's
+ * configuration rather than something a caller can opt out of.
  */
 export function createHostFetch(
   deps: {
