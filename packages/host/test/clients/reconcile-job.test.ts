@@ -688,6 +688,7 @@ test('the adapter built for a torrent client carries no reclaim capability at al
   const adapter = buildReconcileAdapter(config, unusedFetch);
 
   assert.equal(adapter.transport, 'torrent');
+  assert.equal(Object.hasOwn(adapter, 'discard'), false, 'a torrent\'s files are its seed; nothing here may delete them');
   // `hasOwn`, not `adapter.remove === undefined`: the property must be
   // absent, not present and undefined -- `deliverCompleted` reads
   // "`deps.remove` is present", and `exactOptionalPropertyTypes` makes those
@@ -715,6 +716,7 @@ test('the adapter built for an nzb client does carry one', async () => {
 
   assert.equal(adapter.transport, 'nzb');
   assert.equal(Object.hasOwn(adapter, 'remove'), true, 'an nzb adapter must be able to reclaim');
+  assert.equal(Object.hasOwn(adapter, 'discard'), true, 'and to delete the completed folder the client itself never deletes');
 });
 
 test('a torrent client run through the whole handler reclaims nothing', async () => {

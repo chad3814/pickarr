@@ -628,8 +628,8 @@ test('both calls failing is a contact failure, not a resolved empty snapshot', a
 test('a delete refused with HTTP 200 is still a failure', async () => {
   // The trap this module documents at length for `submit`, on the call that
   // was reading nothing at all. Unchecked, `deliver.ts` stamped
-  // `reclaimed_at`, never offered the row again, and -- because the request
-  // carries `del_files=1` -- the job's files stayed on disk forever.
+  // `reclaimed_at`, never offered the row again, and the job sat in
+  // SABnzbd's history forever.
   const config = makeConfig({ id: 31 });
   const fetch = fakeQueuedFetch(async () => ({ status: false, error: 'API Key Incorrect' }));
   const client = createSabnzbdClient(config, fetch);
@@ -697,7 +697,7 @@ test('a delete answered with a body this adapter does not recognise is a success
   );
 });
 
-test('remove asks the client to delete the job and its files', async () => {
+test('remove asks the client to delete the job, with del_files for the failed-job case', async () => {
   const config = makeConfig({ id: 27, apiKey: 'not-a-real-key' });
   let capturedUrl = '';
   const fetch = fakeQueuedFetch(async (url) => {

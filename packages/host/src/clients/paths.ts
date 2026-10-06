@@ -80,6 +80,30 @@ function matchesBoundary(clientPath: string, fromPath: string): boolean {
  * touches this host's filesystem until after this function returns. String
  * prefix matching only.
  */
+/**
+ * Whether a mapped path may be handed to `rm -rf` by the reclaim step
+ * (`deliver.ts`). Refuses the two shapes that would delete far more than
+ * one job: a `filepath_mapping.to_path` itself -- the whole share a client
+ * reports its jobs under -- and the filesystem root. An empty string is
+ * refused too, since `rm` of `''` resolves against the working directory.
+ *
+ * A trailing slash on either side is ignored: `/mnt/usenet` and
+ * `/mnt/usenet/` are the same directory, and an operator types both.
+ * Anything strictly below a target is allowed, as is a path no mapping
+ * produced -- that path is still the one the client itself named, and a
+ * client reporting a job folder outside its configured share is a client
+ * to trust, not a reason to leave the folder behind.
+ */
+export function isDiscardable(raw: DatabaseSync, clientId: number, mappedPath: string): boolean {
+  const normalised = trimTrailingSlash(mappedPath);
+  if (normalised === '' || normalised === '/') return false;
+  return readMappings(raw, clientId).every((mapping) => trimTrailingSlash(mapping.toPath) !== normalised);
+}
+
+function trimTrailingSlash(path: string): string {
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+}
+
 export function mapClientPath(raw: DatabaseSync, clientId: number, clientPath: string): string {
   const mappings = readMappings(raw, clientId);
   let best: MappingRow | null = null;

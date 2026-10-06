@@ -250,7 +250,14 @@ function buildHistoryUrl(config: SabnzbdConfig, start: number): string {
   return `${config.baseUrl}/api?${query.toString()}`;
 }
 
-/** Builds the `history` delete request url that removes a job and its files. */
+/**
+ * Builds the `history` delete request url. `del_files=1` is kept, but read
+ * SABnzbd's `_api_history_delete` (api.py) before trusting it: for a named
+ * job already in history it deletes `get_incomplete_path(job)`, which
+ * answers a path only for a *failed* job. A completed job's folder is not
+ * touched by this call -- `deliver.ts` deletes that itself, before this
+ * request is made.
+ */
 function buildHistoryDeleteUrl(config: SabnzbdConfig, ref: string): string {
   const query = new URLSearchParams();
   query.set('mode', 'history');
@@ -552,8 +559,11 @@ export function createSabnzbdClient(
     },
 
     async remove(ref: string): Promise<void> {
-      // `del_files=1` is what reclaims the download directory; without it
-      // SABnzbd forgets the job and leaves its files behind forever.
+      // `del_files=1` clears a failed job's incomplete folder and nothing
+      // else; a completed job's folder is `deliver.ts`'s to delete (see
+      // `buildHistoryDeleteUrl`'s doc). It used to be believed here that
+      // this flag reclaimed the completed directory, and that belief is why
+      // every completed nzb folder stayed on disk.
       const url = buildHistoryDeleteUrl(config, ref);
       const body = await fetch.json<SabnzbdRefusal>(url);
 
@@ -561,8 +571,7 @@ export function createSabnzbdClient(
       // call that had been reading nothing at all. Unchecked, a refused
       // delete returned normally, `deliver.ts` stamped `reclaimed_at`, and
       // the row was never offered again: the job stayed in SABnzbd's history
-      // and -- because this request carries `del_files=1` -- its files stayed
-      // on disk forever. 1.x does not check this either, but 1.x has no
+      // forever. 1.x does not check this either, but 1.x has no
       // `reclaimed_at`, so its refusals were retried rather than recorded as
       // done; the column is what turned a missing check into a permanent
       // loss.

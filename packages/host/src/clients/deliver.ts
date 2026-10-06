@@ -75,13 +75,33 @@
  * every rejection alike.
  *
  * **Reclaim runs second, and only for `delivered` rows `reclaimed_at` has
- * not already marked.** If `deps.remove` is present, it is called for each
- * such row, and only once `remove` returns does `markReclaimed` (`rows.ts`)
- * stamp it -- `remove` first, then the mark. A `remove` that throws leaves
- * the row unmarked, so the next tick retries it: the same at-least-once
- * shape `deliverOne`'s own steps 1-4 already have, and for the same reason
- * -- a client that could not confirm forgetting a job is a bug to keep
- * nudging, not a row to give up on. `reclaimed_at` is what turns "once per
+ * not already marked.** If `deps.remove` is present, each such row goes
+ * through three steps in this order: `deps.discard` on the row's *mapped*
+ * `storage_path` (skipped for a row with none), then `remove` by
+ * `client_ref`, then `markReclaimed` (`rows.ts`). A throw at either call
+ * leaves the row unmarked, so the next tick retries it: the same
+ * at-least-once shape `deliverOne`'s own steps 1-4 already have, and for
+ * the same reason -- a client that could not confirm forgetting a job is a
+ * bug to keep nudging, not a row to give up on.
+ *
+ * **Why the host deletes the files itself.** It used to be believed that
+ * SABnzbd's `history&name=delete&del_files=1` removed a completed job's
+ * folder. Read from SABnzbd's own `api.py` (`_api_history_delete`,
+ * 2026-10-06): for a named job already in history, `del_files` deletes
+ * `history_db.get_incomplete_path(job)`, and that lookup answers a path
+ * only for a job whose status is `failed`. A completed job's folder is
+ * never touched, and with import mode `copy` (`add.ts`) nothing else ever
+ * removed it either -- every completed nzb folder stayed on disk until an
+ * operator cleaned up by hand. `discard` is `rm -rf` over the mapped path
+ * (`reconcile-job.ts` supplies the real one), gated by `isDiscardable`
+ * (`paths.ts`) so a mapping target or the filesystem root is refused and
+ * logged rather than deleted.
+ *
+ * **Discard before `remove`, not after, because discard is idempotent and
+ * `remove` is not.** A folder already gone is a no-op through `force`, so
+ * a `remove` the client refuses is retried next tick behind a harmless
+ * repeat of the discard. The reverse order would ask SABnzbd to delete an
+ * already-archived job on every retry of a failing discard. `reclaimed_at` is what turns "once per
  * pass" into "once per download": without the filter and the stamp, this
  * step would re-select every `delivered` row on every pass and call
  * `remove` for each all over again, forever -- see `db/migrate.ts`'s
@@ -103,7 +123,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DownloadedFile } from '@pickarr/contract';
 import { mediaItemIdForRssItem, ownerPluginId } from '../db/owner.ts';
 import { PluginNotRegisteredError } from '../errors.ts';
-import { mapClientPath } from './paths.ts';
+import { isDiscardable, mapClientPath } from './paths.ts';
 import { redactText } from './redact.ts';
 import {
   markDelivered, markReclaimed, recordImportRefusal, rowsForClientByStatus, unreclaimedRowsForClient,
@@ -127,6 +147,13 @@ export interface DeliverDeps {
    * without also stopping the seed; see the module doc.
    */
   remove?: (ref: string) => Promise<void>;
+  /**
+   * Deletes a mapped completed path, file or directory, tolerating one that
+   * is already gone. Required whenever `remove` is present: the module doc
+   * says why the host, not the client, deletes a completed job's files.
+   * Absent with `remove` for a torrent, whose files are its seed.
+   */
+  discard?: (mappedPath: string) => Promise<void>;
   log: (message: string, detail?: Readonly<Record<string, unknown>>) => void;
 }
 
@@ -298,7 +325,7 @@ async function deliverOne(deps: DeliverDeps, result: DeliverResult, row: Downloa
  */
 async function reclaimRows(
   deps: DeliverDeps,
-  remove: (ref: string) => Promise<void>,
+  reclaim: { remove: (ref: string) => Promise<void>; discard: (mappedPath: string) => Promise<void> },
   result: DeliverResult,
   rows: readonly DownloadRow[],
 ): Promise<void> {
@@ -313,7 +340,14 @@ async function reclaimRows(
     // nothing else's, which is the same reasoning `deliverOne` already
     // applies to a plugin that throws.
     try {
-      await remove(row.clientRef);
+      if (row.storagePath !== null) {
+        const mappedPath = mapClientPath(deps.raw, deps.clientId, row.storagePath);
+        if (!isDiscardable(deps.raw, deps.clientId, mappedPath)) {
+          throw new Error(`refusing to discard ${mappedPath}: it is a mapping target or the filesystem root`);
+        }
+        await reclaim.discard(mappedPath);
+      }
+      await reclaim.remove(row.clientRef);
       if (markReclaimed(deps.raw, row, deps.now)) {
         result.reclaimed += 1;
       }
@@ -325,7 +359,7 @@ async function reclaimRows(
       });
     }
   }
-  await reclaimRows(deps, remove, result, rest);
+  await reclaimRows(deps, reclaim, result, rest);
 }
 
 /**
@@ -360,6 +394,14 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
 
   const remove = deps.remove;
   if (remove !== undefined) {
+    // Checked before any row is read: a client wired to forget jobs but not
+    // to delete their files would reproduce the exact defect the module doc
+    // describes, silently. `reconcile-job.ts`'s adapter union makes this
+    // unreachable from real wiring; the check is for the next caller.
+    const discard = deps.discard;
+    if (discard === undefined) {
+      throw new Error('deliver: a client that can remove a job must also be able to discard its files');
+    }
     // Re-read rather than reuse `completedRows`: a row this same pass just
     // delivered is now `delivered` and eligible for reclaim in the same
     // tick, not one tick later. `reclaimedAt === null` is what keeps this a
@@ -374,7 +416,7 @@ export async function deliverCompleted(deps: DeliverDeps): Promise<DeliverResult
     // measurement.
     const deliveredRows = unreclaimedRowsForClient(deps.raw, deps.clientId)
       .filter((row) => row.status === 'delivered' && row.reclaimedAt === null);
-    await reclaimRows(deps, remove, result, deliveredRows);
+    await reclaimRows(deps, { remove, discard }, result, deliveredRows);
   }
 
   return result;
