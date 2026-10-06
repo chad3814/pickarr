@@ -28,6 +28,7 @@ const unusedResolver: TokenResolver = async () => {
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
   snapshot: () => [],
+  seen: () => [],
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => { throw new Error('fetch.text: not used by this test'); },

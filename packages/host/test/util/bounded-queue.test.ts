@@ -236,3 +236,25 @@ test('setLimit refuses the same values the constructor does', () => {
   assert.throws(() => queue.setLimit(1.5), /got 1\.5/);
   assert.equal(queue.limit(), 2, 'a refused value changes nothing');
 });
+
+test('a run that arrives after setLimit counted a waiter, before its continuation runs, queues rather than exceeding the limit', async () => {
+  const queue = createBoundedQueue(1);
+  const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+  let started = 0;
+  const start = (index: number) => queue.run(async () => {
+    started += 1;
+    await gates[index]!.promise;
+  });
+  const runs = [start(0), start(1)];
+  await tick();
+  assert.equal(started, 1, 'the second waits at a limit of one');
+
+  queue.setLimit(2);
+  runs.push(start(2)); // same tick: the second waiter's continuation has not run yet
+  await tick();
+  assert.equal(queue.active(), 2, 'the raised limit of two is not exceeded');
+  assert.equal(started, 2, 'the third is still waiting');
+
+  gates.forEach((gate) => gate.resolve());
+  await Promise.all(runs);
+});

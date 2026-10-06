@@ -20,6 +20,7 @@ import type { DownloadClients, JobQueue, PluginContext } from '@pickarr/contract
 /** A `QueuedFetch` that fails loudly if a test never meant to reach the network. */
 const unusedFetch: QueuedFetch = {
   snapshot: () => [],
+  seen: () => [],
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => { throw new Error('fetch.text: not used by this test'); },
@@ -32,6 +33,7 @@ const unusedFetch: QueuedFetch = {
  */
 const unreachableFetch: QueuedFetch = {
   snapshot: () => [],
+  seen: () => [],
   json: async () => { throw new Error('qbittorrent unreachable'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => { throw new Error('fetch.text: not used by this test'); },
@@ -72,6 +74,7 @@ function makeSecrets(raw: DatabaseSync): Secrets {
 function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<unknown>): QueuedFetch {
   return {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       const body: unknown = await handler(url, init);
       return body as T;

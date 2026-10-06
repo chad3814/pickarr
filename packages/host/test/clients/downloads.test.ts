@@ -49,6 +49,7 @@ function fakeFetch(handlers: {
 }): QueuedFetch {
   return {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       if (!handlers.json) throw new Error('fakeFetch: json is not used by this test');
       const body = await handlers.json(url, init);

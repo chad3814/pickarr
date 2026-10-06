@@ -41,6 +41,7 @@ function tick(): Promise<void> {
 function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<string>): QueuedFetch {
   return {
     snapshot: () => [],
+    seen: () => [],
     json<T>(): Promise<T> {
       throw new Error('json is not used by these tests');
     },
@@ -238,6 +239,7 @@ function fakeQbittorrentFetch(handlers: {
   const calls: Array<{ kind: 'text' | 'json'; url: string; init: RequestInit | undefined }> = [];
   const fetch: QueuedFetch = {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       calls.push({ kind: 'json', url, init });
       const body: unknown = await handlers.json(url, init);
@@ -538,7 +540,7 @@ test('only the login bypasses the queue; the add goes through it', async () => {
     }
     return new Response('Ok.', { status: 200 });
   };
-  const fetch = createHostFetch({ fetch: rawFetch });
+  const fetch = createHostFetch({ fetch: rawFetch, limitFor: () => 1, timeoutFor: () => 30_000 });
   const occupant = fetch.json('https://shared.example.com/occupy');
   await tick();
   assert.ok(releaseOccupant, 'the occupant must have claimed the hostname slot');
@@ -582,6 +584,7 @@ function fakeSnapshotFetch(
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const fetch: QueuedFetch = {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       calls.push({ url, init });
       const body = await handler(url, init);

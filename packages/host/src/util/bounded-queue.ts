@@ -36,11 +36,10 @@ export interface BoundedQueue {
 }
 
 /**
- * The one definition of what a concurrency limit may be. Exported because the
- * fetch subsystem validates the same property against its own config shape
- * and needs to name the offending key in its message -- two messages, one
- * predicate. Duplicating the comparison instead is how the two drift when
- * only one of them is ever tightened.
+ * The one definition of what a concurrency limit may be: an integer of at
+ * least 1. The constructor and `setLimit` both check it here; the config
+ * schema enforces the same range on its own side, so a bad value is refused
+ * where it is entered as well as where it is applied.
  */
 export function isValidLimit(value: number): boolean {
   return Number.isInteger(value) && value >= 1;
@@ -51,10 +50,10 @@ export function isValidLimit(value: number): boolean {
  * (e.g. `0 >= 0`) true before any task has ever run, so the very first
  * `run()` queues behind a slot nothing will ever grant. Nothing later would
  * observe that: no error, no timeout, just a promise that never settles.
- * Reject it here, at construction, loudly and by value, rather than clamp
- * it -- clamping would silently substitute behaviour nobody asked for,
- * rather than let it surface invisibly whenever the first task happens to
- * be run.
+ * Reject it here, at construction and in `setLimit`, loudly and by value,
+ * rather than clamp it -- clamping would silently substitute behaviour
+ * nobody asked for, rather than let it surface invisibly whenever the first
+ * task happens to be run.
  */
 function assertValidLimit(value: number): void {
   if (!isValidLimit(value)) {

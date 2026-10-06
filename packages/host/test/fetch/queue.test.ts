@@ -50,6 +50,22 @@ function tick(): Promise<void> {
 }
 
 /**
+ * The two resolver functions `createHostFetch` now takes, built from the
+ * static shape the tests used to pass. Static here on purpose: these tests
+ * are about the queue, and `settings.test.ts` is about where numbers come
+ * from.
+ */
+function policy(opts: {
+  limits?: { default: number; perHost?: Record<string, number> };
+  timeouts?: { default: number; perHost?: Record<string, number> };
+}): { limitFor: (hostname: string) => number; timeoutFor: (hostname: string) => number } {
+  return {
+    limitFor: (hostname) => opts.limits?.perHost?.[hostname] ?? opts.limits?.default ?? 1,
+    timeoutFor: (hostname) => opts.timeouts?.perHost?.[hostname] ?? opts.timeouts?.default ?? 30_000,
+  };
+}
+
+/**
  * A stand-in `fetch` that always answers 401, for the tests that check what
  * a caller can learn from a rejected request's `status`. Module scope,
  * rather than declared inside its test: it captures nothing from either
@@ -59,7 +75,7 @@ const unauthorizedFetch: typeof globalThis.fetch = async () => new Response('', 
 
 test('two requests to one hostname do not overlap at the default limit of one', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, ...policy({}) });
 
   const first = hostFetch.json<Echo>('http://a.example/one');
   const second = hostFetch.json<Echo>('http://a.example/two');
@@ -89,7 +105,7 @@ test('a rejected request still releases its slot, so the next request to that ho
     if (calls === 1) throw new Error('network exploded');
     return new Response(JSON.stringify({ url: 'recovered' } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({}) });
 
   await assert.rejects(hostFetch.json<Echo>('http://a.example/one'), /network exploded/);
 
@@ -119,7 +135,7 @@ test('a request that never settles times out, rejects, and releases its hostname
     if (calls === 1) return new Promise<Response>(() => {});
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 20 } });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({ timeouts: { default: 20 } }) });
 
   await assert.rejects(
     hostFetch.text('http://a.example/hangs'),
@@ -163,7 +179,7 @@ test('a request spends its budget while waiting for its hostname slot, not only 
     await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 40 } });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({ timeouts: { default: 40 } }) });
 
   const first = hostFetch.json<Echo>('http://a.example/hangs');
   const second = hostFetch.json<Echo>('http://a.example/queued-behind-it');
@@ -193,7 +209,7 @@ test('a caller that aborted while queued is not spent on a real request', async 
     if (calls === 1) return new Promise<Response>(() => {});
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 40 } });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({ timeouts: { default: 40 } }) });
 
   const controller = new AbortController();
   const first = hostFetch.json<Echo>('http://a.example/hangs');
@@ -219,7 +235,7 @@ test('a perHost timeout applies to its own hostname and leaves every other one o
   };
   const hostFetch = createHostFetch({
     fetch: fetchFn,
-    timeouts: { default: 20, perHost: { 'slow.example': 5_000 } },
+    ...policy({ timeouts: { default: 20, perHost: { 'slow.example': 5_000 } } }),
   });
 
   const generous = await hostFetch.json<Echo>('http://slow.example/takes-40ms');
@@ -229,19 +245,6 @@ test('a perHost timeout applies to its own hostname and leaves every other one o
     hostFetch.json<Echo>('http://other.example/hangs'),
     /timed out after 20ms/,
     'a hostname with no entry of its own is still on the default',
-  );
-});
-
-test('an invalid perHost timeout throws at construction, naming the hostname', () => {
-  // `assertValidTimeouts` walks every entry for the reason `assertValidLimits`
-  // does: a bad one is otherwise invisible until that hostname's first
-  // request, and then fails without saying which key was wrong.
-  assert.throws(
-    () => createHostFetch({ fetch: unusedFetch, timeouts: { default: 30_000, perHost: { 'bad.example': 0 } } }),
-    /"bad\.example".*\b0\b/,
-  );
-  assert.doesNotThrow(
-    () => createHostFetch({ fetch: unusedFetch, timeouts: { default: 30_000, perHost: { 'ok.example': 300_000 } } }),
   );
 });
 
@@ -261,7 +264,7 @@ test('a response whose body never completes times out too, and releases its host
     if (calls === 1) return new Response(new ReadableStream({ start() {} }));
     return new Response(JSON.stringify({ url: String(input) } satisfies Echo), { status: 200 });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 20 } });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({ timeouts: { default: 20 } }) });
 
   await assert.rejects(
     hostFetch.text('http://a.example/stalls'),
@@ -287,7 +290,7 @@ test('a caller\'s own abort signal is composed with the timeout, not replaced by
       init?.signal?.addEventListener('abort', () => { reject(new Error('aborted by the caller')); }, { once: true });
     });
   };
-  const hostFetch = createHostFetch({ fetch: fetchFn, timeouts: { default: 30_000 } });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({ timeouts: { default: 30_000 } }) });
 
   const controller = new AbortController();
   const pending = hostFetch.text('http://a.example/slow', { signal: controller.signal });
@@ -302,7 +305,7 @@ test('a caller\'s own abort signal is composed with the timeout, not replaced by
 
 test('a per-host limit of two lets two run at once and makes a third wait', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn, limits: { default: 1, perHost: { 'a.example': 2 } } });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, ...policy({ limits: { default: 1, perHost: { 'a.example': 2 } } }) });
 
   const first = hostFetch.json<Echo>('http://a.example/one');
   const second = hostFetch.json<Echo>('http://a.example/two');
@@ -331,7 +334,7 @@ test('a hostname with no entry takes the default limit', async () => {
   const track = trackingFetch();
   const hostFetch = createHostFetch({
     fetch: track.fetchFn,
-    limits: { default: 1, perHost: { 'other.example': 5 } },
+    ...policy({ limits: { default: 1, perHost: { 'other.example': 5 } } }),
   });
 
   const first = hostFetch.json<Echo>('http://a.example/one');
@@ -352,7 +355,7 @@ test('a hostname with no entry takes the default limit', async () => {
 test('a non-2xx response rejects rather than returning a body', async () => {
   const fetchFn: typeof globalThis.fetch = async () =>
     new Response(JSON.stringify({ url: 'unreachable' } satisfies Echo), { status: 404, statusText: 'Not Found' });
-  const hostFetch = createHostFetch({ fetch: fetchFn });
+  const hostFetch = createHostFetch({ fetch: fetchFn, ...policy({}) });
 
   await assert.rejects(hostFetch.json<Echo>('http://a.example/missing'), /404/);
 });
@@ -362,7 +365,7 @@ test('a non-2xx response carries the numeric status, not just prose about it', a
   // bearer-auth qBittorrent client, say) must not have to pattern-match this
   // module's own message text to do it -- that breaks the moment the message
   // is reworded, as it already was once when redaction went in.
-  const hostFetch = createHostFetch({ fetch: unauthorizedFetch });
+  const hostFetch = createHostFetch({ fetch: unauthorizedFetch, ...policy({}) });
 
   await assert.rejects(
     hostFetch.json('http://a.example/secure'),
@@ -382,6 +385,7 @@ test('the queue names a failing url without its credential', async () => {
   // only the value itself, `not-a-real-key`, must be gone.
   const secret = 'not-a-real-key';
   const hostFetch = createHostFetch({
+    ...policy({}),
     fetch: async () => new Response('', { status: 401, statusText: 'Unauthorized' }),
   });
 
@@ -401,7 +405,7 @@ test('the queue names a failing url without its credential', async () => {
 
 test('the limit is keyed by hostname, so two hosts proceed in parallel', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, ...policy({}) });
 
   const a = hostFetch.json<Echo>('http://a.example/one');
   const b = hostFetch.json<Echo>('http://b.example/one');
@@ -418,7 +422,7 @@ test('the limit is keyed by hostname, so two hosts proceed in parallel', async (
 
 test('text shares its hostname queue with json and bytes, so a feed is paced like any other call to that host', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, ...policy({}) });
 
   const first = hostFetch.json<Echo>('http://a.example/feed.json');
   const second = hostFetch.text('http://a.example/feed.xml');
@@ -440,7 +444,7 @@ test('text shares its hostname queue with json and bytes, so a feed is paced lik
 
 test('the hostname comes from the url, so a caller cannot opt out of its limit', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, ...policy({}) });
 
   // Nothing in `json`/`bytes` accepts a key other than the url itself, so
   // two different paths on one host still land on the same queue and share
@@ -467,52 +471,11 @@ test('the hostname comes from the url, so a caller cannot opt out of its limit',
 });
 
 /**
- * `createHostFetch` never calls this in the validation tests below --
- * construction either throws before any request is made, or succeeds and
- * no request is issued -- so it only has to satisfy the type, not do
- * anything real.
+ * For the tests below that build a `createHostFetch` and never issue a
+ * request through it, so it only has to satisfy the type, not do anything
+ * real.
  */
 const unusedFetch: typeof globalThis.fetch = async () => new Response('{}');
-
-test('a default limit of 0 throws at construction, naming "default" and the value', () => {
-  assert.throws(
-    () => createHostFetch({ fetch: unusedFetch, limits: { default: 0 } }),
-    /'default'.*\b0\b/,
-  );
-});
-
-test('a perHost limit of 0 throws at construction, naming the hostname and the value', () => {
-  assert.throws(
-    () => createHostFetch({ fetch: unusedFetch, limits: { default: 1, perHost: { 'a.example': 0 } } }),
-    /'a\.example'.*\b0\b/,
-  );
-});
-
-test('a negative limit throws at construction', () => {
-  assert.throws(
-    () => createHostFetch({ fetch: unusedFetch, limits: { default: -1 } }),
-    /'default'.*-1/,
-  );
-});
-
-test('an invalid timeout throws at construction, naming the key and the value', () => {
-  // The same guard `assertValidLimit` gives a limit, for the same reason:
-  // each of these constructs silently otherwise, and then fails every
-  // request -- `0` timing out instantly, the rest with a `RangeError` about
-  // "delay" that names neither the timeout nor `createHostFetch`.
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: 0 } }), /"default".*\b0\b/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: -1 } }), /"default".*-1/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: 1.5 } }), /"default".*1\.5/);
-  assert.throws(() => createHostFetch({ fetch: unusedFetch, timeouts: { default: Number.NaN } }), /"default".*NaN/);
-  // And the shipped default is not caught by its own guard.
-  assert.doesNotThrow(() => createHostFetch({ fetch: unusedFetch }));
-});
-
-test('a valid perHost limit of 1 and a large value both construct without throwing', () => {
-  assert.doesNotThrow(() =>
-    createHostFetch({ fetch: unusedFetch, limits: { default: 1, perHost: { 'a.example': 1, 'b.example': 1000 } } }),
-  );
-});
 
 test('snapshot shows waiting and in-flight requests by method and redacted target, and empties when they settle', async () => {
   let release: (() => void) | undefined;
@@ -523,7 +486,7 @@ test('snapshot shows waiting and in-flight requests by method and redacted targe
       await gate;
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     },
-    limits: { default: 1 },
+    ...policy({ limits: { default: 1 } }),
     onChange: () => { changes.push(1); },
   });
   const first = fetch.json('https://sab.example:8080/api?mode=queue&apikey=SECRETKEY', { method: 'GET' });
@@ -545,6 +508,7 @@ test('snapshot shows waiting and in-flight requests by method and redacted targe
 test('a passkey in the path is masked in the target', async () => {
   let release: (() => void) | undefined;
   const fetch = createHostFetch({
+    ...policy({}),
     fetch: async () => {
       await new Promise<void>((resolve) => { release = resolve; });
       return new Response('x');
@@ -565,6 +529,7 @@ test('a passkey in the path is masked in the target', async () => {
 test('the target drops userinfo and the fragment as well as the query, and still masks a passkey in the path', async () => {
   let release: (() => void) | undefined;
   const fetch = createHostFetch({
+    ...policy({}),
     fetch: async () => {
       await new Promise<void>((resolve) => { release = resolve; });
       return new Response('x');
@@ -587,6 +552,7 @@ test('failed requests leave the snapshot; hosts sort by name and a missing metho
   const releases: Array<() => void> = [];
   const changes: number[] = [];
   const fetch = createHostFetch({
+    ...policy({}),
     fetch: async () => {
       await new Promise<void>((resolve) => { releases.push(resolve); });
       return new Response('nope', { status: 500, statusText: 'Server Error' });
@@ -609,7 +575,57 @@ test('failed requests leave the snapshot; hosts sort by name and a missing metho
 });
 
 test('an unparseable url rejects before anything is queued, so the snapshot stays empty', async () => {
-  const fetch = createHostFetch({ fetch: unusedFetch });
+  const fetch = createHostFetch({ fetch: unusedFetch, ...policy({}) });
   await assert.rejects(fetch.text('not a url'));
   assert.deepEqual(fetch.snapshot(), []);
+});
+
+test('timeoutFor is read when a request starts, so a change made while it waits applies to it', async () => {
+  // `AbortSignal.timeout` is real here; the numbers are small.
+  let timeoutMs = 10_000;
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({
+    fetch: track.fetchFn,
+    limitFor: () => 1,
+    timeoutFor: () => timeoutMs,
+  });
+  const first = hostFetch.json<Echo>('https://a.example/1');
+  const second = hostFetch.json<Echo>('https://a.example/2');
+  await tick();
+  timeoutMs = 20; // tightened while `second` waits for the one slot
+  track.releaseNext();
+  await first;
+  await assert.rejects(second, /timed out after 20ms/, 'the second read the new ceiling when it started');
+});
+
+test('limitFor is re-read on every enqueue and applied to the hostname\'s queue', async () => {
+  let limit = 1;
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => limit, timeoutFor: () => 30_000 });
+  const a = hostFetch.json<Echo>('https://a.example/1');
+  const b = hostFetch.json<Echo>('https://a.example/2');
+  await tick();
+  assert.equal(track.activeNow(), 1);
+
+  limit = 3;
+  const c = hostFetch.json<Echo>('https://a.example/3');
+  await tick();
+  assert.equal(track.activeNow(), 3, 'the third enqueue raised the limit and released the waiter too');
+  assert.equal(hostFetch.snapshot()[0]?.limit, 3);
+
+  track.releaseNext(); track.releaseNext(); track.releaseNext();
+  await Promise.all([a, b, c]);
+});
+
+test('seen lists every hostname that has had a request, in first-seen order', async () => {
+  const track = trackingFetch();
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => 2, timeoutFor: () => 30_000 });
+  assert.deepEqual(hostFetch.seen(), []);
+  const a = hostFetch.json<Echo>('https://b.example/1');
+  const b = hostFetch.json<Echo>('https://a.example/1');
+  await tick();
+  assert.deepEqual(hostFetch.seen(), ['b.example', 'a.example']);
+  track.releaseNext(); track.releaseNext();
+  await Promise.all([a, b]);
+  assert.deepEqual(hostFetch.seen(), ['b.example', 'a.example'], 'completion removes nothing');
 });

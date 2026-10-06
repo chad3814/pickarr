@@ -190,6 +190,7 @@ test('a reader answers empty for another plugin\'s rss items and downloads, by a
 /** A `QueuedFetch` that fails loudly: nothing in this file polls a feed. */
 const unusedFetch: QueuedFetch = {
   snapshot: () => [],
+  seen: () => [],
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => { throw new Error('fetch.text: not used by this test'); },

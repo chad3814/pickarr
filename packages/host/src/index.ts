@@ -23,7 +23,7 @@ export { migrateHost, migratePlugin } from './db/migrate.ts';
 // `ReadServerDeps.generation` is minted from the database exactly this way in
 // `main`, and there is no other public path to it.
 export { ensureSyncGeneration } from './db/host-state.ts';
-export type { FetchLimits, QueuedFetch } from './fetch/queue.ts';
+export type { QueuedFetch } from './fetch/queue.ts';
 export { createHostFetch } from './fetch/queue.ts';
 export type { Host, NotifyOutcome } from './host.ts';
 export { createHost, DEFAULT_MAX_ATTEMPTS, HOST_PLUGIN_ID } from './host.ts';
