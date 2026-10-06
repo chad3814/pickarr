@@ -1,12 +1,15 @@
 /**
- * Reads an id or a plugin id back off a request's path -- `server.ts`'s
- * router matches a template like `/api/mappings/:id` by segment count
- * alone and never binds the `:name` segment itself, so each of these is
- * what recovers the value for the one route that named it.
+ * Reads an id, a plugin id or a fetch hostname back off a request's path --
+ * `server.ts`'s router matches a template like `/api/mappings/:id` by
+ * segment count alone and never binds the `:name` segment itself, so each
+ * of these is what recovers the value for the one route that named it.
  *
  * Split out of `server.ts` (issue #89): this is parsing, not routing, and
  * every function here is pure -- a pathname in, a value or `undefined` out.
  */
+
+import { FETCH_DEFAULT_HOST } from '@pickarr/contract';
+import { isHostname } from '../fetch/hostname.ts';
 
 /** An artwork id, as a path segment: digits only, so nothing else reaches a query parameter. */
 export const DIGITS = /^\d+$/;
@@ -172,4 +175,22 @@ export function pluginIdFrom(pathname: string): string | undefined {
   const raw = segments[3];
   if (raw === undefined || !PLUGIN_ID.test(raw)) return undefined;
   return raw;
+}
+
+/**
+ * The fourth segment of `/api/fetch-hosts/:hostname`: either the reserved
+ * `default` or a bare hostname (`isHostname`). Anything else is
+ * `undefined`, which the route turns into `UNKNOWN_ROUTE` on the same
+ * reasoning `pluginIdFrom` gives -- a segment that could not be a hostname
+ * is not a host that could exist. The segment is not percent-decoded: a
+ * hostname has no character that needs encoding, so an encoded one is
+ * refused by the class check rather than decoded into something else.
+ */
+export function hostnameFrom(pathname: string): string | undefined {
+  const segments = pathname.split('/');
+  if (segments.length !== 4) return undefined;
+  const raw = segments[3];
+  if (raw === undefined) return undefined;
+  if (raw === FETCH_DEFAULT_HOST || isHostname(raw)) return raw;
+  return undefined;
 }

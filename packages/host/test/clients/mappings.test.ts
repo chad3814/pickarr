@@ -14,6 +14,7 @@ import type { Timers } from '../../src/jobs/dispatcher.ts';
 /** A `QueuedFetch` that fails loudly: no test here polls or reconciles against a real client. */
 const unusedFetch: QueuedFetch = {
   snapshot: () => [],
+  seen: () => [],
   json: async () => { throw new Error('fetch.json: not used by this test'); },
   bytes: async () => { throw new Error('fetch.bytes: not used by this test'); },
   text: async () => { throw new Error('fetch.text: not used by this test'); },

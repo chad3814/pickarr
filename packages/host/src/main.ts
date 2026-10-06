@@ -32,13 +32,15 @@ import { createDownloadClients } from './clients/downloads.ts';
 import { randomIndex } from './clients/select.ts';
 import { createSecrets } from './secrets/instance.ts';
 import type { Secrets } from './secrets/instance.ts';
-import type { Config } from './config/instance.ts';
+import type { Config, ConfigHandle } from './config/instance.ts';
 import { openConfig } from './config/instance.ts';
-import { DEFAULT_CONFIG_PATH, databaseConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
+import type { FetchConfig } from './config/schemas.ts';
+import { DEFAULT_CONFIG_PATH, databaseConfigSchema, fetchConfigSchema, secretsConfigSchema, serverConfigSchema } from './config/schemas.ts';
 import { ensureAuthSecret, ensureSyncGeneration } from './db/host-state.ts';
 import { migrateHost } from './db/migrate.ts';
 import { openDatabase, setActivityChangedListener, setSyncChangedListener } from './db/open.ts';
 import { createHostFetch } from './fetch/queue.ts';
+import { createFetchSettings } from './fetch/settings.ts';
 import { createHost } from './host.ts';
 import type { Host } from './host.ts';
 import type { Timers } from './jobs/dispatcher.ts';
@@ -416,6 +418,8 @@ export interface HostSettings {
    * with no environment override.
    */
   webRoot: string;
+  /** The config file's `fetch` section, which `fetch/settings.ts` reads and writes. */
+  fetch: ConfigHandle<FetchConfig>;
   config: Config;
 }
 
@@ -499,6 +503,7 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
   const server = config.register('server', serverConfigSchema);
   const database = config.register('database', databaseConfigSchema);
   const secrets = config.register('secrets', secretsConfigSchema);
+  const fetchHandle = config.register('fetch', fetchConfigSchema);
 
   const portRaw = configuredEnvValue(env['PICKARR_READ_API_PORT']);
   const hostRaw = configuredEnvValue(env['PICKARR_READ_API_HOST']);
@@ -517,6 +522,7 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
     secretsBaseDir: secrets.current.baseDir,
     openmetadataUrl: resolveOpenmetadataUrl(openmetadataUrlRaw),
     webRoot: server.current.webRoot ?? defaultWebRoot(import.meta.url),
+    fetch: fetchHandle,
     config,
   };
 }
@@ -525,8 +531,12 @@ export async function resolveSettings(env: NodeJS.ProcessEnv): Promise<HostSetti
  * The lookup service answers a batch in tens of seconds and is allowed five
  * minutes by the platform it runs on, so it gets that whole window rather
  * than the 30s every other host gets -- a lookup cut off at 30s is a failed
- * job and a retry that will take just as long. `fetch/queue.ts`'s
- * `FetchTimeouts` doc has the reasoning for why this is per-hostname.
+ * job and a retry that will take just as long. `fetch/settings.ts` has the
+ * reasoning for why this is per-hostname.
+ *
+ * This is the lookup hostname's per-field fallback in `fetch/settings.ts`: it
+ * applies when the config file's `fetch.hosts` has no entry for that hostname
+ * or the entry lacks a timeout, rather than being an entry in a map built here.
  *
  * `run-job.ts`'s `JOB_TIMEOUT_MS` is deliberately above this; see its doc.
  */
@@ -539,12 +549,13 @@ export const LOOKUP_TIMEOUT_MS = 300_000;
  * service would have done concurrently. Four is chosen to cut that without
  * becoming a burst: the service is a shared deployment, and its own rate
  * limiting, not this number, is what should decide when it has had enough.
+ *
+ * This is the lookup hostname's per-field fallback in `fetch/settings.ts`: it
+ * applies when the config file's `fetch.hosts` has no entry for that hostname
+ * or the entry lacks a concurrency, rather than being an entry in a map built
+ * here.
  */
 export const LOOKUP_CONCURRENCY = 4;
-
-/** Every other hostname keeps one in flight and `queue.ts`'s own default ceiling. */
-const DEFAULT_HOST_CONCURRENCY = 1;
-const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 
 /** The lookup service's origin when nothing says otherwise. */
 const DEFAULT_OPENMETADATA_URL = 'https://openmetadata.nexus';
@@ -942,10 +953,15 @@ export async function main(
   // is exactly the timeout this configuration exists to raise.
   const lookupHostname = new URL(settings.openmetadataUrl).hostname;
   const artworkDir = resolveArtworkDir(settings.databasePath);
+  const fetchSettings = createFetchSettings({
+    handle: settings.fetch,
+    lookupHostname,
+    lookupFallback: { concurrency: LOOKUP_CONCURRENCY, timeoutMs: LOOKUP_TIMEOUT_MS },
+  });
   const fetch = createHostFetch({
     fetch: globalThis.fetch,
-    limits: { default: DEFAULT_HOST_CONCURRENCY, perHost: { [lookupHostname]: LOOKUP_CONCURRENCY } },
-    timeouts: { default: DEFAULT_FETCH_TIMEOUT_MS, perHost: { [lookupHostname]: LOOKUP_TIMEOUT_MS } },
+    limitFor: (hostname) => fetchSettings.limitFor(hostname),
+    timeoutFor: (hostname) => fetchSettings.timeoutFor(hostname),
     onChange: () => { events.notifyActivity(); },
   });
   // A factory, not a built object: `createHost` supplies the `Secrets` it
@@ -1049,6 +1065,8 @@ export async function main(
     events,
     // The fetch layer's queue as the Activities page sees it.
     fetchSnapshot: () => fetch.snapshot(),
+    fetchSettings,
+    fetchSeen: () => fetch.seen(),
     host: settings.readHost,
     port: settings.port,
     webRoot: settings.webRoot,

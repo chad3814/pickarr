@@ -1,5 +1,5 @@
 import type { ActivityHost, ActivityRequest, HostFetch } from '@pickarr/contract';
-import { createBoundedQueue, isValidLimit } from '../util/bounded-queue.ts';
+import { createBoundedQueue } from '../util/bounded-queue.ts';
 import type { BoundedQueue } from '../util/bounded-queue.ts';
 import { redactUrl } from '../clients/redact.ts';
 
@@ -24,6 +24,8 @@ export interface QueuedFetch extends HostFetch {
    * something waiting or in flight appear, sorted by hostname.
    */
   snapshot(): readonly ActivityHost[];
+  /** Every hostname a request has been made to since construction, in first-seen order. */
+  seen(): readonly string[];
 }
 
 /**
@@ -65,162 +67,44 @@ export class FetchFailedError extends Error {
 }
 
 /**
- * The concurrency budget `createHostFetch` enforces per hostname. `default`
- * applies to any hostname without its own entry in `perHost`; both are
- * counts of requests allowed to run at once, not a rate. Never exported from
- * `@pickarr/contract`: unlike `HostFetch`, nothing here is reachable from
- * `PluginContext` -- it is consumed only by `createHostFetch`'s
- * construction-time `deps`, a host-wide policy a plugin never sees.
- */
-export interface FetchLimits {
-  /** Applied to any hostname without a specific entry. */
-  default: number;
-  /** Keyed by exact hostname, e.g. `{ 'cdn.example.com': 10 }`. */
-  perHost?: Readonly<Record<string, number>>;
-}
-
-/**
- * How long one request to a hostname may take, in the same shape as
- * {@link FetchLimits} and resolved the same way -- an exact-hostname entry
- * if there is one, `default` otherwise.
- *
- * Per-hostname because the right ceiling is a property of the service, not
- * of this queue. A tracker that has not answered in thirty seconds is not
- * going to; the lookup service runs on a platform whose own hard ceiling is
- * five minutes, so cutting it off earlier turns an answer that was coming
- * into a failed job and a retry that will take just as long. One global
- * number cannot be right for both, and raising the global one to suit the
- * slowest service would let every hung tracker hold its slot ten times
- * longer (see `DEFAULT_TIMEOUT_MS`'s own doc for what that slot costs).
- */
-export interface FetchTimeouts {
-  /** Applied to any hostname without a specific entry. */
-  default: number;
-  /** Keyed by exact hostname, e.g. `{ 'openmetadata.nexus': 300_000 }`. */
-  perHost?: Readonly<Record<string, number>>;
-}
-
-/**
- * A limit of 0 or below is not "disable this host" -- handed to
- * `createBoundedQueue`, it would make `running >= limit` true before any
- * request to that hostname has ever run, so the very first one queues
- * behind a slot nothing will ever grant. Nothing later would observe that:
- * no error, no timeout, just a promise that never settles.
- * `createBoundedQueue` rejects a bad limit too, but only once a hostname's
- * first request builds its queue, and only by value. Checking here, at
- * `createHostFetch` construction, rejects it immediately and names which
- * config key -- `'default'` or the hostname -- is at fault, rather than
- * let a bad value surface invisibly whenever that hostname's first request
- * happens to be made.
- */
-function assertValidLimit(name: string, value: number): void {
-  // `isValidLimit` rather than a second copy of the comparison: the rule is
-  // the queue's, and only the message is this layer's, which is what names
-  // the offending config key for whoever has to fix it.
-  if (!isValidLimit(value)) {
-    throw new Error(`fetch limit for '${name}' must be an integer of at least 1, got ${value}`);
-  }
-}
-
-function assertValidLimits(limits: FetchLimits | undefined): void {
-  if (!limits) return;
-  assertValidLimit('default', limits.default);
-  for (const [hostname, value] of Object.entries(limits.perHost ?? {})) {
-    assertValidLimit(hostname, value);
-  }
-}
-
-/**
- * A timeout of 0 or below, a fraction, or `NaN` is the same class of mistake
- * `assertValidLimit` above exists for, and the same answer: refuse it at
- * construction, by name and value. Left unchecked, every one of them
- * constructs silently and then fails every single request afterwards:
- * probed directly, `0` gives a signal already aborting, so every request
- * times out instantly, while `-1`, `1.5` and `NaN` throw a `RangeError`
- * about "delay" from inside `AbortSignal.timeout` -- naming neither this
- * parameter nor this function, so the value that caused it appears nowhere
- * in the diagnosis.
- */
-function assertValidTimeout(name: string, value: number): void {
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`fetch timeout "${name}" must be an integer of at least 1, got ${value}`);
-  }
-}
-
-/**
- * Every timeout checked at construction, by name, for the reason
- * {@link assertValidLimits} checks every limit: a bad per-hostname entry is
- * otherwise invisible until that hostname's first request, and then fails
- * without saying which config key was wrong.
- */
-function assertValidTimeouts(timeouts: FetchTimeouts | undefined): void {
-  if (!timeouts) return;
-  assertValidTimeout('default', timeouts.default);
-  for (const [hostname, value] of Object.entries(timeouts.perHost ?? {})) {
-    assertValidTimeout(hostname, value);
-  }
-}
-
-/**
- * How long one request may take before it is aborted -- 1.x's own number
- * (`FETCH_TIMEOUT_MS` in `packages/core/src/feeds/fetch-feed.ts`), applied
- * here rather than at each call site so that every caller of
- * `json`/`bytes`/`text` gets it without having to remember to. Measured from
- * the call, not from the moment a hostname slot is granted, so the time spent
- * queued counts against it too -- see `fetched` below for why that is where
- * the signal is armed.
- *
- * Without it, a request that never settles is the one failure nothing above
- * this can survive: it would hold its hostname's own queue slot, and with it
- * one of the dispatcher's concurrency slots (`jobs/dispatcher.ts`), for as
- * long as the process runs. `Host.stop()` abandons an in-flight handler
- * rather than waiting on it, so a hang here no longer keeps
- * `SIGINT`/`SIGTERM` from ending the process -- it would only starve that
- * one slot of ever running anything else.
- */
-const DEFAULT_TIMEOUT_MS = 30_000;
-
-/**
  * Requests are queued per hostname with a configurable number allowed to run
  * at once. The hostname is computed from the url in `json`/`bytes` and
  * passed into `enqueue`, never accepted from the caller as its own
  * parameter, so a plugin has no way to opt out of its queue -- that stays a
  * property of this function, not a habit a caller could skip. What is
- * configurable is only how many requests to that hostname may be in flight
- * together; the default is one, so every caller that never sets `limits`
- * behaves exactly as before.
+ * configurable is how many requests to that hostname may be in flight
+ * together, and how long one may take.
  *
- * `timeouts` carries the same shape for how long a request may take. A
- * plugin cannot reach either one -- it holds only `HostFetch` -- so both
- * stay properties of the host's configuration rather than something a
- * caller can opt out of. `main.ts` is the only production caller that sets
- * them; a test sets `timeouts.default` low to watch a hung request actually
- * time out without waiting the full thirty seconds.
+ * Those two numbers come from two resolver functions, `limitFor` and
+ * `timeoutFor`, rather than from values fixed at construction;
+ * `fetch/settings.ts` is where the real ones are built. `limitFor` is asked
+ * on every enqueue and again as every request settles, so a changed limit
+ * applies at the next enqueue or the next completion to that hostname,
+ * whichever comes first, and waiters are released (or held back) under it
+ * then; until one of those happens, `snapshot().limit` stays at the old
+ * value.
+ * `timeoutFor` is asked when a request starts, so a changed timeout reaches
+ * every request that has not yet started. A plugin cannot reach either one
+ * -- it holds only `HostFetch` -- so both stay properties of the host's
+ * configuration rather than something a caller can opt out of.
  */
 export function createHostFetch(
   deps: {
     fetch: typeof globalThis.fetch;
-    limits?: FetchLimits;
-    timeouts?: FetchTimeouts;
+    /** How many requests to `hostname` may run at once. Asked on every enqueue and every completion; see `fetch/settings.ts`. */
+    limitFor: (hostname: string) => number;
+    /** How long one request to `hostname` may take. Asked when the request starts, not when it is enqueued. */
+    timeoutFor: (hostname: string) => number;
     /** Called when a request is enqueued, starts or settles; `main.ts` wires the event hub. */
     onChange?: () => void;
   },
 ): QueuedFetch {
-  assertValidLimits(deps.limits);
-  assertValidTimeouts(deps.timeouts);
-  const timeouts = deps.timeouts;
-
-  /** This hostname's ceiling: its own entry if it has one, `default` otherwise. */
-  function timeoutFor(hostname: string): number {
-    return timeouts?.perHost?.[hostname] ?? timeouts?.default ?? DEFAULT_TIMEOUT_MS;
-  }
+  const timeoutFor = deps.timeoutFor;
 
   // One `BoundedQueue` per hostname, built lazily on that hostname's first
-  // request so a hostname never mentioned in `deps.limits` never gets an
-  // entry it doesn't need.
+  // request.
   interface HostState {
     queue: BoundedQueue;
-    limit: number;
     waiting: Set<ActivityRequest>;
     inFlight: Set<ActivityRequest>;
   }
@@ -230,10 +114,8 @@ export function createHostFetch(
     const existing = hosts.get(hostname);
     if (existing) return existing;
 
-    const limit = deps.limits?.perHost?.[hostname] ?? deps.limits?.default ?? 1;
     const created: HostState = {
-      queue: createBoundedQueue(limit),
-      limit,
+      queue: createBoundedQueue(deps.limitFor(hostname)),
       waiting: new Set(),
       inFlight: new Set(),
     };
@@ -242,7 +124,21 @@ export function createHostFetch(
   }
 
   function enqueue<T>(hostname: string, task: () => Promise<T>): Promise<T> {
-    return hostFor(hostname).queue.run(task);
+    const state = hostFor(hostname);
+    // Re-read on every request so a saved change is in force for this
+    // request's slot decision. `setLimit` with the same value is a no-op.
+    state.queue.setLimit(deps.limitFor(hostname));
+    return state.queue.run(async () => {
+      try {
+        return await task();
+      } finally {
+        // Re-read again as this request settles, before `run`'s own
+        // `finally` frees the slot: that release then starts waiters under
+        // the current limit, so a lowered limit holds them back and a raised
+        // one lets them go without waiting for another request to arrive.
+        state.queue.setLimit(deps.limitFor(hostname));
+      }
+    });
   }
 
   /**
@@ -266,7 +162,9 @@ export function createHostFetch(
    * request the service would have answered. A per-hostname ceiling is a
    * statement about that service's own behaviour, and queue position is not
    * part of it. Armed here, `timeoutMs` means how long the *request* may
-   * take, which is the only thing the far end's number describes.
+   * take, which is the only thing the far end's number describes. The number
+   * is read there too, so a ceiling saved while a request waited is the one
+   * it runs under.
    *
    * **What bounds total wall time instead.** Not this. A caller that passes
    * no signal has no bound on `queue wait + timeoutMs`, and the depth of a
@@ -275,7 +173,8 @@ export function createHostFetch(
    * signal, composed below: every plugin call originates in a job, and
    * `run-job.ts` races the handler against `JOB_TIMEOUT_MS`, passing that
    * signal down (see `openmetadata/src/client.ts`'s `signal` doc). That
-   * ceiling is deliberately above the largest per-hostname timeout, so a
+   * ceiling, `JOB_TIMEOUT_MS`, is deliberately above `FETCH_TIMEOUT_MAX_MS`,
+   * the largest per-hostname timeout an operator can configure, so a
    * slow service fails as a timeout naming the url rather than as a job
    * killed for running long -- two very different things to read in a log.
    * A caller outside a job, passing no signal, is the one shape with no
@@ -314,7 +213,6 @@ export function createHostFetch(
     const hostname = new URL(url).hostname;
     const state = hostFor(hostname);
     const record: ActivityRequest = { method: init?.method ?? 'GET', target: targetOf(url) };
-    const timeoutMs = timeoutFor(hostname);
     const callerSignal = init?.signal ?? undefined;
     // Aborted in the `finally` below, which is what detaches the listener:
     // otherwise every completed request would leave one attached to a
@@ -324,6 +222,7 @@ export function createHostFetch(
       state.waiting.add(record);
       deps.onChange?.();
       return await enqueue(hostname, () => {
+        const timeoutMs = timeoutFor(hostname);
         state.waiting.delete(record);
         state.inFlight.add(record);
         deps.onChange?.();
@@ -378,13 +277,17 @@ export function createHostFetch(
       return fetched(url, init, (res) => res.text());
     },
 
+    seen(): readonly string[] {
+      return [...hosts.keys()];
+    },
+
     snapshot(): readonly ActivityHost[] {
       return [...hosts.entries()]
         .filter(([, state]) => state.waiting.size > 0 || state.inFlight.size > 0)
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([hostname, state]) => ({
           hostname,
-          limit: state.limit,
+          limit: state.queue.limit(),
           inFlight: [...state.inFlight],
           waiting: [...state.waiting],
         }));

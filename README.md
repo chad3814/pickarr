@@ -165,7 +165,14 @@ key inside one is a boot failure rather than a setting that silently does nothin
 {
   "server": { "host": "0.0.0.0", "port": 7676 },
   "database": { "path": "/config/pickarr.db" },
-  "secrets": { "baseDir": "/run/secrets" }
+  "secrets": { "baseDir": "/run/secrets" },
+  "fetch": {
+    "default": { "concurrency": 1, "timeoutMs": 30000 },
+    "hosts": {
+      "openmetadata.nexus": { "concurrency": 4, "timeoutMs": 300000 },
+      "cdn.theporndb.net": { "concurrency": 3 }
+    }
+  }
 }
 ```
 
@@ -179,6 +186,12 @@ key inside one is a boot failure rather than a setting that silently does nothin
 | `server.ipAddressHeaders` | *(none)* | Headers to read the client address from, in order. Absent leaves the library default, `x-forwarded-for`. |
 | `database.path` | `/config/pickarr.db` | The SQLite file. Artwork is stored in a directory derived from it. |
 | `secrets.baseDir` | `/run/secrets` | Where the secrets chain looks for files. |
+| `fetch.default.concurrency` | `1` | Requests Pickarr runs at once to any host without its own entry. 1 to 64. |
+| `fetch.default.timeoutMs` | `30000` | How long one request to such a host may take. 1000 to 300000. |
+| `fetch.hosts.<hostname>.concurrency` | *(inherits)* | The same, for one exact hostname. Lowercase, no port. |
+| `fetch.hosts.<hostname>.timeoutMs` | *(inherits)* | The same. The lookup service's hostname gets 4 and 300000 when it has no entry. |
+
+The `fetch` section is also edited from the Settings page, whose changes apply to the next request and are written back to this file. A hand edit to the `fetch` section while the host runs is not read until the next boot, and the next save from the Settings page overwrites it; every other section is kept.
 
 An absent file and an empty one are the same thing. A file that does not parse is
 **not**: reading a hand-edit with a trailing comma as "no configuration" would boot on

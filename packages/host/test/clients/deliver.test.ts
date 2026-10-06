@@ -556,6 +556,7 @@ test("a SABnzbd delete refused at HTTP 200 leaves the row unreclaimed, and the n
   let calls = 0;
   const fetch: QueuedFetch = {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(): Promise<T> {
       calls += 1;
       // Refused on the first pass, accepted on the second: SABnzbd answers

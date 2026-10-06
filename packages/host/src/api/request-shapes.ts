@@ -1,15 +1,17 @@
-import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMappingInput, IdentifyRequest } from '@pickarr/contract';
+import type { AddDownloadClientInput, AddFeedInput, AddMappingInput, EditMappingInput, FetchHostPatch, IdentifyRequest } from '@pickarr/contract';
 import type { SaveDestinationInput } from '../media/destinations.ts';
 
 /**
- * The shape guard for every write route's body -- one `is*Body` predicate
- * per `POST`/`PATCH`/`PUT` route, plus `destinationBodyFrom` for the one
- * body with an optional field a predicate cannot honestly express.
+ * The shape guard for every write route's body -- an `is*Body` predicate
+ * per `POST`/`PATCH`/`PUT` route, except the two bodies with optional
+ * fields a predicate cannot honestly express: `destinationBodyFrom` and
+ * `fetchHostPatchFrom` read those instead, returning the body as its typed
+ * input, or `undefined` for a body of the wrong shape.
  *
  * Split out of `server.ts` (issue #89): body-shape validation is not
- * routing. None of these checks a field's *value* -- only that it is
- * present and of the right primitive type -- because the value-level
- * invariants belong to whichever host function the route hands the body to:
+ * routing. None of these checks a field's *value* -- only that a required
+ * one is present and that each is of the right primitive type -- because
+ * the value-level invariants belong to whichever host function the route hands the body to:
  * per `server.ts`'s module doc, no business rule belongs in a shape guard
  * either.
  */
@@ -245,4 +247,27 @@ export function destinationBodyFrom(value: unknown): SaveDestinationInput | unde
   }
   if (typeof value.unmatchedDir !== 'string') return undefined;
   return { root: value.root, shape: value.shape, unmatchedDir: value.unmatchedDir };
+}
+
+/** A number or `null` for a patch field; anything else is the wrong shape. Range is `fetch/settings.ts`'s rule. */
+function isPatchField(value: unknown): value is number | null {
+  return value === null || typeof value === 'number';
+}
+
+/**
+ * The body of `PUT /api/fetch-hosts/:hostname`. Each of the two fields may
+ * be absent, `null`, or a number; an absent field is left out of the
+ * result rather than set to `undefined`, which is what lets the settings
+ * object tell "leave it" from "clear it".
+ */
+export function fetchHostPatchFrom(value: unknown): FetchHostPatch | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const concurrency = 'concurrency' in value ? value.concurrency : undefined;
+  const timeoutMs = 'timeoutMs' in value ? value.timeoutMs : undefined;
+  if (concurrency !== undefined && !isPatchField(concurrency)) return undefined;
+  if (timeoutMs !== undefined && !isPatchField(timeoutMs)) return undefined;
+  return {
+    ...(concurrency === undefined ? {} : { concurrency }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+  };
 }

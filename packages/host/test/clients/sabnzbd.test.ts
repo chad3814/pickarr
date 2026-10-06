@@ -26,6 +26,7 @@ function makeConfig(overrides: Partial<SabnzbdConfig> = {}): SabnzbdConfig {
 function fakeQueuedFetch(handler: (url: string, init?: RequestInit) => Promise<unknown>): QueuedFetch {
   return {
     snapshot: () => [],
+    seen: () => [],
     async json<T>(url: string, init?: RequestInit): Promise<T> {
       const body: unknown = await handler(url, init);
       return body as T;
@@ -219,7 +220,7 @@ function tick(): Promise<void> {
 
 test('the request goes through the queue, so a second call to the same host waits', async () => {
   const track = trackingFetch();
-  const hostFetch = createHostFetch({ fetch: track.fetchFn });
+  const hostFetch = createHostFetch({ fetch: track.fetchFn, limitFor: () => 1, timeoutFor: () => 30_000 });
   const config = makeConfig({ baseUrl: 'http://sab.example', apiKey: 'queue-key' });
   const client = createSabnzbdClient(config, hostFetch);
 

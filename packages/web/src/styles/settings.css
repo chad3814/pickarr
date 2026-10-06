@@ -678,3 +678,48 @@ ul[aria-labelledby='destinations-heading'] > li > [role='alert'] p {
   font-weight: 600;
   color: var(--color-error);
 }
+
+/* The Fetching section (2026-10-06): one row per host, two short numeric fields. */
+ul[aria-label='Fetch hosts'] {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+ul[aria-label='Fetch hosts'] > li form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+ul[aria-label='Fetch hosts'] > li form > div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+ul[aria-label='Fetch hosts'] > li input {
+  inline-size: 7ch;
+}
+
+/*
+ * A refused save in a Fetching row, and a failed load of the whole section.
+ * `Fetching.tsx` renders both as a `role='alert'` `<div>` around a `<p>`:
+ * the row's as a sibling of its `<form>` inside the `<li>`, the load's as a
+ * direct child of the `<section>`. Same treatment as the Destinations
+ * refusal above -- `--color-error`, `--text-body`, weight 600.
+ */
+ul[aria-label='Fetch hosts'] > li > [role='alert'],
+section[aria-labelledby='fetching-heading'] > [role='alert'] {
+  margin: var(--space-2) 0 0;
+}
+
+ul[aria-label='Fetch hosts'] > li > [role='alert'] p,
+section[aria-labelledby='fetching-heading'] > [role='alert'] p {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--color-error);
+}

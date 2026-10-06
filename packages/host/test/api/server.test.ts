@@ -13,6 +13,9 @@ import { migrateHost } from '../../src/db/migrate.ts';
 import type { HostDb } from '../../src/db/open.ts';
 import { openTestDatabase, setSyncChangedListener } from '../../src/db/open.ts';
 import type { MappingRefusal } from '../../src/clients/mappings.ts';
+import { createFetchSettings } from '../../src/fetch/settings.ts';
+import { fetchConfigSchema, type FetchConfig } from '../../src/config/schemas.ts';
+import type { ConfigHandle } from '../../src/config/instance.ts';
 import { createSyncEvents, type SyncEvents } from '../../src/sync/events.ts';
 import {
   ADD_DOWNLOAD_CLIENT_REFUSALS,
@@ -38,6 +41,20 @@ import {
   ROUTES,
   createReadServer,
 } from '../../src/api/server.ts';
+
+/** A `FetchSettings` over memory, so a route test needs no config file. */
+function memoryFetchSettings(initial: unknown = {}) {
+  let current: FetchConfig = fetchConfigSchema.parse(initial);
+  const written: FetchConfig[] = [];
+  const handle: ConfigHandle<FetchConfig> = {
+    get current() { return current; },
+    async update(next) { written.push(next); current = next; },
+  };
+  return {
+    settings: createFetchSettings({ handle, lookupHostname: 'openmetadata.nexus', lookupFallback: { concurrency: 4, timeoutMs: 300_000 } }),
+    written,
+  };
+}
 
 /**
  * One database behind both handles: `raw` for the fixtures and the read
@@ -268,6 +285,8 @@ async function start(
     events: eventsFor(raw),
     // No fetch layer in this file: an empty queue, unless a test hands in a snapshot.
     fetchSnapshot: () => [],
+    fetchSettings: memoryFetchSettings().settings,
+    fetchSeen: () => [],
     host,
     port: 0,
     webRoot: MISSING_WEB_ROOT,
@@ -3929,6 +3948,111 @@ test('GET /api/activity is guarded session-first and answers the activity shape'
     const body: unknown = await ok.json();
     assert.ok(typeof body === 'object' && body !== null && 'jobs' in body && 'fetches' in body);
     assert.ok(!/payload/i.test(JSON.stringify(body)));
+  } finally {
+    await server.close();
+  }
+});
+
+test('GET /api/fetch-hosts answers the effective table, merging configured and seen hostnames', async () => {
+  const { raw, db } = setup();
+  const { settings } = memoryFetchSettings({ hosts: { 'cdn.example': { concurrency: 5 } } });
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, {
+    fetchSettings: settings,
+    fetchSeen: () => ['tracker.example', 'cdn.example'],
+  });
+  try {
+    const response = await get(server, '/api/fetch-hosts', cookie);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      default: { concurrency: 1, timeoutMs: 30000 },
+      hosts: [
+        { hostname: 'cdn.example', concurrency: 5, timeoutMs: 30000, inherited: { concurrency: false, timeoutMs: true }, configured: true },
+        { hostname: 'tracker.example', concurrency: 1, timeoutMs: 30000, inherited: { concurrency: true, timeoutMs: true }, configured: false },
+      ],
+    });
+    assert.equal((await get(server, '/api/fetch-hosts', ANONYMOUS)).status, 401);
+  } finally {
+    await server.close();
+  }
+});
+
+test('PUT /api/fetch-hosts/:hostname patches one field, keeps the other, and answers the row', async () => {
+  const { raw, db } = setup();
+  const { settings, written } = memoryFetchSettings({ hosts: { 'cdn.example': { timeoutMs: 60_000 } } });
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, { fetchSettings: settings });
+  try {
+    const answer = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 3 });
+    assert.equal(answer.status, 200);
+    assert.deepEqual(JSON.parse(answer.text), {
+      hostname: 'cdn.example', concurrency: 3, timeoutMs: 60000, inherited: { concurrency: false, timeoutMs: false }, configured: true,
+    });
+    assert.deepEqual(written, [{ default: { concurrency: 1, timeoutMs: 30000 }, hosts: { 'cdn.example': { concurrency: 3, timeoutMs: 60000 } } }]);
+
+    const cleared = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: null, timeoutMs: null });
+    assert.equal(cleared.status, 200);
+    assert.equal((JSON.parse(cleared.text) as { configured: boolean }).configured, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test('PUT /api/fetch-hosts/default writes the pair and refuses null', async () => {
+  const { raw, db } = setup();
+  const { settings } = memoryFetchSettings();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, { fetchSettings: settings });
+  try {
+    const ok = await send(server, 'PUT', '/api/fetch-hosts/default', cookie, { concurrency: 2, timeoutMs: 20000 });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(JSON.parse(ok.text), { concurrency: 2, timeoutMs: 20000 });
+    assert.equal(settings.limitFor('anything.example'), 2, 'the live value follows');
+
+    const refused = await send(server, 'PUT', '/api/fetch-hosts/default', cookie, { concurrency: 2, timeoutMs: null });
+    assert.equal(refused.status, 400);
+    assert.deepEqual(JSON.parse(refused.text), { refusal: 'default-required' });
+  } finally {
+    await server.close();
+  }
+});
+
+test('PUT /api/fetch-hosts refusals and statuses', async () => {
+  const { raw, db } = setup();
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly);
+  try {
+    for (const [segment, status] of [['CDN.example', 404], ['a.b:80', 404], ['a%20b', 404]] as const) {
+      const answer = await send(server, 'PUT', `/api/fetch-hosts/${segment}`, cookie, { concurrency: 2 });
+      assert.equal(answer.status, status, segment);
+      assert.deepEqual(JSON.parse(answer.text), { error: 'unknown route' }, segment);
+    }
+    const shape = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 'two' });
+    assert.equal(shape.status, 400);
+    assert.deepEqual(JSON.parse(shape.text), { refusal: 'invalid-shape' });
+    const notObject = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, 7);
+    assert.deepEqual(JSON.parse(notObject.text), { refusal: 'invalid-shape' });
+    const range = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 65 });
+    assert.equal(range.status, 400);
+    assert.deepEqual(JSON.parse(range.text), { refusal: 'invalid-concurrency' });
+    const timeout = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { timeoutMs: 1 });
+    assert.deepEqual(JSON.parse(timeout.text), { refusal: 'invalid-timeout' });
+    assert.equal((await send(server, 'PUT', '/api/fetch-hosts/cdn.example', ANONYMOUS, { concurrency: 2 })).status, 401);
+    assert.equal((await send(server, 'POST', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 2 })).status, 405);
+  } finally {
+    await server.close();
+  }
+});
+
+test('a config write that throws is a 500 and the live values are untouched', async () => {
+  const { raw, db } = setup();
+  const handle: ConfigHandle<FetchConfig> = {
+    current: fetchConfigSchema.parse({ hosts: { 'cdn.example': { concurrency: 3 } } }),
+    update: async () => { throw new Error('disk full'); },
+  };
+  const settings = createFetchSettings({ handle, lookupHostname: 'openmetadata.nexus', lookupFallback: { concurrency: 4, timeoutMs: 300_000 } });
+  const { server, cookie } = await startSignedIn(raw, db, moviesOnly, { fetchSettings: settings });
+  try {
+    const answer = await send(server, 'PUT', '/api/fetch-hosts/cdn.example', cookie, { concurrency: 7 });
+    assert.equal(answer.status, 500);
+    assert.deepEqual(JSON.parse(answer.text), { error: 'read failed' });
+    assert.equal(settings.limitFor('cdn.example'), 3);
   } finally {
     await server.close();
   }

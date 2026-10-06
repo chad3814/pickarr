@@ -70,6 +70,8 @@ import { postDownloadClient } from '../settings/AddDownloadClient.tsx';
 import { mappingSubmit } from '../settings/postMapping.ts';
 import { feedRemovalSubmit } from '../settings/postFeedRemoval.ts';
 import { destinationSubmit } from '../settings/postDestination.ts';
+import { fetchFetchHosts } from '../settings/useFetchHosts.ts';
+import { fetchHostSubmit } from '../settings/putFetchHost.ts';
 import { postPick } from '../library/postPick.ts';
 import { Activities } from '../activity/Activities.tsx';
 import { fetchActivity } from '../activity/fetchActivity.ts';
@@ -317,8 +319,9 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           }
         />
         {/*
-          `postFeed`, `postDownloadClient`, `mappingSubmit` and
-          `destinationSubmit` are the real `submit`s this screen needs
+          `postFeed`, `postDownloadClient`, `mappingSubmit`,
+          `destinationSubmit` and `fetchHostSubmit` are the real `submit`s
+          this screen needs, and `fetchFetchHosts` its one REST read
           (`../settings/AddFeed.tsx`'s own doc on why each is injected
           rather than defaulted): wired here, explicitly, rather than given
           a default inside either form that would perform network I/O
@@ -326,7 +329,7 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
           three verbs -- the add, the edit and the remove a path mapping
           needs -- because all three are the same seam and threading them
           separately would put five submit props on this one element.
-          `Settings` is the whole screen -- both sections -- and its own
+          `Settings` is the whole screen -- every section -- and its own
           docblock says why it is a parent component rather than a second
           section inside `Feeds`.
         */}
@@ -341,6 +344,8 @@ export function Shell({ onUnauthenticated, deps }: ShellProps): ReactElement {
                 submitDownloadClient={postDownloadClient}
                 submitMapping={mappingSubmit}
                 submitDestination={destinationSubmit}
+                fetchHosts={fetchFetchHosts}
+                submitFetchHost={fetchHostSubmit}
               />
             )
           }

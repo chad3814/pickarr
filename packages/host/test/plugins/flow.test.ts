@@ -127,6 +127,7 @@ const unusedDownloads: DownloadClients = {
 function queued(fetch: { json: QueuedFetch['json']; bytes: QueuedFetch['bytes'] }): QueuedFetch {
   return {
     snapshot: () => [],
+    seen: () => [],
     json: fetch.json,
     bytes: fetch.bytes,
     text: async () => { throw new Error('fetch.text: this flow polls no feed'); },

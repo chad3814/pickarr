@@ -237,6 +237,8 @@ function setup(
     // share this one queue.
     fetch: createHostFetch({
       fetch: opts.imagesFetch ? combineFetch(service.fetch, opts.imagesFetch) : service.fetch,
+      limitFor: () => 1,
+      timeoutFor: () => 30_000,
     }),
     downloads: () => unusedDownloads,
     secrets: unusedSecrets,
@@ -1278,7 +1280,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   const dying = createHost({
     raw,
     db,
-    fetch: createHostFetch({ fetch: hangOnFirstRequest(service.fetch) }),
+    fetch: createHostFetch({ fetch: hangOnFirstRequest(service.fetch), limitFor: () => 1, timeoutFor: () => 30_000 }),
     downloads: () => unusedDownloads,
     secrets: unusedSecrets,
     artworkDir: unusedArtworkDir,
@@ -1314,7 +1316,7 @@ test('the whole flow resumes after a simulated crash mid-lookup', async () => {
   const restarted = createHost({
     raw,
     db,
-    fetch: createHostFetch({ fetch: service.fetch }),
+    fetch: createHostFetch({ fetch: service.fetch, limitFor: () => 1, timeoutFor: () => 30_000 }),
     downloads: () => unusedDownloads,
     secrets: unusedSecrets,
     artworkDir: unusedArtworkDir,

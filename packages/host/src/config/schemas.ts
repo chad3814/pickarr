@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { assertOriginOnly } from '../origin.ts';
+import { isHostname } from '../fetch/hostname.ts';
 
 /** Where the config file lives when `PICKARR_CONFIG` says nothing -- beside the database's own default. */
 export const DEFAULT_CONFIG_PATH = '/config/pickarr.config.json';
@@ -113,6 +114,49 @@ export const databaseConfigSchema = z.object({
 export const secretsConfigSchema = z.object({
   baseDir: z.string().min(1).default('/run/secrets'),
 }).strict().prefault({});
+
+/** The two values the fetch queue applied to every hostname before this section existed. */
+const FETCH_DEFAULTS = { concurrency: 1, timeoutMs: 30_000 } as const;
+
+const fetchConcurrency = z.number().int().min(1).max(64);
+const fetchTimeoutMs = z.number().int().min(1_000).max(300_000);
+
+/**
+ * One hostname's entry. Either field may be absent, and an absent field
+ * inherits `default`; `fetch/settings.ts` removes an entry that has
+ * neither rather than writing `{}`.
+ */
+const fetchHostEntrySchema = z.object({
+  concurrency: fetchConcurrency.optional(),
+  timeoutMs: fetchTimeoutMs.optional(),
+}).strict();
+
+/**
+ * `fetch`: how many requests may run at once per hostname and how long one
+ * may take. Keys of `hosts` are exact hostnames (`isHostname`): the queue
+ * keys on `new URL(url).hostname`, so a key with a port or an uppercase
+ * letter would match no request, and refusing it at boot names the key
+ * instead of letting it do nothing. `default` is refused as a key too: it is
+ * the path segment that addresses the default row, so an entry under it
+ * could never be read or saved. `timeoutMs` stops at 300 000, below
+ * `JOB_TIMEOUT_MS` (`jobs/run-job.ts`).
+ */
+export const fetchConfigSchema = z.object({
+  default: z.object({
+    concurrency: fetchConcurrency.default(FETCH_DEFAULTS.concurrency),
+    timeoutMs: fetchTimeoutMs.default(FETCH_DEFAULTS.timeoutMs),
+  }).strict().prefault({}),
+  hosts: z.record(
+    z.string().refine(
+      (key) => isHostname(key) && key !== 'default',
+      { message: 'fetch.hosts keys must be bare lowercase hostnames (and not the reserved `default`)' },
+    ),
+    fetchHostEntrySchema,
+  ).default({}),
+}).strict().prefault({});
+
+export type FetchConfig = z.infer<typeof fetchConfigSchema>;
+export type FetchHostEntry = z.infer<typeof fetchHostEntrySchema>;
 
 export type ServerConfig = z.infer<typeof serverConfigSchema>;
 export type DatabaseConfig = z.infer<typeof databaseConfigSchema>;
