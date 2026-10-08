@@ -197,7 +197,6 @@ import {
 import { isApiPath, staticAnswer } from './static-route.ts';
 import { backfillAnswer, bootstrapAnswer, syncAnswer } from './sync-route.ts';
 import type { EnableFeedOutcome, FeedRefusal, RemoveFeedOutcome } from '../feeds/remove.ts';
-import { inspect } from 'node:util';
 
 /**
  * The port the shipped process listens on when `PICKARR_READ_API_PORT` says nothing.
@@ -1241,13 +1240,7 @@ export const ROUTES: readonly Route[] = [
     open: false,
     // 202 for the reason the single retry gives: nothing is finished when
     // this answers, the lookups are queued.
-    answer: async ({ deps }) => {
-        try {
-            return json(202, await deps.retryAllUnresolved());
-        } catch (err) {
-            deps.log(`retryAllUnresolved failed:\n${inspect(err, true, null)}`);
-        }
-    },
+    answer: async ({ deps }) => json(202, await deps.retryAllUnresolved()),
   },
   {
     path: '/api/unmatched/:id/retry',

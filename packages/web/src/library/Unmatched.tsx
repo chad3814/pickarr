@@ -835,7 +835,7 @@ export function UnmatchedPage({ source, retry, retryAll, pick, identify }: Omit<
  * reflowing the page as they arrive. The outcome is a `role="status"`
  * line with real text, so what is announced is what is shown.
  */
-function RetryAllButton({ unresolved, submit }: { unresolved: number; submit: RetryAllSubmit }): ReactElement {
+function RetryAllButton({ unresolved, submit }: { unresolved: number[]; submit: RetrySubmit }): ReactElement {
   const [pending, setPending] = useState(false);
   const [outcome, setOutcome] = useState<{ accepted: number } | { message: string } | null>(null);
 
@@ -843,10 +843,18 @@ function RetryAllButton({ unresolved, submit }: { unresolved: number; submit: Re
     setPending(true);
     setOutcome(null);
     try {
-      const answer = await submit();
-      setOutcome('refusal' in answer ? { message: RETRY_ALL_REFUSAL_MESSAGES[answer.refusal] } : { accepted: answer.accepted });
+      const answers = await Promise.allSettled(unresolved.map(id => submit(id)));
+      const successes = answers.filter(a => a.status === 'fulfilled');
+      const failures = answers.filter(a => a.status === 'rejected');
+      if (failures.length > 0) {
+        setOutcome({ message: RETRY_ALL_REFUSAL_MESSAGES.offline });
+        return;
+      }
+      const refusals = successes.filter(a => 'refusal' in a.value);
+      const accepted = successes.filter(a => !('refusal' in a.value));
+      setOutcome(refusals.length > 0 ? { message: refusals.map(r => RETRY_ALL_REFUSAL_MESSAGES[r.refusal]).join(", ") } : { accepted: accepted.length });
     } catch {
-      setOutcome({ message: RETRY_ALL_REFUSAL_MESSAGES.offline });
+        setOutcome({ message: RETRY_ALL_REFUSAL_MESSAGES.offline });
     } finally {
       setPending(false);
     }
@@ -861,7 +869,7 @@ function RetryAllButton({ unresolved, submit }: { unresolved: number; submit: Re
           void retryAll();
         }}
       >
-        {pending ? `Retrying ${unresolved}\u2026` : `Retry all unresolved (${unresolved})`}
+        {pending ? `Retrying ${unresolved.length}\u2026` : `Retry all unresolved (${unresolved.length})`}
       </button>
       {outcome !== null && 'accepted' in outcome && (
         <span role="status" aria-label="Retry all outcome">
@@ -1034,8 +1042,8 @@ export function Unmatched({ source, retry, retryAll, pick, identify, term = '', 
       <button type="button" onClick={reveal}>{held} new</button>
     </span>
   ) : null;
-  const unresolvedCount = (rows ?? []).filter((row) => row.lookupState === 'unresolved').length;
-  const retryAllControl = rows === undefined ? null : <RetryAllButton unresolved={unresolvedCount} submit={retryAll} />;
+  const unresolved = (rows ?? []).filter((row) => row.lookupState === 'unresolved');
+  const retryAllControl = rows === undefined ? null : <RetryAllButton unresolved={unresolved.map(u => u.id)} submit={retry} />;
 
   // Wakes on a plain update to any release *currently listed here* -- the
   // one shape `subscribeInserts` cannot see (this file's docblock). Torn
