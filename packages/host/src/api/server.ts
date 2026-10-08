@@ -1241,7 +1241,6 @@ export const ROUTES: readonly Route[] = [
     open: false,
     // 202 for the reason the single retry gives: nothing is finished when
     // this answers, the lookups are queued.
-    const answer = await deps.retryAllUnresolved();
     answer: async ({ deps }) => {
         try {
             return json(202, await deps.retryAllUnresolved());
